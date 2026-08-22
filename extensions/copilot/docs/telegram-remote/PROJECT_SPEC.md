@@ -1,0 +1,258 @@
+# Project Specification
+
+## 1. Project name
+
+Working name: **Telegram Remote Control for VS Code Copilot**.
+
+The final public name should avoid implying official GitHub or Microsoft endorsement.
+
+## 2. Problem statement
+
+VS Code Copilot already provides a mature, actively maintained coding-agent implementation with native session management, tools, permissions, model support, worktrees, checkpoints, IDE integration and GitHub Mission Control remote control.
+
+The missing capability for this project is a lightweight remote interface through Telegram that can:
+
+- observe an active Copilot CLI-backed agent session,
+- send new prompts,
+- steer work already in progress,
+- answer permissions and agent questions,
+- stop execution,
+- switch session/model/mode where supported,
+- expose useful progress from a mobile device,
+- optionally use local/BYOK models supported by the Copilot runtime.
+
+Rebuilding the Copilot extension would unnecessarily duplicate a large and battle-tested codebase. The project therefore extends the upstream implementation with the smallest possible Telegram-specific patch.
+
+## 3. Product objective
+
+> Add Telegram as a first-class remote-control transport for Copilot CLI sessions hosted inside VS Code while preserving upstream Copilot behavior and minimizing downstream source divergence.
+
+## 4. Architecture objective
+
+The intended abstraction is transport-neutral:
+
+```text
+Copilot SDK Session
+      |
+      +-- VS Code native UI
+      +-- GitHub Mission Control (upstream)
+      +-- Telegram Remote Transport (this project)
+      +-- future transports
+```
+
+Telegram must not become intertwined with agent execution logic. Telegram-specific code should live in its own module and communicate with existing session services through a narrow adapter/coordinator.
+
+## 5. Primary users
+
+Initial target:
+
+- developers running VS Code Desktop,
+- developers who already use Copilot agent/CLI sessions,
+- users who want to monitor or steer coding work from a phone,
+- users who may use both GitHub-hosted and compatible local/BYOK models.
+
+V1 is optimized for a single developer controlling their own workstation rather than a multi-tenant SaaS deployment.
+
+## 6. Functional requirements
+
+### FR-1 Telegram connectivity
+
+The extension SHALL connect to Telegram through a bot token using Bot API long polling by default.
+
+The extension SHALL NOT require an inbound network port, public IP, webhook server or Tailscale for normal operation.
+
+### FR-2 Pairing and authorization
+
+The extension SHALL allow only explicitly paired Telegram users to control VS Code sessions.
+
+Pairing SHALL use a short-lived challenge generated locally by the extension and validated against the Telegram numeric user ID.
+
+### FR-3 Session discovery and control
+
+The extension SHALL expose Copilot CLI-backed sessions available through the existing session service.
+
+The user SHALL be able to:
+
+- view sessions,
+- select a session,
+- start a session where supported,
+- resume an existing session,
+- send a normal prompt,
+- steer an in-progress turn,
+- stop/abort execution.
+
+### FR-4 Live activity
+
+The extension SHALL project useful SDK session events to Telegram, including as available:
+
+- assistant intent/status,
+- assistant text deltas,
+- readable reasoning events,
+- tool start/progress/complete,
+- permission requests,
+- user-input requests,
+- subagent activity,
+- session state changes,
+- usage/context information,
+- errors.
+
+The UI SHALL avoid flooding Telegram. High-frequency events SHALL be coalesced into an editable activity/status message where practical.
+
+### FR-5 Permission handling
+
+When the SDK requests permission, the Telegram user SHALL be able to approve or deny the request with structured callback buttons.
+
+Where the upstream VS Code UI also presents the same permission, the design SHOULD support a first-valid-response-wins pattern similar to upstream Mission Control behavior.
+
+### FR-6 User questions and plan approval
+
+Agent questions, plan-exit/approval requests and other supported interactive inputs SHALL be representable remotely where the underlying SDK/session exposes a response API.
+
+### FR-7 Models
+
+The Telegram UI SHALL display the currently selected model.
+
+The project SHOULD use the Copilot SDK model catalogue/session model APIs as the authoritative source for Copilot CLI-backed agent sessions.
+
+VS Code language-model discovery MAY be used as supplementary information but MUST NOT imply that every `vscode.lm` model automatically supports the full Copilot agent harness.
+
+### FR-8 Local/BYOK providers
+
+The design SHALL remain compatible with Copilot SDK/CLI BYOK providers, including compatible OpenAI-style endpoints such as vLLM/Ollama when supported by the current runtime.
+
+Provider credentials SHALL NOT be sent through Telegram.
+
+### FR-9 Workspace and session context
+
+Telegram SHALL show enough context to prevent accidental operations in the wrong project, including where available:
+
+- workspace/folder,
+- repository,
+- branch,
+- session title/id,
+- current mode,
+- current model.
+
+### FR-10 Settings and onboarding
+
+The extension SHALL provide a first-run setup flow for:
+
+- proposed-API enablement when using a non-privileged downstream extension identity,
+- Telegram bot token entry,
+- Telegram pairing,
+- security defaults.
+
+Sensitive secrets SHALL use VS Code secret storage or an equivalently protected local mechanism.
+
+## 7. Non-functional requirements
+
+### NFR-1 Minimal upstream delta
+
+Upstream Copilot source modifications SHOULD be restricted to a small number of explicit integration seams. Most new code SHALL live under a dedicated Telegram module.
+
+### NFR-2 Upstream compatibility
+
+Every release SHALL record the upstream VS Code commit and Copilot extension version against which it was built.
+
+The project SHALL support regular rebase/sync against `microsoft/vscode`.
+
+### NFR-3 Fail closed
+
+If pairing, permission state, session routing or security state is ambiguous, remote actions SHALL be denied or ignored rather than guessed.
+
+### NFR-4 No silent command loss
+
+Every accepted Telegram control message SHALL result in one of:
+
+- acknowledgement/dispatch,
+- queued/steering state,
+- explicit rejection,
+- explicit error.
+
+### NFR-5 Recoverability
+
+Temporary Telegram failures, VS Code reloads and transient network errors SHOULD recover without corrupting the active Copilot session.
+
+### NFR-6 Testability
+
+Telegram transport, routing, permission mapping and event rendering SHALL be testable without a real Telegram account through mock Bot API and mock session interfaces.
+
+## 8. V1 scope
+
+V1 includes:
+
+- VS Code Desktop/local extension host.
+- Telegram Bot API long polling.
+- One configured Telegram bot.
+- Explicit Telegram user pairing/allowlist.
+- Existing Copilot CLI session discovery.
+- Session prompt and mid-turn steering.
+- Abort.
+- Activity projection.
+- Permission responses.
+- User-question responses.
+- Model/mode visibility and supported selection.
+- Basic session/workspace metadata.
+- Secure bot token storage.
+- Proposed-API first-run setup support.
+- VSIX packaging.
+- Upstream sync metadata.
+
+## 9. Explicit non-goals for V1
+
+- Reimplementing the Copilot agent runtime.
+- Replacing the native VS Code Copilot UI.
+- Screen scraping or UI automation.
+- Guaranteeing hidden chain-of-thought access.
+- Multi-user SaaS operation.
+- Multiple computers under one bot identity.
+- Slack/Teams/Discord transports.
+- Telegram Mini App.
+- Rich web dashboard.
+- Tailscale dependency.
+- Remote SSH/Dev Containers/Codespaces support guarantees.
+- Public Visual Studio Marketplace publication while proposed APIs remain required.
+
+## 10. Success criteria
+
+V1 is successful when a developer can:
+
+1. install the project VSIX,
+2. complete first-run setup,
+3. pair a Telegram account,
+4. select an existing Copilot CLI session,
+5. observe an agent executing work,
+6. send a steering instruction while it is working,
+7. approve/deny an operation remotely,
+8. answer an agent question remotely,
+9. stop the task remotely,
+10. return to VS Code and continue using the same underlying session without a parallel/reimplemented agent state.
+
+## 11. Technical principles
+
+1. **Reuse upstream first.** If Copilot already provides it, call it rather than recreating it.
+2. **Transport independence.** Agent/session logic must not depend on Telegram-specific types.
+3. **Structured commands.** Permissions and destructive actions use callback IDs/state, never natural-language guessing.
+4. **Explicit context.** Always show session/workspace identity on remote control screens.
+5. **Secure by default.** Unpaired users receive no session information.
+6. **Observable behavior, not hidden CoT.** Render reliable agent events and readable reasoning only when explicitly exposed.
+7. **Rebaseability over cleverness.** Prefer a slightly less elegant hook if it materially reduces modifications to upstream files.
+
+## 12. Upstream dependencies
+
+Primary source dependencies:
+
+- `ChatSessionsContrib` service composition: [`../../src/extension/chatSessions/vscode-node/chatSessions.ts`](../../src/extension/chatSessions/vscode-node/chatSessions.ts)
+- Session service: [`../../src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts`](../../src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts)
+- Active SDK session wrapper / Mission Control: [`../../src/extension/chatSessions/copilotcli/node/copilotcliSession.ts`](../../src/extension/chatSessions/copilotcli/node/copilotcliSession.ts)
+- SDK/models: [`../../src/extension/chatSessions/copilotcli/node/copilotCli.ts`](../../src/extension/chatSessions/copilotcli/node/copilotCli.ts)
+- MCP bridge: [`../../src/extension/chatSessions/copilotcli/node/mcpHandler.ts`](../../src/extension/chatSessions/copilotcli/node/mcpHandler.ts)
+
+External specifications:
+
+- https://docs.github.com/en/copilot/how-tos/copilot-sdk/features
+- https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events
+- https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/steering-and-queueing
+- https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/session-persistence
+- https://code.visualstudio.com/api/advanced-topics/using-proposed-api
+- https://core.telegram.org/bots/api
