@@ -1,0 +1,302 @@
+# Security Model
+
+Remote control of a coding agent is a privileged capability. Telegram messages can indirectly cause file writes, shell commands, network access and Git operations, so the Telegram transport must be treated as a security boundary rather than a convenience UI.
+
+## 1. Security objectives
+
+The system MUST:
+
+- reject all unpaired Telegram users,
+- prevent stale/replayed callbacks from authorizing a different action,
+- preserve upstream Copilot permission semantics,
+- keep secrets off Telegram,
+- prevent accidental cross-session/workspace control,
+- make destructive actions explicit,
+- fail closed when state is ambiguous,
+- provide a local emergency disable mechanism.
+
+## 2. Trust boundaries
+
+```mermaid
+flowchart LR
+    U[Telegram user] -->|untrusted network input| TG[Telegram Bot API]
+    TG -->|Updates| TA[Telegram transport]
+    TA --> AUTH[Pairing / authorization]
+    AUTH --> ROUTE[Command router]
+    ROUTE --> RC[Remote control coordinator]
+    RC --> CS[Copilot session]
+    CS --> FS[Workspace / shell / Git / network tools]
+
+    SEC[VS Code SecretStorage] --> TA
+```
+
+Trust levels:
+
+- Telegram Bot API is an external transport.
+- Incoming update content is untrusted until authorized and validated.
+- A paired Telegram user is trusted to request operations, but upstream permission policy still governs sensitive tool execution.
+- The Copilot session/runtime remains the authority for tool permissions and agent state.
+
+## 3. Pairing
+
+V1 pairing flow:
+
+1. Local user starts pairing from VS Code.
+2. Extension generates a cryptographically random, single-use challenge.
+3. Challenge has a short expiration.
+4. User sends `/pair <challenge>` to the configured bot.
+5. Extension validates the challenge and captures Telegram's numeric `from.id`.
+6. Numeric user ID is stored as authorized.
+7. Challenge is destroyed immediately.
+
+Requirements:
+
+- Never authorize by Telegram username/display name.
+- Never make the bot token itself sufficient for user authorization.
+- Pairing challenge attempts are rate-limited.
+- Pairing responses do not expose workstation/session data until successful.
+
+## 4. Bot token handling
+
+The bot token is a secret with full control over the bot.
+
+Requirements:
+
+- store through VS Code `SecretStorage` where available,
+- never place the token in `settings.json`, logs, telemetry, Telegram messages or repository files,
+- redact URLs/headers that may contain the token,
+- provide a local command to forget/revoke the configured token,
+- never send the bot token to Copilot/model context.
+
+## 5. Authorization pipeline
+
+Every incoming update follows:
+
+```text
+Update received
+  -> validate Bot API shape
+  -> deduplicate update_id
+  -> identify numeric Telegram user ID
+  -> check pairing/allowlist
+  -> validate callback/request token if applicable
+  -> resolve selected session
+  -> check action allowed in current state
+  -> dispatch
+```
+
+No session metadata should be returned to unauthorized users.
+
+## 6. Session isolation
+
+Every remote action is bound to a selected session ID.
+
+Destructive callbacks should additionally bind:
+
+```text
+telegramUserId
+sessionId
+requestId/toolCallId where applicable
+nonce
+expiry
+```
+
+If the active selection changes, old callbacks should be rejected.
+
+Telegram status messages should show enough context to prevent operator mistakes:
+
+```text
+Session: <title>
+Workspace: <folder/repo>
+Branch: <branch when available>
+Model: <model>
+```
+
+## 7. Permissions
+
+Telegram must not bypass upstream permission handling.
+
+A Telegram approval is a user-interface response to an existing SDK permission request, not a blanket permission to execute arbitrary actions.
+
+V1 response choices should be conservative:
+
+- Approve once
+- Deny
+
+Session-wide or persistent allow rules can be introduced later only when their semantics match upstream permission policy.
+
+### First-valid-response semantics
+
+If local VS Code and Telegram both display the same permission, only one resolution may win. The losing UI is invalidated.
+
+### Stale callbacks
+
+A callback is accepted only if its request is still pending and all correlation fields match. Otherwise the bot returns a harmless "request expired/already resolved" response.
+
+## 8. User-input requests
+
+Freeform responses to an agent question must be explicitly bound to the pending question state. An arbitrary new Telegram message must not be interpreted as an answer to a sensitive question unless the router is in a known pending-input state or the user explicitly replies/selects the prompt.
+
+## 9. Command injection and callback payloads
+
+Telegram callback data is untrusted.
+
+Requirements:
+
+- do not embed shell commands or file paths as blindly executable callback payloads,
+- use opaque action IDs/nonces that map to server-side pending state,
+- validate lengths and expected action types,
+- never `eval` callback content,
+- do not construct shell commands through string concatenation from Telegram data.
+
+## 10. Telegram formatting safety
+
+Agent/tool output may contain Markdown/HTML characters.
+
+The renderer must either:
+
+- escape content correctly for the selected Telegram parse mode, or
+- send plain text when safety is uncertain.
+
+Do not allow tool output to inject unintended links/buttons or alter callback routing.
+
+## 11. Secret and data leakage controls
+
+Agent tool output can contain credentials, environment variables, repository secrets or private code.
+
+V1 controls:
+
+- prefer summaries for verbose tool results,
+- do not forward environment dumps by default,
+- redact known credential/token formats where practical,
+- truncate oversized outputs,
+- allow debug verbosity only as an explicit setting,
+- log locally with redaction,
+- document that Telegram transport sends selected agent/session content through Telegram infrastructure.
+
+A future enterprise mode may require stronger configurable redaction/DLP controls.
+
+## 12. Files and attachments
+
+P1 attachment rules:
+
+- download only after authorization,
+- place files in a controlled temporary directory first,
+- sanitize filenames and never trust remote paths,
+- enforce size limits,
+- do not overwrite repository files implicitly,
+- require explicit user/agent action to move an attachment into the workspace,
+- delete temporary files according to a retention policy.
+
+## 13. Git and shell
+
+Telegram does not receive direct shell or Git credentials.
+
+Sensitive operations follow the same local tool/permission system as native Copilot.
+
+Recommended defaults:
+
+| Operation | Default remote policy |
+| --- | --- |
+| Read workspace file | follow upstream policy |
+| Write workspace file | follow upstream permission/sandbox policy |
+| Shell command | follow upstream permission/sandbox policy |
+| Delete file | explicit permission |
+| Commit | explicit permission if exposed remotely |
+| Push | explicit permission; P2 |
+| Force push / destructive Git | deny by default |
+
+## 14. Network model
+
+Long polling requires outbound HTTPS only. This reduces attack surface compared with running a public webhook endpoint.
+
+V1 MUST NOT automatically expose a local HTTP server to the public Internet.
+
+Tailscale is not required. If a later dashboard uses Tailscale, it receives a separate threat model.
+
+## 15. Local kill switches
+
+Required local controls:
+
+- Disable Telegram remote control immediately.
+- Unpair/revoke Telegram user.
+- Forget bot token.
+- Stop active remote-controlled task.
+
+The local VS Code UI is authoritative over remote enablement.
+
+## 16. Logging and audit
+
+Logs SHOULD include:
+
+- Telegram update ID (not secret token),
+- authorized user ID in a privacy-conscious form,
+- action type,
+- selected session ID,
+- permission request/result,
+- errors,
+- connection/retry state.
+
+Logs MUST NOT include bot tokens, provider API keys or unredacted credential-bearing headers.
+
+P1 should add an audit record such as:
+
+```text
+timestamp | user | session | action | request | outcome
+```
+
+## 17. Denial of service and rate limits
+
+Implement bounded limits for:
+
+- update processing queue,
+- pairing attempts,
+- Telegram message edits,
+- status refreshes,
+- attachment size,
+- pending permission/question registry,
+- output length.
+
+High-frequency SDK events must be coalesced before Bot API calls.
+
+## 18. Proposed API setup security
+
+The extension may offer to modify VS Code `argv.json` after explicit consent.
+
+Rules:
+
+- show the exact extension ID being enabled,
+- read/parse existing JSONC safely,
+- preserve unrelated runtime arguments,
+- create a backup before modifying,
+- never enable proposed APIs globally when enabling only this extension is sufficient,
+- never silently change `argv.json`,
+- explain that a full restart is required.
+
+## 19. Threat table
+
+| Threat | Mitigation |
+| --- | --- |
+| Stranger messages the bot | Numeric-ID allowlist; no metadata before pairing |
+| Pairing code guessed | Cryptographic random code, short expiry, attempt throttling |
+| Old Allow button reused | Request ID + nonce + pending-state validation |
+| Wrong session receives prompt | Explicit selected-session state + session validation |
+| Telegram output leaks secret | Summary/redaction/truncation policy |
+| Bot token leaked in logs | SecretStorage + structured redaction |
+| Update replay | Track Telegram `update_id` |
+| Telegram flood | Queue/rate limits |
+| Remote user bypasses Copilot permission | Telegram only resolves real pending SDK permission requests |
+| Extension disabled remotely by attacker | Local enablement/disable state remains authoritative |
+| Public inbound service exposed | Long polling; no inbound listener in V1 |
+
+## 20. Security acceptance criteria
+
+Before V1 release:
+
+- unauthorized-user tests pass,
+- expired/replayed callback tests pass,
+- wrong-session callback tests pass,
+- duplicate Telegram update tests pass,
+- bot token never appears in test logs,
+- permission response race is deterministic and safe,
+- long-poll retry cannot spawn duplicate consumers,
+- proposed API setup never overwrites unrelated `argv.json` entries.
