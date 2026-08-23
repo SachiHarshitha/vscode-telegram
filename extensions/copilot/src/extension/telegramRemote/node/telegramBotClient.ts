@@ -84,6 +84,7 @@ export class TelegramBotClient implements ITelegramBotClient {
 			text,
 			reply_markup: options.replyMarkup,
 			disable_notification: options.disableNotification,
+			parse_mode: options.parseMode,
 		}, parseTelegramMessage);
 	}
 
@@ -96,6 +97,7 @@ export class TelegramBotClient implements ITelegramBotClient {
 			message_id: messageId,
 			text,
 			reply_markup: options.replyMarkup,
+			parse_mode: options.parseMode,
 		}, parseTelegramMessageOrTrue);
 	}
 

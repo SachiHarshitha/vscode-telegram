@@ -8,6 +8,7 @@ import { ILogService } from '../../../platform/log/common/logService';
 import { CancellationToken, CancellationTokenSource } from '../../../util/vs/base/common/cancellation';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
+import { isReplayableRemoteAgentEventType } from '../common/remoteAgentEvent';
 import {
 	IRemoteCommandContext,
 	IRemoteControlRegistry,
@@ -25,15 +26,6 @@ import {
 } from '../common/remoteControlTypes';
 
 const maxSeenEventIds = 10_000;
-const supportedPersistedEventTypes = new Set([
-	'user.message',
-	'assistant.message',
-	'assistant.turn_start',
-	'assistant.turn_complete',
-	'tool.execution_start',
-	'tool.execution_complete',
-]);
-
 interface ILogicalAttachment {
 	readonly transportId: string;
 	refCount: number;
@@ -49,7 +41,9 @@ interface ISessionBinding {
 	readonly session: IRemoteControlSession;
 	listener: IDisposable;
 	readonly normalizedById: Map<string, IRemoteControlSessionEvent>;
+	readonly normalizedIdOrder: string[];
 	readonly normalizedByObject: WeakMap<object, IRemoteControlSessionEvent>;
+	readonly syntheticIdPrefix: string;
 	lastEventId: string | null;
 	nextSyntheticEventId: number;
 }
@@ -64,6 +58,7 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 	private readonly bindingsBySessionId = new Map<string, ISessionBinding>();
 	private readonly commandHandlers = new Map<string, RemoteCommandHandler>();
 	private readonly trustedOrigins = new WeakSet<object>();
+	private nextBindingId = 0;
 
 	constructor(
 		@ILogService private readonly logService: ILogService,
@@ -79,7 +74,9 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 			session,
 			listener: undefined!,
 			normalizedById: new Map(),
+			normalizedIdOrder: [],
 			normalizedByObject: new WeakMap(),
+			syntheticIdPrefix: `${session.sessionId}:remote-event:${++this.nextBindingId}`,
 			lastEventId: null,
 			nextSyntheticEventId: 0,
 		};
@@ -277,7 +274,7 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		if (this.bindingsBySessionId.get(sessionId) !== binding) {
 			return;
 		}
-		const normalized = this.normalizeEvent(sessionId, binding, event);
+		const normalized = this.normalizeEvent(binding, event);
 		for (const attachment of this.attachmentsBySessionId.get(sessionId)?.values() ?? []) {
 			if (attachment.replaying) {
 				attachment.replayBuffer.push(normalized);
@@ -291,8 +288,8 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		attachment.replaying = true;
 		try {
 			for (const event of binding.session.getReplayEvents()) {
-				if (supportedPersistedEventTypes.has(event.type)) {
-					this.publishToAttachment(sessionId, attachment, this.normalizeEvent(sessionId, binding, event));
+				if (isReplayableRemoteAgentEventType(event.type)) {
+					this.publishToAttachment(sessionId, attachment, { ...this.normalizeEvent(binding, event), replay: true });
 				}
 			}
 		} finally {
@@ -303,14 +300,14 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		}
 	}
 
-	private normalizeEvent(sessionId: string, binding: ISessionBinding, event: SessionEvent): IRemoteControlSessionEvent {
+	private normalizeEvent(binding: ISessionBinding, event: SessionEvent): IRemoteControlSessionEvent {
 		const eventObject = event as object;
 		const byObject = binding.normalizedByObject.get(eventObject);
 		if (byObject) {
 			return byObject;
 		}
 
-		const raw = event as { readonly id?: unknown; readonly timestamp?: unknown; readonly parentId?: unknown; readonly ephemeral?: unknown; readonly type?: unknown; readonly data?: unknown };
+		const raw = event as { readonly id?: unknown; readonly timestamp?: unknown; readonly parentId?: unknown; readonly agentId?: unknown; readonly ephemeral?: unknown; readonly type?: unknown; readonly data?: unknown };
 		const rawId = typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : undefined;
 		if (rawId) {
 			const byId = binding.normalizedById.get(rawId);
@@ -320,18 +317,23 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 			}
 		}
 
-		const id = rawId ?? `${sessionId}:remote-event:${++binding.nextSyntheticEventId}`;
+		const id = rawId ?? `${binding.syntheticIdPrefix}:${++binding.nextSyntheticEventId}`;
 		const parentId = typeof raw.parentId === 'string' ? raw.parentId : binding.lastEventId;
 		const normalized: IRemoteControlSessionEvent = {
 			id,
 			timestamp: typeof raw.timestamp === 'string' ? raw.timestamp : new Date().toISOString(),
 			parentId: parentId ?? null,
+			agentId: typeof raw.agentId === 'string' ? raw.agentId : undefined,
 			ephemeral: typeof raw.ephemeral === 'boolean' ? raw.ephemeral : undefined,
 			type: typeof raw.type === 'string' ? raw.type : 'unknown',
 			data: raw.data,
 		};
 		binding.lastEventId = id;
 		binding.normalizedById.set(id, normalized);
+		binding.normalizedIdOrder.push(id);
+		while (binding.normalizedIdOrder.length > maxSeenEventIds) {
+			binding.normalizedById.delete(binding.normalizedIdOrder.shift()!);
+		}
 		binding.normalizedByObject.set(eventObject, normalized);
 		return normalized;
 	}

@@ -35,7 +35,9 @@ export interface IRemoteControlSessionEvent {
 	readonly id: string;
 	readonly timestamp: string;
 	readonly parentId: string | null;
+	readonly agentId?: string;
 	readonly ephemeral?: boolean;
+	readonly replay?: true;
 	readonly type: string;
 	readonly data: unknown;
 }

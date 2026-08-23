@@ -6,10 +6,10 @@
 import * as l10n from '@vscode/l10n';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
-import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import type { Event } from '../../../util/vs/base/common/event';
+import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport } from '../common/remoteControlTypes';
-import type { TelegramAnswerCallbackQueryOptions, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
+import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
 import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHandler } from './telegramService';
 
 /** Telegram Bot API transport; the contribution owns Phase 3 authorization and lifecycle policy. */
@@ -19,6 +19,7 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 	readonly themeIcon = 'radio-tower';
 
 	private readonly service: TelegramService;
+	private eventPublisher: Pick<IRemoteControlTransport, 'publish'> | undefined;
 	readonly onDidChangeStatus: Event<TelegramPollingStatus>;
 
 	constructor(
@@ -45,6 +46,10 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		return this.service.sendMessage(chatId, text, options);
 	}
 
+	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
+		return this.service.editMessageText(chatId, messageId, text, options);
+	}
+
 	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {
 		return this.service.answerCallbackQuery(callbackQueryId, options);
 	}
@@ -53,7 +58,19 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		return this.service.stop();
 	}
 
-	publish(_sessionId: string, _event: IRemoteControlSessionEvent): void {
-		// Phase 2 has no authorized chat/session binding, so registry events cannot be projected yet.
+	setEventPublisher(publisher: Pick<IRemoteControlTransport, 'publish'>): IDisposable {
+		if (this.eventPublisher) {
+			throw new Error('A Telegram event publisher is already registered.');
+		}
+		this.eventPublisher = publisher;
+		return toDisposable(() => {
+			if (this.eventPublisher === publisher) {
+				this.eventPublisher = undefined;
+			}
+		});
+	}
+
+	publish(sessionId: string, event: IRemoteControlSessionEvent): void | Promise<void> {
+		return this.eventPublisher?.publish(sessionId, event);
 	}
 }

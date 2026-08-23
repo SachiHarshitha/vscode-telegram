@@ -4,13 +4,15 @@
 >
 > Baseline validated against VS Code/Copilot source commit `58af001e0c7b342016db51cef2a026c7791f5d58` (August 2026).
 
-Phases 0-4 are implemented. Telegram networking is gated by versioned token-and-workspace consent, private-chat numeric authorization and native setup/kill-switch controls. An authorized chat can list and select an existing controller session, send native prompts/steering and stop its current Telegram-started task. Activity/event projection begins in Phase 5.
+Phases 0-5 are implemented. Telegram networking is gated by versioned token-and-workspace consent, private-chat numeric authorization and native setup/kill-switch controls. An authorized chat can list and select an existing controller session, send native prompts/steering, stop its current Telegram-started task, and receive bounded live/replayed activity updates.
 
 For the Phase 2 mock and opt-in real-bot tests, see [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md#real-bot-smoke-test) or run `script/telegram-remote/test-phase2.ps1` from the Copilot extension directory.
 
 For the Phase 3 transport/security regression suite, run `script/telegram-remote/test-phase3.ps1` from the Copilot extension directory. It never reads `.env` and does not contact Telegram.
 
 For the complete consent, visibility and Phase 4 routing regression suite, run `script/telegram-remote/test-phase4.ps1` from the Copilot extension directory. It also never reads `.env` or contacts Telegram.
+
+For the complete Phase 5 event projection/activity suite, run `script/telegram-remote/test-phase5.ps1` from the Copilot extension directory. It includes all Phase 4 regressions and uses deterministic in-memory Telegram activity tests only.
 
 ## Purpose
 

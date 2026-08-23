@@ -32,7 +32,7 @@ The goal is to make upgrade risk explicit.
 | Assistant streaming | `assistant.message_delta`, `assistant.message` | Copilot SDK | Yes | Telegram renderer coalesces deltas |
 | Intent/status | `assistant.intent` and session state events | Copilot SDK | Yes where exposed | Do not synthesize hidden reasoning |
 | Reasoning stream | `assistant.reasoning[_delta]` | Copilot SDK | Conditional | Model/provider may expose readable, opaque or no reasoning |
-| Tool activity | `tool.execution_*` | Copilot SDK | Yes | P0 |
+| Tool activity | `tool.execution_start`, `tool.execution_progress`, `tool.execution_partial_result`, `tool.execution_complete` | Copilot SDK 1.0.73 | Yes | Phase 5 uses only these verified event names |
 | Permission prompt | `permission.requested` | Copilot SDK/upstream | Yes | Remote callback must correlate request ID |
 | Permission response | registry result consumed by `CopilotCLISession`, then SDK `respondToPermission()` | Downstream seam + SDK | Yes | Do not expose raw SDK session to Telegram |
 | Agent question | `user_input.requested` | Copilot SDK | Yes | Choice/freeform input |
@@ -214,7 +214,7 @@ V1 relies on stable Bot API primitives:
 - bot identity validation (`getMe`),
 - optional file APIs later.
 
-Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. Phase 3 adds SecretStorage, private-chat pairing and authorization; Phase 3b adds the explicit versioned consent gate; Phase 4 uses the authorized update boundary for session selection and native prompt/steer/abort routing. Networking remains disabled by default.
+Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. Phase 3 adds SecretStorage, private-chat pairing and authorization; Phase 3b adds the explicit versioned consent gate; Phase 4 uses the authorized update boundary for session selection and native prompt/steer/abort routing; Phase 5 projects the verified registry event subset through bounded MarkdownV2 sends/edits. Networking remains disabled by default.
 
 Reference: https://core.telegram.org/bots/api
 

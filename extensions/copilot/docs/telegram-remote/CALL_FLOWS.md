@@ -303,16 +303,15 @@ flowchart LR
     B --> C[RemoteControlRegistry]
     C --> N[Remote event normalizer]
     N --> D{Event class}
-    D -->|high frequency| E[Coalescer/throttler]
-    D -->|interactive| F[Request registry]
-    D -->|state/error| G[Immediate notifier]
-    E --> H[Telegram renderer]
-    F --> H
-    G --> H
-    H --> I[Bot API]
+	D -->|high frequency/state/error| E[Renderer + bounded coalescer]
+	D -->|interactive| F[Request registry only]
+	E --> H[MarkdownV2 activity chunks]
+	H --> I[Bot API send/edit]
 ```
 
 Persisted SDK events may be replayed when attaching Telegram to an existing session. Ephemeral deltas should not be expected to exist after the fact.
+
+Phase 5 marks replay delivery explicitly, compacts it into the same bounded activity state as live events, and schedules at most one edit flush per second. The activity card retains at most eight actions, a bounded response/reasoning window and four 4,096-character messages. Every flush revalidates the active paired identity and selected session. Interactive permission and user-input requests never become generic activity cards.
 
 The session-lifetime hook is distinct from native request-scoped listeners, which are disposed after each request. Its disposable belongs to the registry session binding.
 

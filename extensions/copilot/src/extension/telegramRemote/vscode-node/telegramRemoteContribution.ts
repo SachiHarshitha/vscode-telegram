@@ -10,7 +10,7 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { IRemoteControlRegistry } from '../common/remoteControlTypes';
-import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
+import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramEditMessageTextOptions, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
 import { TelegramAuthorization, TelegramPairedIdentity } from '../node/telegramAuthorization';
 import { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration, TelegramCallbackRegistry } from '../node/telegramCallbackRegistry';
 import { TelegramConsent } from '../node/telegramConsent';
@@ -164,6 +164,10 @@ export class TelegramRemoteContribution extends Disposable {
 
 	sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
 		return this.transport.sendMessage(chatId, text, options);
+	}
+
+	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
+		return this.transport.editMessageText(chatId, messageId, text, options);
 	}
 
 	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {

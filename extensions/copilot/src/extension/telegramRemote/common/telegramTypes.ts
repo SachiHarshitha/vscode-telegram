@@ -68,10 +68,12 @@ export interface TelegramGetUpdatesOptions {
 export interface TelegramSendMessageOptions {
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
 	readonly disableNotification?: boolean;
+	readonly parseMode?: 'MarkdownV2';
 }
 
 export interface TelegramEditMessageTextOptions {
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+	readonly parseMode?: 'MarkdownV2';
 }
 
 export interface TelegramAnswerCallbackQueryOptions {

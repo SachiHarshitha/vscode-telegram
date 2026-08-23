@@ -59,7 +59,7 @@ describe('RemoteControlRegistry', () => {
 		const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
 		const transport = new TestTransport('missionControl');
 		registry.registerTransport(transport);
-		const replayEvent = event('replay', 'user.message', 'replay');
+		const replayEvent = event('replay', 'session.start', 'replay');
 		const liveEvent = event('live', 'assistant.message', 'replay');
 		const session = new TestSession('session-1', () => {
 			session.emit(liveEvent);
@@ -69,8 +69,10 @@ describe('RemoteControlRegistry', () => {
 		registry.attachTransport(session.sessionId, transport.id);
 		await drainPublishQueue();
 
-		expect(transport.events.map(item => item.id)).toEqual(['replay', 'live']);
-		expect(transport.events[0].parentId).toBeNull();
+		expect(transport.events.map(item => ({ id: item.id, parentId: item.parentId, replay: item.replay }))).toEqual([
+			{ id: 'replay', parentId: null, replay: true },
+			{ id: 'live', parentId: 'replay', replay: true },
+		]);
 	});
 
 	it('filters unsupported persisted events without filtering the live stream', async () => {
@@ -96,7 +98,7 @@ describe('RemoteControlRegistry', () => {
 		const second = store.add(new TestTransport('second'));
 		store.add(registry.registerTransport(first));
 		store.add(registry.registerTransport(second));
-		const firstEvent = event('one', 'user.message');
+		const firstEvent = event('one', 'assistant.turn_start');
 		const secondEvent = event('two', 'assistant.message', 'one');
 		const firstBinding = registry.bindSession(new TestSession('session-1', () => [firstEvent]));
 		store.add(registry.attachTransport('session-1', first.id));

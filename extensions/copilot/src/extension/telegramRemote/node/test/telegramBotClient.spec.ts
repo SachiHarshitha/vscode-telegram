@@ -109,8 +109,8 @@ describe('TelegramBotClient', () => {
 		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
 
 		const updates = await client.getUpdates({ offset: 11, limit: 10, timeoutSeconds: 0 });
-		const sent = await client.sendMessage(99, 'hello', { replyMarkup, disableNotification: true });
-		const edited = await client.editMessageText(99, 7, 'edited', { replyMarkup });
+		const sent = await client.sendMessage(99, 'hello', { replyMarkup, disableNotification: true, parseMode: 'MarkdownV2' });
+		const edited = await client.editMessageText(99, 7, 'edited', { replyMarkup, parseMode: 'MarkdownV2' });
 		const markup = await client.editMessageReplyMarkup(99, 7);
 		const answered = await client.answerCallbackQuery('callback-1', { text: 'Done' });
 
@@ -134,8 +134,8 @@ describe('TelegramBotClient', () => {
 			answered: true,
 			requests: [
 				{ method: 'getUpdates', body: { offset: 11, limit: 10, timeout: 0 } },
-				{ method: 'sendMessage', body: { chat_id: 99, text: 'hello', reply_markup: replyMarkup, disable_notification: true } },
-				{ method: 'editMessageText', body: { chat_id: 99, message_id: 7, text: 'edited', reply_markup: replyMarkup } },
+				{ method: 'sendMessage', body: { chat_id: 99, text: 'hello', reply_markup: replyMarkup, disable_notification: true, parse_mode: 'MarkdownV2' } },
+				{ method: 'editMessageText', body: { chat_id: 99, message_id: 7, text: 'edited', reply_markup: replyMarkup, parse_mode: 'MarkdownV2' } },
 				{ method: 'editMessageReplyMarkup', body: { chat_id: 99, message_id: 7, reply_markup: { inline_keyboard: [] } } },
 				{ method: 'answerCallbackQuery', body: { callback_query_id: 'callback-1', text: 'Done' } },
 			],

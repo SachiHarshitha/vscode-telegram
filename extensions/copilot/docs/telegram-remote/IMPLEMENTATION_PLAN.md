@@ -11,7 +11,7 @@ This plan was revalidated against the repository at:
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Phases 0 through 4 implemented and validated; consent-gated Telegram setup, native visibility, session selection and native prompt/steer/abort routing are active, while event projection remains blocked until Phase 5 |
+| Implementation status | Phases 0 through 5 implemented and validated; consent-gated setup, native visibility, session routing and bounded Telegram activity projection are active; interactive permission/question workflows remain deferred to Phase 6 |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -474,17 +474,50 @@ extensions/copilot/script/telegram-remote/test-phase4.ps1                       
 
 ## 9. Phase 5 — event projection and Telegram activity UI
 
+**Status:** Implemented and validated on 2026-08-23. The selected authorized chat now receives a bounded, editable activity card projected from the existing wrapper-lifetime registry feed; permission and question events remain registry workflows for Phase 6.
+
+### Implementation record
+
+- `remoteAgentEvent.ts` is the single typed projection boundary. It validates and bounds the exact `@github/copilot` 1.0.73 shapes used here, preserves event ID/timestamp/parent/agent metadata, distinguishes replay delivery from live delivery, and drops malformed, unknown and interactive request events.
+- Revalidation corrected two stale planning assumptions: the pinned SDK exposes real `tool.execution_progress` and `tool.execution_partial_result` events, and its terminal turn event is `assistant.turn_end`, not `assistant.turn_complete`. The replay allowlist now uses those verified names through the shared projector contract.
+- The registry marks persisted replay delivery explicitly, buffers/deduplicates replay/live overlap, keeps its attachment seen-ID and normalization windows bounded at 10,000 IDs, and uses wrapper-unique synthetic ID prefixes. Logical attachment state continues across wrapper recreation.
+- `TelegramEventRenderer` covers assistant intent/text/exposed readable reasoning, tool start/progress/partial/complete, subagent lifecycle, session lifecycle/errors/usage and abort. Agent-scoped assistant streams are not mixed into the root response, and permission/user-input events are not rendered as generic cards.
+- Activity output uses MarkdownV2 with complete dynamic-text escaping, conservative credential redaction, a maximum of eight recent actions, 12,000 response characters, 2,000 reasoning characters and four Bot API messages of at most 4,096 characters each.
+- `TelegramActivityCoalescer` validates the current paired identity and selected session again at publish and flush time, compacts replay without per-event sends, caps edits to one flush per second, flushes final live output at the earliest permitted time, and cancels pending output on session switch, deselection, disable, revoke or identity change.
+- `TelegramService`, `TelegramTransport` and `TelegramRemoteContribution` now expose the already-implemented Bot API edit primitive through narrow typed methods. The transport delegates registry publication only to the composition-owned coalescer.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 5 PowerShell runner | Passed: 22 files, 211 tests via `script/telegram-remote/test-phase5.ps1` |
+| Projection contract | Passed: exact persisted/live variants, replay metadata, malformed/missing field rejection, interactive-event exclusion and pinned progress/turn names |
+| Renderer snapshots | Passed: all supported variants, missing optionals, MarkdownV2 escaping, credential redaction, truncation and four-chunk Bot API bounds |
+| Coalescer behavior | Passed: high-frequency delta collapse, one-second edit cap, bounded action/output memory, final flush, session switch cleanup, local block cancellation and sanitized API failures |
+| Regression coverage | Passed: all Phase 4 routing, security, consent, transport, native dispatcher, Mission Control, wrapper bridge and controller-session tests |
+| TypeScript / lint / extension bundle | Passed: extension typecheck, targeted ESLint with zero warnings and extension compile |
+| Source-workbench smoke | Passed: patch 7 / Phase 5 activity-ready marker observed with workspace trust disabled; networking remained consent-gated and no Telegram API request was emitted |
+
 ### Files
 
 ```text
 extensions/copilot/src/extension/telegramRemote/common/remoteAgentEvent.ts                (new)
 extensions/copilot/src/extension/telegramRemote/node/telegramEventRenderer.ts             (new)
 extensions/copilot/src/extension/telegramRemote/node/telegramActivityCoalescer.ts          (new)
+extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts               (modify)
+extensions/copilot/src/extension/telegramRemote/common/telegramTypes.ts                     (modify)
+extensions/copilot/src/extension/telegramRemote/node/remoteControlRegistry.ts               (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramBotClient.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts                      (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts   (modify)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts                    (modify)
+extensions/copilot/script/telegram-remote/test-phase5.ps1                                    (new)
 ```
 
 ### Implement
 
-- Normalize only SDK event names/types verified in the pinned runtime. The current source uses `assistant.message_delta`, `assistant.message`, `tool.execution_start`, `tool.execution_complete`, session lifecycle/usage, and subagent events; do not invent a tool-progress event when the SDK does not expose one.
+- Normalize only SDK event names/types verified in the pinned runtime. The pinned 1.0.73 schema exposes `assistant.message_delta`, `assistant.message`, `tool.execution_start`, `tool.execution_progress`, `tool.execution_partial_result`, `tool.execution_complete`, session lifecycle/usage, and subagent events.
 - Separate persisted replay types from ephemeral live types.
 - Preserve upstream event ID/timestamp when present and maintain a bounded per-binding seen-ID window across wrapper recreation.
 - Coalesce deltas, cap Telegram edit frequency, cap recent actions/history, split output within Bot API limits, and escape Telegram formatting.

@@ -14,6 +14,7 @@ import {
 	ITelegramBotClient,
 	TelegramAnswerCallbackQueryOptions,
 	TelegramBotApiError,
+	TelegramEditMessageTextOptions,
 	TelegramMessage,
 	TelegramPollingFailureKind,
 	TelegramPollingStatus,
@@ -150,6 +151,14 @@ export class TelegramService extends Disposable {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
 		return client.sendMessage(chatId, text, options);
+	}
+
+	async editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
+		const client = this.activeRun?.client;
+		if (!client) {
+			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
+		}
+		return client.editMessageText(chatId, messageId, text, options);
 	}
 
 	async answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {

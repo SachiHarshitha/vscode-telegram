@@ -233,6 +233,7 @@ describe('TelegramService', () => {
 		client.getUpdates.mockImplementation(options => waitForAbort(options?.signal));
 		const sentMessage: TelegramMessage = { message_id: 1, date: 1, chat: { id: 202, type: 'private' }, text: 'paired' };
 		const sendMessage = vi.spyOn(client, 'sendMessage').mockResolvedValue(sentMessage);
+		const editMessageText = vi.spyOn(client, 'editMessageText').mockResolvedValue(true);
 		const answerCallbackQuery = vi.spyOn(client, 'answerCallbackQuery').mockResolvedValue(true);
 		const runtime = new TestRuntime(client);
 		const service = new TelegramService(storageRoot, runtime, new TestFetcher(), logService);
@@ -242,9 +243,11 @@ describe('TelegramService', () => {
 
 		await service.start(botToken, async () => { }, validated);
 		await service.sendMessage(202, 'paired');
+		await service.editMessageText(202, 1, 'activity', { parseMode: 'MarkdownV2' });
 		await service.answerCallbackQuery('callback-1', { text: 'Done' });
 		expect(validated).toHaveBeenCalledWith(bot);
 		expect(sendMessage).toHaveBeenCalledWith(202, 'paired', undefined);
+		expect(editMessageText).toHaveBeenCalledWith(202, 1, 'activity', { parseMode: 'MarkdownV2' });
 		expect(answerCallbackQuery).toHaveBeenCalledWith('callback-1', { text: 'Done' });
 		await service.stop();
 		await expect(service.sendMessage(202, 'stopped')).rejects.toMatchObject({ kind: 'api' });

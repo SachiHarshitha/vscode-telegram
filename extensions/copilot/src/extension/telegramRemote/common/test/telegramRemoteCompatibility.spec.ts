@@ -39,7 +39,7 @@ describe('Telegram remote compatibility', () => {
 
 	it('has a stable diagnostics marker and patch revision', () => {
 		expect(TELEGRAM_REMOTE_BUILD_MARKER).toBe('vscode-telegram/telegram-remote');
-		expect(TELEGRAM_REMOTE_PATCH_REVISION).toBe(6);
+		expect(TELEGRAM_REMOTE_PATCH_REVISION).toBe(7);
 	});
 
 	it('defines fail-closed Telegram settings with bounded runtime values', () => {
