@@ -2,6 +2,8 @@
 
 Remote control of a coding agent is a privileged capability. Telegram messages can indirectly cause file writes, shell commands, network access and Git operations, so the Telegram transport must be treated as a security boundary rather than a convenience UI.
 
+> **Confidentiality warning:** Telegram bot conversations are not end-to-end encrypted Secret Chats. Prompts, code excerpts, file paths, commands, diffs, tool output and repository metadata sent to the bot transit Telegram infrastructure and are available to the bot endpoint. Do not enable this transport for content whose policy forbids that disclosure.
+
 ## 1. Security objectives
 
 The system MUST:
@@ -9,6 +11,7 @@ The system MUST:
 - reject all unpaired Telegram users,
 - prevent stale/replayed callbacks from authorizing a different action,
 - preserve upstream Copilot permission semantics,
+- prevent every Telegram action from raising the session permission level to `autoApprove` or `autopilot`,
 - keep secrets off Telegram,
 - prevent accidental cross-session/workspace control,
 - make destructive actions explicit,
@@ -36,6 +39,7 @@ Trust levels:
 - Incoming update content is untrusted until authorized and validated.
 - A paired Telegram user is trusted to request operations, but upstream permission policy still governs sensitive tool execution.
 - The Copilot session/runtime remains the authority for tool permissions and agent state.
+- Telegram is not a trusted confidential storage boundary; authorization prevents other bot users from controlling the workstation but does not provide end-to-end encryption against the transport provider.
 
 ## 3. Pairing
 
@@ -122,7 +126,20 @@ V1 response choices should be conservative:
 - Approve once
 - Deny
 
-Session-wide or persistent allow rules can be introduced later only when their semantics match upstream permission policy.
+Telegram MUST NOT expose session-wide approval, persistent allow rules, `setPermissionLevel()`, `autoApprove` or `autopilot`. A remote mode change that would implicitly raise permission is rejected. Any future expansion requires a new security review and a locally configured ceiling that remote input cannot increase.
+
+### Transport-origin isolation
+
+The current upstream code recognizes Mission Control through a string prefix (`source.startsWith('command-')`) and may apply the shared Mission Control mode to that request. The multi-transport implementation MUST NOT use that string as an authorization or permission signal.
+
+Requirements:
+
+- the registry constructs a discriminated internal origin for each accepted remote command,
+- Telegram updates/callback payloads cannot provide or override `transportId`, origin kind or effective mode,
+- only a `missionControl` origin may consume Mission Control mode,
+- a Telegram-origin prompt remains non-elevated even when the same session has active Mission Control state in `autopilot`,
+- SDK `SendOptions.source` is correlation/telemetry metadata only,
+- Telegram source strings use a distinct namespace and never start with `command-`, as defense in depth.
 
 ### First-valid-response semantics
 
@@ -172,6 +189,8 @@ V1 controls:
 - allow debug verbosity only as an explicit setting,
 - log locally with redaction,
 - document that Telegram transport sends selected agent/session content through Telegram infrastructure.
+
+The renderer should show a one-time local disclosure before Telegram is enabled and the setup guide should repeat it. Pairing is authorization, not encryption.
 
 A future enterprise mode may require stronger configurable redaction/DLP controls.
 
@@ -258,9 +277,11 @@ Implement bounded limits for:
 
 High-frequency SDK events must be coalesced before Bot API calls.
 
-## 18. Proposed API setup security
+Only one `getUpdates` consumer may hold the poller lease for a bot token. Competing VS Code windows/processes must coordinate through a lock/lease or the later consumer must fail closed with a visible diagnostic. Silent competing pollers can lose or reorder control messages.
 
-The extension may offer to modify VS Code `argv.json` after explicit consent.
+## 18. Future independent-extension proposed API setup security
+
+A future own-ID independent extension experiment may offer to modify VS Code `argv.json` after explicit consent. The current bundled-fork setup does not.
 
 Rules:
 
@@ -285,6 +306,10 @@ Rules:
 | Update replay | Track Telegram `update_id` |
 | Telegram flood | Queue/rate limits |
 | Remote user bypasses Copilot permission | Telegram only resolves real pending SDK permission requests |
+| Remote user escalates session to auto-approval/autopilot | No remote permission-level mutation; approve-once/deny only; reject privilege-raising mode changes |
+| Telegram request is misclassified as Mission Control | Registry-created typed origin; mode derived from origin kind, never from a transport-supplied `source` prefix |
+| User assumes bot chat is E2E encrypted | Prominent setup/runtime disclosure; minimize/redact projected content |
+| Two extension hosts poll the same bot | Singleton poller lease; second consumer fails visibly |
 | Extension disabled remotely by attacker | Local enablement/disable state remains authoritative |
 | Public inbound service exposed | Long polling; no inbound listener in V1 |
 
@@ -298,5 +323,10 @@ Before V1 release:
 - duplicate Telegram update tests pass,
 - bot token never appears in test logs,
 - permission response race is deterministic and safe,
+- Telegram cannot raise permission level directly or through a mode change,
+- Telegram-origin requests do not inherit Mission Control mode when `_mcState.mcMode` is `autopilot`,
+- a Telegram payload containing `command-*` cannot alter its typed origin or effective permission level,
 - long-poll retry cannot spawn duplicate consumers,
-- proposed API setup never overwrites unrelated `argv.json` entries.
+- a competing process/window cannot acquire a second poller lease,
+- setup displays and records acknowledgement of the non-E2E confidentiality warning,
+- if the optional independent-extension setup is built, it never overwrites unrelated `argv.json` entries.

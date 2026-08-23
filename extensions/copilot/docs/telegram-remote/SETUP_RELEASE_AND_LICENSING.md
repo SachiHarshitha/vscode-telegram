@@ -2,27 +2,44 @@
 
 > This document records engineering/release constraints and is not legal advice.
 
-## 1. Release strategy
+## 1. Two distinct packaging architectures
 
-The current architecture depends on proposed VS Code APIs already used by the upstream Copilot extension. A downstream extension identity is therefore not a normal Marketplace extension today.
+### Current implementation target: bundled fork
 
-Recommended release phases:
+```text
+VS Code source fork
+  -> bundled, modified Copilot extension
+  -> RemoteControlRegistry
+  -> Mission Control + Telegram transports
+```
 
-1. **Development/private VSIX** — prove Telegram control against the tracked upstream commit.
-2. **Developer preview VSIX** — publish signed/checksummed release artifacts outside Marketplace with exact upstream compatibility metadata.
-3. **Marketplace release only if/when the required VS Code APIs become stable or an upstream supported remote-control extension point becomes available.**
+This is the architecture described by the implementation plan. It can change `CopilotCLISession`, use the existing product/service composition and route remote prompts through the native chat request path. Proposal access is supplied by the fork's product configuration and bundled extension setup. Normal users of this build should not be asked to edit `argv.json` merely to enable the bundled Copilot code.
 
-## 2. Proposed API requirement
+Initial deliverables are therefore development builds of the VS Code fork (or explicitly internal packages produced by that fork), with exact source compatibility metadata.
+
+### Future possibility: independent extension
+
+```text
+Stock VS Code
+  -> separately installed own-ID extension/VSIX
+  -> supported Copilot remote-control API (not available today)
+```
+
+The small public export of the installed `GitHub.copilot-chat` extension does not expose the session control required here. An independent Marketplace extension is therefore not just a repackaging exercise: it requires a stable upstream remote-control extension point or a substantial redesign with reduced functionality.
+
+The `argv.json` and own-extension-ID guidance below applies only to experiments with this future independent-extension path.
+
+## 2. Proposed APIs by packaging mode
 
 VS Code's proposed-API enforcement is extension-ID based.
 
-A non-builtin extension that declares proposed APIs but is not product-allowlisted or runtime-enabled has those proposal declarations removed at runtime.
+A non-builtin extension that declares proposed APIs but is not product-allowlisted or runtime-enabled has those proposal declarations removed at runtime. The bundled fork should instead declare/allow the modified Copilot extension through its product configuration and validate that configuration in the built product.
 
 Official guidance:
 
 https://code.visualstudio.com/api/advanced-topics/using-proposed-api
 
-The documented persistent configuration is `argv.json`:
+For an independent development/own-ID extension, a persistent development configuration may use `argv.json`:
 
 ```json
 {
@@ -32,11 +49,11 @@ The documented persistent configuration is `argv.json`:
 }
 ```
 
-The official documentation currently describes VS Code Insiders for sharing proposed-API extensions. The VS Code source also recognizes the runtime `--enable-proposed-api` extension-ID set. This project should therefore treat proposed-API operation as a **developer/private distribution mechanism**, not a supported Marketplace contract.
+The official documentation describes proposed APIs as unstable and unsuitable for normal Marketplace publication. Treat own-ID proposal enablement as a **developer/private experiment**, not the release mechanism for the current fork.
 
-## 3. First-run setup design
+## 3. Future own-ID first-run setup design
 
-A renamed downstream build should start with a minimal preflight before initializing code that requires proposed APIs.
+A future renamed independent build should start with a minimal preflight before initializing code that requires proposed APIs. This does not solve the missing public Copilot session-control API by itself.
 
 ### User flow
 
@@ -63,7 +80,7 @@ The setup UI should tell the user:
 
 Do not silently modify runtime arguments.
 
-## 4. `argv.json` update requirements
+## 4. Future own-ID `argv.json` update requirements
 
 The helper MUST:
 
@@ -98,7 +115,7 @@ Example transformation:
 }
 ```
 
-## 5. Restart behavior
+## 5. Future own-ID restart behavior
 
 A normal **Reload Window** is not the required setup path. Runtime arguments are consumed by the VS Code application/main-process startup path.
 
@@ -108,31 +125,32 @@ The extension should display:
 
 Do not make the core flow depend on undocumented internal relaunch services.
 
-## 6. Telegram setup after preflight
+## 6. Telegram setup
 
 Recommended sequence:
 
-1. Enable proposed APIs if needed.
-2. Restart VS Code.
+1. Verify the bundled fork's Copilot/session-controller integration is active.
+2. Display the confidentiality warning: Telegram bot chats are not end-to-end encrypted and selected development content will transit Telegram infrastructure.
 3. Enter Telegram bot token locally.
 4. Validate token with Telegram `getMe`.
 5. Save token to protected secret storage.
-6. Start pairing.
-7. Generate short-lived pairing challenge.
-8. User messages the bot with the challenge.
-9. Store authorized Telegram numeric user ID.
-10. Show connection/session status.
+6. Acquire the singleton poller lease.
+7. Start pairing.
+8. Generate short-lived pairing challenge.
+9. User messages the bot with the challenge.
+10. Store authorized Telegram numeric user ID.
+11. Show connection/session status.
 
 No Tailscale or inbound firewall configuration is required for the default long-polling mode.
 
 ## 7. Packaging
 
-Development artifacts should be built as VSIX packages using the upstream extension build/package tooling or an explicitly documented downstream wrapper.
+For the current architecture, development artifacts should be built through the VS Code fork's product/build tooling so the modified bundled extension, proposal allowlist and integration source remain aligned. If an internal VSIX is also produced for targeted testing, document that it is not equivalent to the complete bundled-fork distribution and record the required host configuration.
 
 Every release artifact should include or be accompanied by:
 
 ```text
-extension VSIX
+VS Code fork build and/or explicitly scoped internal VSIX
 SHA256 checksum
 release notes
 LICENSE / applicable license notices
@@ -146,20 +164,20 @@ Suggested downstream version metadata:
 Upstream VS Code commit: 0984c920744f2013d0ad2bc5e826fa45a64069ab
 Upstream Copilot extension: 0.63.0
 Telegram patch version: 0.1.0
-Distribution: VSIX developer preview
+Distribution: bundled fork development build
 ```
 
 ## 8. Marketplace restrictions
 
 VS Code explicitly advises that extensions using proposed APIs should not be published to the Visual Studio Marketplace.
 
-Therefore V1 MUST NOT claim Marketplace support while it depends on these APIs.
+Therefore V1 MUST NOT claim that the current bundled-fork implementation is a Marketplace-installable extension.
 
 A future Marketplace release requires one of:
 
 - required proposals become stable VS Code APIs,
 - Microsoft/GitHub expose a stable remote-session/transport extension point,
-- the project is redesigned to avoid proposed APIs and accepts the resulting feature loss.
+- the project is redesigned to avoid proposed APIs and source-level Copilot internals and accepts the resulting feature loss.
 
 ## 9. Extension identity
 
@@ -169,17 +187,17 @@ Upstream Copilot uses the GitHub publisher/extension identity and receives produ
 
 A public downstream project does not own that publisher identity and must not impersonate it.
 
-### Downstream identity
+### Independent downstream identity
 
-The public/private downstream artifact should use an identity controlled by the project owner, for example:
+Any future independently published artifact should use an identity controlled by the project owner, for example:
 
 ```text
 <owned-publisher>.<owned-extension-name>
 ```
 
-That identity must be the one persisted in `enable-proposed-api` during first-run setup.
+For private proposed-API experiments, that identity is the one enabled by the runtime/development setup.
 
-A same-ID build may be useful as a local experiment to compare behavior with upstream, but it is not the recommended public distribution model.
+The current bundled fork must record exactly which extension identity and product allowlist it builds with. Do not impersonate the official publisher in a separately distributed Marketplace package.
 
 ## 10. Source licensing
 
@@ -241,6 +259,8 @@ The project should use the end user's own supported authentication/entitlement p
 
 BYOK/local-provider use follows the current Copilot SDK/CLI provider configuration and applicable provider terms.
 
+The source review performed for this design did not establish whether a self-built VS Code/Copilot fork can reuse every hosted Copilot authentication flow, nor whether any failure would be caused by signing, product identity or another entitlement check. Treat hosted authentication as an explicit implementation spike and record observed behavior; do not state a definitive signing limitation without source/runtime evidence.
+
 ## 14. Release CI
 
 A release workflow should eventually:
@@ -252,7 +272,7 @@ install/build dependencies
 compile Copilot extension
 run upstream relevant tests
 run Telegram tests
-package VSIX
+build/package the selected bundled-fork artifact (and optional scoped internal VSIX)
 scan/package licenses
 calculate SHA256
 attach artifact + compatibility metadata
@@ -262,12 +282,14 @@ Do not auto-publish a rebased build if upstream compatibility tests fail.
 
 ## 15. Public release checklist
 
-Before publishing a VSIX outside the development team:
+Before publishing any bundled-fork build or independent artifact outside the development team:
 
-- [ ] own extension ID and branding in place
-- [ ] proposed API setup/rollback tested
+- [ ] distribution mode identified as bundled fork or independent extension
+- [ ] bundled extension identity/product proposal configuration recorded and tested
+- [ ] own extension ID and proposal setup/rollback tested only if shipping an independent private build
 - [ ] exact supported VS Code version documented
 - [ ] Telegram token never stored in settings/logs
+- [ ] non-E2E Telegram confidentiality warning shown during setup
 - [ ] dependency licenses audited
 - [ ] upstream MIT notices retained
 - [ ] Copilot CLI runtime unmodified

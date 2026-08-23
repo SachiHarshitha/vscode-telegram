@@ -26,7 +26,9 @@ flowchart TB
     subgraph VSCode[VS Code extension host]
         CSC[ChatSessionsContrib]
         TRC[TelegramRemoteContrib]
-        RCC[RemoteControlCoordinator]
+        RCR[RemoteControlRegistry]
+        MCT[MissionControlTransport]
+        TGT[TelegramTransport]
         TS[TelegramService]
         AUTH[TelegramPairing/Auth]
         REN[TelegramEventRenderer]
@@ -42,38 +44,51 @@ flowchart TB
     AG[Copilot Agent Runtime]
 
     CSC --> SVC
+    CSC --> RCR
+    CSC --> MCT
     CSC --> TRC
-    TRC --> RCC
+    TRC --> TGT
+    MCT --> RCR
+    TGT --> RCR
     TRC --> TS
     TRC --> AUTH
     TRC --> REN
     TRC --> ROUTE
 
     TS <--> TG
-    ROUTE --> RCC
-    RCC <--> SVC
-    RCC <--> SES
+    TS --> AUTH
+    AUTH --> ROUTE
+    ROUTE --> TGT
+    RCR <--> SVC
+    RCR <--> SES
     SES <--> SDK
     SDK <--> AG
     SDK <--> MCP
     MCP <--> VSC
-    SDK --> RCC
-    RCC --> REN
+    SDK --> SES
+    SES --> RCR
+    RCR --> REN
     REN --> TS
 ```
 
-## 3. Proposed new module
+## 3. Proposed module layout
 
-Preferred directory:
+Shared remote-control code belongs with the Copilot CLI integration; Telegram code remains isolated in its own module:
 
 ```text
+extensions/copilot/src/extension/chatSessions/copilotcli/
+    common/
+        remoteControlTypes.ts
+    node/
+        remoteControlRegistry.ts
+        missionControlTransport.ts
+
 extensions/copilot/src/extension/telegramRemote/
     common/
         telegramTypes.ts
-        remoteControlTypes.ts
     node/
         telegramRemoteContribution.ts
-        remoteControlCoordinator.ts
+        telegramTransport.ts
         telegramService.ts
         telegramBotClient.ts
         telegramPairingService.ts
@@ -84,7 +99,7 @@ extensions/copilot/src/extension/telegramRemote/
         test/
 ```
 
-Do not place Telegram-specific classes inside `copilotcliSession.ts` unless the integration cannot be achieved through a narrow hook/interface.
+Telegram-specific classes MUST NOT be added to `copilotcliSession.ts` or imported by the shared registry. That upstream file receives only the narrow hooks required to publish session events, race interactive responses and expose safe session actions.
 
 ## 4. Composition root
 
@@ -94,7 +109,9 @@ Relevant source:
 
 - [`../../src/extension/chatSessions/vscode-node/chatSessions.ts`](../../src/extension/chatSessions/vscode-node/chatSessions.ts)
 
-Preferred downstream change:
+The current source has two registration paths: the session-controller path in `registerCopilotCLIServices()` and the older V1/non-controller path in `registerCopilotCLIServicesV1()`. Implement and validate the controller path first. Add V1 compatibility only after the registry contract is stable.
+
+Preferred first downstream change:
 
 ```ts
 this._register(
@@ -113,6 +130,8 @@ Relevant source:
 - [`../../src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts`](../../src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts)
 
 Important capabilities already exposed by the service include session lifecycle events and methods for session discovery, creation, loading, history and forking.
+
+`getSession()` and `createSession()` return `IReference<ICopilotCLISession>`. Every caller MUST explicitly own and dispose that reference. A short operation uses `try/finally`; a long-lived remote attachment keeps one reference in its disposable session binding and releases it when the binding, session or extension ends. Leaking a reference can keep the SDK session and its resources alive; disposing it too early can invalidate remote control.
 
 The Telegram layer stores only remote UI routing state such as:
 
@@ -139,38 +158,90 @@ Existing behavior that should be reused includes:
 
 - active/busy session state,
 - `mode: 'immediate'` steering,
-- abort,
+- abort on the wrapped SDK session,
 - model updates,
 - permission response handling,
 - user-input response handling,
-- SDK event subscriptions,
+- request-scoped SDK event subscriptions,
 - Mission Control event forwarding.
 
-### Preferred bridge design
+### Current interface constraint
 
-Introduce or expose a narrow session-remote interface rather than handing Telegram the entire concrete class:
+`ICopilotCLISession` currently exposes session metadata, status, `handleRequest()`, stream attachment, permission-level mutation and model inspection. It does **not** expose persistent SDK events, abort, permission responses, user-input responses or selected-model mutation. The concrete class exposes `sdkSession`, but Telegram must not depend on a concrete-class cast or receive the full SDK session.
+
+`handleRequest()` is also not a general remote-send API: it requires a `ChatParticipantToolToken` from a real VS Code `ChatRequest`. Telegram cannot mint that token.
+
+### Required bridge design
+
+Phase 1 introduces a transport-neutral registry and a narrow session binding. Names are provisional and should reuse upstream SDK types:
 
 ```ts
-interface IRemoteControllableSession {
-    readonly sessionId: string;
-    readonly status: vscode.ChatSessionStatus | undefined;
+type RemoteRequestOrigin =
+    | { kind: 'missionControl'; transportId: 'missionControl'; commandId: string; mode?: MissionControlMode }
+    | { kind: 'telegram'; transportId: 'telegram'; updateId: string };
 
-    onEvent(listener: (event: SessionEvent) => void): IDisposable;
-    sendPrompt(prompt: string): Promise<void>;
-    steer(prompt: string): Promise<void>;
-    abort(): void;
-    respondToPermission(requestId: string, response: PermissionResponse): void;
-    respondToUserInput(requestId: string, response: UserInputResponse): void;
-    getSelectedModelId(): Promise<string | undefined>;
-    setSelectedModel?(...): Promise<void>;
+interface IRemoteControlTransport {
+    readonly id: string;
+    readonly onDidReceiveCommand: Event<RemoteCommand>;
+    publish(sessionId: string, event: RemoteAgentEvent): void;
+    requestPermission?(request: RemotePermissionRequest, token: CancellationToken): Promise<PermissionRequestResult | undefined>;
+    requestUserInput?(request: RemoteUserInputRequest, token: CancellationToken): Promise<UserInputResponse | undefined>;
+}
+
+interface IRemoteSessionControl {
+    abort(): Promise<void>;
+    setSelectedModel?(modelId: string, reasoningEffort?: string): Promise<void>;
+}
+
+interface IRemoteControlRegistry {
+    registerTransport(transport: IRemoteControlTransport): IDisposable;
+    attachSession(sessionId: string, control: IRemoteSessionControl): IDisposable;
+    publish(sessionId: string, event: SessionEvent): void;
+    waitForPermission(...): Promise<PermissionRequestResult | undefined>;
+    waitForUserInput(...): Promise<UserInputResponse | undefined>;
 }
 ```
 
-The exact final interface should reuse existing types and avoid wrapping methods that are already directly available through a stable internal service.
+The registry owns transport fan-out and correlation; `CopilotCLISession` remains the only owner of SDK response calls. Prompt injection is intentionally separate and goes through the native chat request path described in section 7.
 
-## 7. Event projection
+### Typed request origin
 
-The Telegram layer subscribes to the same SDK event stream used by native VS Code rendering and Mission Control.
+The current source infers a Mission Control request from `SendOptions.source.startsWith('command-')` and then reads the shared `_mcState.mcMode`. This is unsafe for an N-transport design: a Telegram request accidentally or maliciously labelled `command-*` could inherit Mission Control's `autopilot` mode.
+
+The registry MUST create a typed `RemoteRequestOrigin`; transport payloads cannot supply or override it. Carry this typed origin through pending request context and `CopilotCLISessionInput`. Derive effective remote mode/permission only from `origin.kind` and the originating transport's policy:
+
+- only a registry-created `missionControl` origin may consume Mission Control mode,
+- a `telegram` origin has no permission-elevating mode,
+- Telegram remains limited to approve-once/deny even while Mission Control is active in `autopilot`,
+- `SendOptions.source` remains a separately serialized SDK correlation/telemetry string and is never an authorization signal.
+
+Telegram source strings SHOULD use a distinct `telegram-*` namespace and MUST NOT begin with `command-`, but the typed origin—not the prefix—is the security boundary.
+
+## 7. Native prompt and steering path
+
+Remote prompts MUST follow the same path currently used by Mission Control:
+
+```text
+TelegramTransport
+  -> setPendingCopilotCLIRequestContext(sessionId, ...)
+  -> workbench.action.chat.openSessionWithPrompt.copilotcli
+  -> VS Code creates ChatRequest + ChatParticipantToolToken
+  -> Copilot chat participant resolves the existing session
+  -> CopilotCLISession.handleRequest(...)
+  -> normal send, or mode: 'immediate' when already busy
+```
+
+This internal command is high-risk as an external extension contract, but it is a **required integration path inside the current fork** because it preserves native rendering and supplies the tool-invocation token. Feature-detect it, test it on every upstream rebase and fail visibly if it changes; do not fall back to direct SDK `send()` in V1.
+
+The command implementation awaits the session's `responseCompletePromise`, so its returned promise may remain pending for the entire agent turn. Telegram MUST dispatch it fire-and-forget, attach rejection handling, acknowledge the Telegram update immediately and let SDK/registry events report progress/completion. Failure cleanup must clear only the matching pending request context; it must not erase a newer request for the same session.
+
+## 8. Event projection
+
+Most native rendering listeners are created inside `_handleRequestImplInner` and disposed at the end of the request. They are not a reusable session-level feed. Mission Control separately installs a persistent wildcard listener while remote control is active.
+
+The remote-control seam therefore needs its own explicit session-lifetime subscription or equivalent publication hook. It may normalize the same SDK event types, but it must define ownership and disposal independently of the request-scoped renderer.
+
+Current Mission Control can observe an SDK event twice while a request is active: once through the request-scoped wildcard listener and once through its persistent wildcard listener. Phase 1 MUST collapse remote forwarding to exactly one registry publication point per SDK event. Preserve upstream event IDs/timestamps where present, suppress duplicate IDs before transport fan-out, and reject/repair any event whose `parentId` equals its own ID. Semantic Mission Control compatibility does not require preserving duplicate delivery.
 
 Events are normalized into a transport-neutral remote event model:
 
@@ -192,7 +263,13 @@ type RemoteAgentEvent =
 
 Telegram rendering then becomes a pure adapter over these events.
 
-## 8. Mission Control relationship
+### Existing-session replay
+
+When a remote transport attaches to an existing session, the session bridge uses `sdkSession.getEvents()` as the replay source without exposing the SDK session to the transport. Replay only the explicitly supported persisted event types (initially user/assistant messages, assistant turn lifecycle and tool start/complete); do not assume ephemeral deltas are retained.
+
+To avoid a replay/live-subscription gap, install the live listener into a temporary buffer, snapshot and replay persisted events in order, suppress duplicate event IDs, flush unseen buffered live events, then switch to direct live publication.
+
+## 9. Mission Control relationship
 
 Upstream Mission Control is the closest architectural reference.
 
@@ -208,25 +285,29 @@ The current Copilot session implementation:
 - handles user-input responses,
 - keeps session state shared across wrapper instances.
 
-Telegram should mimic the **control-plane pattern**, not call Mission Control itself.
+Telegram should reuse the **control-plane pattern**, not call Mission Control itself.
 
 ```mermaid
 flowchart LR
     SDK[SDK session]
-    SDK -->|events| MC[Mission Control adapter]
+    SDK -->|events| REG[Remote Control Registry]
+    REG --> MC[MissionControlTransport]
     MC --> GH[GitHub web/mobile]
     GH -->|commands| MC
-    MC --> SDK
+    MC --> REG
+    REG --> SDK
 
-    SDK -->|events| TR[Telegram adapter]
+    REG --> TR[TelegramTransport]
     TR --> TG[Telegram]
     TG -->|commands| TR
-    TR --> SDK
+    TR --> REG
 ```
 
-A later refactor may generalize common remote behavior behind an `IRemoteControlTransport`, but V1 should avoid unnecessarily rewriting upstream Mission Control code before Telegram behavior is proven.
+The generalization is the first implementation milestone, not a later cleanup. Existing `_mcState`, `_waitForMcPermissionResponse()` and `_waitForMcUserInputResponse()` logic is hard-coded to one remote transport. Move that behavior behind the registry before adding Telegram branches. Preserve Mission Control's API client, buffering and poll cadence inside `MissionControlTransport`; the goal is a narrow transport seam, not a rewrite of the GitHub protocol.
 
-## 9. Permissions and interactive requests
+The first registry test uses Mission Control plus an in-memory second transport. Telegram work starts only after Mission Control behavior remains semantically unchanged and each SDK event is published exactly once.
+
+## 10. Permissions and interactive requests
 
 The upstream session currently supports local UI responses and Mission Control responses. Telegram should follow the same semantics.
 
@@ -234,11 +315,16 @@ Conceptually:
 
 ```mermaid
 flowchart TB
-    PR[SDK permission.requested] --> L[VS Code local prompt]
-    PR --> T[Telegram prompt]
-    L --> R{First valid response}
-    T --> R
-    R --> SDK[respondToPermission]
+    PR[SDK permission.requested] --> S[CopilotCLISession]
+    S --> L[VS Code local prompt]
+    S --> REG[RemoteControlRegistry]
+    REG --> M[MissionControlTransport]
+    REG --> T[TelegramTransport]
+    L --> WIN{First valid response}
+    M --> WIN
+    T --> WIN
+    WIN --> S
+    S --> SDK[respondToPermission]
 ```
 
 Rules:
@@ -248,8 +334,10 @@ Rules:
 - one resolution wins,
 - pending Telegram buttons are invalidated after resolution,
 - cancellation resolves safely to deny where appropriate.
+- Telegram exposes only approve-once and deny in V1.
+- Telegram may never set or raise the session permission level to `autoApprove` or `autopilot`, directly or through a mode change.
 
-## 10. Telegram networking
+## 11. Telegram networking
 
 Telegram transport uses long polling:
 
@@ -268,7 +356,9 @@ sequenceDiagram
 
 The workstation initiates all network connections. No inbound service is required.
 
-## 11. Telegram UI state
+Only one active `getUpdates` consumer may exist for a bot token. The contribution owns a singleton poller/lease and releases it on disable/deactivation. If multiple VS Code extension hosts can load the same configuration, V1 must either coordinate the lease across them or explicitly reject the second consumer; two pollers must never silently compete.
+
+## 12. Telegram UI state
 
 Telegram UI should use a small state machine rather than parse arbitrary text as control commands.
 
@@ -293,7 +383,7 @@ Normal text behavior:
 
 Destructive/permission operations use callback tokens, never free-text inference.
 
-## 12. Model source of truth
+## 13. Model source of truth
 
 For Copilot CLI-backed sessions the Copilot SDK/upstream `ICopilotCLIModels` layer is authoritative.
 
@@ -309,7 +399,7 @@ vs.
 Other VS Code language models
 ```
 
-## 13. IDE context
+## 14. IDE context
 
 Do not rebuild IDE tooling in Telegram. The agent continues to use the existing VS Code MCP integration.
 
@@ -319,11 +409,13 @@ Relevant source:
 
 This preserves upstream behavior for diagnostics, selection, diff/open-diff flows and other IDE-aware capabilities.
 
-## 14. Proposed API bootstrapping
+## 15. Packaging modes and proposed APIs
 
-If the downstream build uses its own extension ID, VS Code normally strips proposed API access unless the ID is enabled through product configuration, extension-development mode or `--enable-proposed-api`.
+The current implementation target is a VS Code source fork with the modified Copilot extension bundled into the product. It should use the fork's product configuration and existing Copilot activation path. Do not make `argv.json` mutation a prerequisite for this path.
 
-V1 setup therefore needs a preflight activation path that uses only stable/basic functionality before touching proposed APIs:
+A future independently installed extension/renamed VSIX has a different constraint: VS Code normally strips proposed API access unless its ID is enabled through product configuration, extension-development mode or `--enable-proposed-api`. The preflight flow below applies to that future path only:
+
+Any such independent-extension experiment needs a preflight activation path that uses only stable/basic functionality before touching proposed APIs:
 
 ```mermaid
 flowchart TD
@@ -336,9 +428,9 @@ flowchart TD
     G --> H[Require full VS Code restart]
 ```
 
-See [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md).
+See [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md). Hosted Copilot authentication/entitlement for a self-built fork requires a separate source-level validation; these documents do not assume that Microsoft signing either permits or prevents it.
 
-## 15. Source ownership boundary
+## 16. Source ownership boundary
 
 ### Upstream-owned
 
@@ -366,9 +458,9 @@ See [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md).
 
 ### Shared seam
 
-Only the narrow glue required to expose existing session events/actions to `TelegramRemoteContrib` should touch upstream files.
+The registry contract and Mission Control adapter are shared integration code. Only the narrow glue required to publish existing session events, race interactive responses and expose safe actions should touch `copilotcliSession.ts`.
 
-## 16. Architecture quality gate
+## 17. Architecture quality gate
 
 A proposed implementation change should be rejected if it:
 
@@ -378,4 +470,9 @@ A proposed implementation change should be rejected if it:
 - relies on terminal/PTY scraping when an SDK event exists,
 - introduces Telegram types into core Copilot model/tool/worktree services,
 - modifies large upstream files when a small service/interface seam would work,
+- adds Telegram-specific branches to Mission Control permission/question logic,
+- sends a remote prompt directly to the SDK instead of through the native chat request path,
+- loses or leaks an `IReference<ICopilotCLISession>`,
+- starts a second long poller for the same bot token,
+- lets Telegram raise permission level to `autoApprove` or `autopilot`,
 - requires inbound networking for the default Telegram transport.

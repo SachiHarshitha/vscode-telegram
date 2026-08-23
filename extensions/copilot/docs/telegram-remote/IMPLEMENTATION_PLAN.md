@@ -13,7 +13,8 @@ The first milestone is not a polished Telegram UI. It is proof that a Telegram m
 - Record upstream commit/version metadata.
 - Confirm the current Copilot extension builds/tests unchanged on the downstream branch.
 - Add Telegram project docs and source directory skeleton.
-- Decide downstream extension ID for test builds.
+- Confirm the current controller-path configuration (`registerCopilotCLIServices`) and record the V1/non-controller path as a later compatibility target.
+- Confirm the initial packaging target is the VS Code fork with its bundled Copilot extension; do not require an independent extension ID for this milestone.
 - Add a compile-time/downstream marker so logs identify the Telegram build.
 
 ### Exit criteria
@@ -22,41 +23,71 @@ The first milestone is not a polished Telegram UI. It is proof that a Telegram m
 - No behavior changes yet.
 - Documentation and compatibility baseline committed.
 
-## 3. Phase 1 — session integration spike
+## 3. Phase 1 — remote-control registry and Mission Control migration
 
 ### Goal
 
-Prove access to existing Copilot CLI sessions from a downstream contribution.
+Create the N-transport seam before any Telegram-specific control logic is added. Mission Control must remain semantically compatible after moving behind the seam; duplicate remote event delivery is an existing defect to remove, not behavior to preserve.
 
 ### Source work
 
 Create:
 
 ```text
-src/extension/telegramRemote/node/telegramRemoteContribution.ts
-src/extension/telegramRemote/node/remoteControlCoordinator.ts
+src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts
+src/extension/chatSessions/copilotcli/node/remoteControlRegistry.ts
+src/extension/chatSessions/copilotcli/node/missionControlTransport.ts
 ```
 
-Modify the narrow composition root in:
+Modify:
 
 ```text
 src/extension/chatSessions/vscode-node/chatSessions.ts
+src/extension/chatSessions/copilotcli/node/copilotcliSession.ts
 ```
 
-Instantiate `TelegramRemoteContrib` with the same child `IInstantiationService` that owns `ICopilotCLISessionService` and related Copilot CLI services.
+The `copilotcliSession.ts` change is deliberate: current permission/question handling is hard-coded to `_mcState`, most native SDK listeners are request-scoped, and `ICopilotCLISession` does not expose the required remote actions. Add only transport-neutral publication, response-race and safe-control hooks.
 
-### Spike functionality
+### Required sequence
 
-- log session create/change/delete events,
-- call `getAllSessions()`,
-- obtain a session reference using `getSession()`,
-- inspect session ID/title/status/model,
-- subscribe to or expose enough session event information for remote projection,
-- invoke a safe test prompt/steering path from a local command before adding Telegram networking.
+1. Introduce `IRemoteControlTransport`, normalized remote request/event types and a discriminated `RemoteRequestOrigin`.
+2. Introduce `RemoteControlRegistry` with per-session bindings, correlation and disposal.
+3. Replace `source.startsWith('command-')` as an authorization/mode signal. Carry typed origin through pending request context and session input; serialize SDK `SendOptions.source` separately.
+4. Move Mission Control event, permission and user-input integration behind a `MissionControlTransport` adapter while retaining its API client, buffering and polling behavior.
+5. Consolidate request/persistent remote forwarding into one session-lifetime registry publication point with event-ID deduplication and self-parent protection.
+6. Verify Mission Control command completion, prompt/steering, abort, permission and question semantics are unchanged while each SDK event is exported once.
+7. Register an in-memory second transport in tests and prove event fan-out, first-valid permission/question resolution, prompt routing and abort with both transports present.
+8. Prove registry teardown releases all listeners and pending requests.
+
+### Session/reference lifecycle
+
+- `getSession()`/`createSession()` return `IReference<ICopilotCLISession>`.
+- A one-shot action disposes the reference in `finally`.
+- A bound remote session stores the reference in the binding's `DisposableStore` and releases it on deselection, session deletion, transport disable or extension shutdown.
+- Tests assert no use-after-dispose and no leaked reference after repeated attach/detach.
+
+### Native prompt constraint
+
+The in-memory transport sends prompts through:
+
+```text
+setPendingCopilotCLIRequestContext(...)
+-> workbench.action.chat.openSessionWithPrompt.copilotcli
+-> real ChatRequest/toolInvocationToken
+-> CopilotCLISession.handleRequest(...)
+```
+
+Do not use direct SDK `send()` as the spike shortcut.
+
+The workbench command's promise lasts until the agent response completes. Dispatch it without awaiting the turn, acknowledge the transport immediately and attach a rejection handler. Pending-context cleanup is correlated by session + origin/command ID so an older failure cannot clear a newer request.
 
 ### Exit criteria
 
-A local VS Code command can select an existing Copilot CLI session and send/steer it without constructing a parallel agent session.
+- Mission Control semantic regression tests pass with exactly one export per SDK event.
+- An in-memory second transport can observe and safely control the same session.
+- A Telegram-origin request cannot inherit Mission Control `autopilot`, even when Mission Control is active in that mode or a transport payload contains a `command-*` string.
+- No transport-specific branch has been added to `CopilotCLISession`.
+- References/listeners are released deterministically.
 
 ## 4. Phase 2 — Telegram transport foundation
 
@@ -65,6 +96,7 @@ Create:
 ```text
 telegramBotClient.ts
 telegramService.ts
+telegramTransport.ts
 telegramTypes.ts
 telegramSettings.ts
 ```
@@ -76,6 +108,8 @@ telegramSettings.ts
 - `getUpdates` long polling.
 - update offset/deduplication.
 - clean enable/disable lifecycle.
+- singleton poller lease keyed by bot identity/token fingerprint,
+- explicit rejection of a second consumer when a cross-process lease cannot be acquired,
 - bounded retry/backoff.
 - `sendMessage`.
 - `editMessageText`.
@@ -87,7 +121,7 @@ Avoid a large Telegram framework dependency unless it materially reduces securit
 
 ### Exit criteria
 
-VS Code can send/receive Telegram messages reliably and stopping the contribution stops the poller without duplicates.
+VS Code can send/receive Telegram messages reliably; stopping the contribution releases the lease; reload/re-enable and competing-host tests never produce duplicate pollers.
 
 ## 5. Phase 3 — pairing and authorization
 
@@ -128,12 +162,14 @@ telegramSessionState.ts
 - inline session picker,
 - selected-session state,
 - status display,
-- normal text prompt to idle selected session,
+- normal text prompt to an idle selected session through pending request context plus `workbench.action.chat.openSessionWithPrompt.copilotcli`,
+- typed Telegram request origin created by the registry rather than accepted from Telegram input,
+- immediate Telegram acknowledgement while the native command runs fire-and-forget,
 - clear errors for missing/closed sessions.
 
 ### Exit criteria
 
-A Telegram user can select a VS Code Copilot session and send a normal prompt to it.
+A Telegram user can select a VS Code Copilot session and send a normal prompt through a real VS Code `ChatRequest`; the message appears in native chat and no direct SDK fallback exists.
 
 ## 7. Phase 5 — active-turn steering and abort
 
@@ -141,7 +177,7 @@ A Telegram user can select a VS Code Copilot session and send a normal prompt to
 
 - inspect upstream session status,
 - treat normal Telegram text during an active turn as steering,
-- reuse existing `mode: 'immediate'` path,
+- reuse the same native command path so upstream busy-session handling selects `mode: 'immediate'`,
 - Stop button/callback,
 - stale callback protection.
 
@@ -158,6 +194,10 @@ remoteAgentEvent.ts
 telegramEventRenderer.ts
 telegramActivityCoalescer.ts
 ```
+
+Publish events through the registry's session-lifetime hook. Do not attach Telegram to the request-scoped listener store used by native chat rendering.
+
+When attaching to an existing session, install a temporary-buffering live listener, obtain persisted events through the session bridge's `sdkSession.getEvents()`, replay only the supported event types in order, suppress duplicate IDs, flush unseen buffered events, then enter live mode. The SDK session itself remains hidden from Telegram code.
 
 ### Event classes
 
@@ -218,10 +258,12 @@ telegramUserInputBridge.ts
 - Approve once / Deny callbacks,
 - request/session/nonces correlation,
 - expiration,
-- first-valid-response semantics with local UI if feasible through the selected seam,
+- first-valid-response semantics with local UI and every registered remote transport,
 - user choice questions,
 - freeform question replies,
 - invalidation of resolved buttons.
+
+Telegram V1 exposes only approve-once and deny. It MUST NOT call `setPermissionLevel()` or remotely select a mode that raises permission to `autoApprove`/`autopilot`.
 
 ### Exit criteria
 
@@ -249,9 +291,9 @@ Test separately with at least:
 
 Do not special-case local model agent tooling in Telegram. If a model is not compatible with the upstream Copilot agent runtime, report that limitation.
 
-## 11. Phase 9 — first-run proposed API setup
+## 11. Phase 9 — optional independent-extension setup research
 
-Create:
+This phase is not on the critical path for the current bundled-fork build. If an independent own-ID extension/VSIX is pursued, create:
 
 ```text
 proposedApiSetup.ts
@@ -268,7 +310,7 @@ proposedApiSetup.ts
 - full-restart instruction,
 - post-restart verification.
 
-This phase may be developed earlier if a renamed extension ID blocks normal testing.
+Also verify whether the required session-control seam can exist outside the bundled Copilot extension at all. The current public `GitHub.copilot-chat` export is insufficient. Do not claim hosted Copilot authentication is allowed or blocked by Microsoft signing until a separate source/runtime investigation is complete.
 
 ## 12. Phase 10 — release hardening
 
@@ -276,7 +318,7 @@ This phase may be developed earlier if a renamed extension ID blocks normal test
 
 - diagnostic commands/log channel,
 - release compatibility metadata,
-- VSIX packaging,
+- bundled-fork artifact packaging and optional explicitly scoped internal VSIX packaging,
 - dependency/license inventory,
 - checksums,
 - upstream rebase CI,
@@ -285,12 +327,13 @@ This phase may be developed earlier if a renamed extension ID blocks normal test
 
 ## 13. Suggested source touch points
 
-### Expected modified upstream file
+### Expected modified upstream files
 
-Initially aim for one primary integration edit:
+The initial registry requires two deliberate integration edits:
 
 ```text
 src/extension/chatSessions/vscode-node/chatSessions.ts
+src/extension/chatSessions/copilotcli/node/copilotcliSession.ts
 ```
 
 ### Possible additional seam edits
@@ -298,17 +341,11 @@ src/extension/chatSessions/vscode-node/chatSessions.ts
 Only if required:
 
 ```text
-src/extension/chatSessions/copilotcli/node/copilotcliSession.ts
 src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts
 package.json
 ```
 
-Before editing `copilotcliSession.ts`, first determine whether the required behavior can be exposed through:
-
-- existing public methods,
-- existing session service methods,
-- a small event/accessor interface,
-- a transport-neutral remote coordinator.
+Keep the `copilotcliSession.ts` patch narrow and transport-neutral. Its required responsibilities are event publication, interactive-response coordination and safe action binding; Telegram API types and rendering never enter this file.
 
 ## 14. Suggested configuration keys
 
@@ -367,5 +404,7 @@ A phase is complete only when:
 - tests cover the new behavior,
 - no unrelated upstream functionality is duplicated,
 - errors are visible and safe,
+- session references, listeners and poller leases have deterministic ownership,
+- Mission Control regression tests pass after registry changes,
 - documentation is updated if the actual API differs from this plan,
 - the downstream patch remains reviewable against upstream.

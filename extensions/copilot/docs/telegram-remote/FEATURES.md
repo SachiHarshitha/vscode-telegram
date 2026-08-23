@@ -18,20 +18,25 @@ Legend:
 | Telegram account pairing | P0 | Telegram | Required | Short-lived pairing code + numeric Telegram user ID |
 | Paired-user allowlist | P0 | Telegram | Required | Fail closed for all other users |
 | Connection health/status | P0 | Telegram | Required | Connected, retrying, unauthorized, disabled |
+| Transport-neutral remote-control registry | P0 | Glue | Required before Telegram | Replaces Mission Control-only event/permission/question branches |
+| Mission Control compatibility | P0 | Upstream + Glue | Required | Command/control semantics unchanged; duplicate event export removed |
+| Typed remote request origin | P0 | Glue | Required | Permission/mode never inferred from transport-supplied source strings |
+| Exactly-once remote event publication | P0 | Glue | Required | Collapse overlapping MC listeners; deduplicate by upstream event ID |
+| Existing-session event replay | P0 | Upstream + Glue | Required | Filter `sdkSession.getEvents()` through bridge; buffer/deduplicate live overlap |
 | Session list | P0 | Upstream + Glue | Required | Reuse `ICopilotCLISessionService.getAllSessions()` |
 | Session metadata | P0 | Upstream + Glue | Required | Title, ID, working directory, status |
 | Select active remote session | P0 | Telegram | Required | Telegram-side routing state only |
 | Create session | P0 | Upstream + Glue | Required where supported | Reuse session service |
 | Resume session | P0 | Upstream + Glue | Required | Reuse persistent Copilot session |
-| Send prompt | P0 | Upstream + Glue | Required | Normal SDK/session send path |
-| Mid-turn steering | P0 | Upstream + Glue | Required | Existing Copilot behavior uses SDK `mode: immediate` |
+| Send prompt | P0 | Upstream + Glue | Required | Fire-and-forget native command with immediate ack and correlated failure cleanup; no direct SDK send |
+| Mid-turn steering | P0 | Upstream + Glue | Required | Same native request path; upstream busy handling uses SDK `mode: immediate` |
 | Queue follow-up prompt | P1 | Upstream + Glue | Planned | SDK enqueue/default behavior |
-| Abort active work | P0 | Upstream + Glue | Required | Existing session abort path |
-| Live assistant output | P0 | Upstream + Telegram | Required | Coalesce deltas into Telegram message edits |
+| Abort active work | P0 | Upstream + Glue | Required | Registry safe-control binding; not exposed on `ICopilotCLISession` today |
+| Live assistant output | P0 | Upstream + Telegram | Required | Session-lifetime registry hook; coalesce deltas into Telegram edits |
 | Agent intent/status | P0 | Upstream + Telegram | Required when exposed | Render current activity |
 | Tool start/progress/complete | P0 | Upstream + Telegram | Required | Compact event renderer |
 | Permission request | P0 | Upstream + Glue | Required | Structured Telegram approval buttons |
-| Permission approve/deny | P0 | Upstream + Glue | Required | Map callback to SDK permission response |
+| Permission approve/deny | P0 | Upstream + Glue | Required | Registry returns approve-once/deny to owning session; no raw SDK access |
 | Agent user-question request | P0 | Upstream + Glue | Required | Telegram choices/freeform reply |
 | Plan approval/exit-plan response | P1 | Upstream + Glue | Planned | Reuse SDK/session plan interaction |
 | Subagent activity | P1 | Upstream + Telegram | Planned | Render start/complete/failure |
@@ -48,7 +53,7 @@ Legend:
 | Select model | P1 | Upstream + Glue | Planned | Use session model API supported by current source |
 | Reasoning effort selection | P1 | Upstream + Glue | Planned | Only for models exposing supported effort levels |
 | Show current agent mode | P0 | Upstream + Telegram | Required | Interactive/plan/autopilot/etc. as supported |
-| Change mode | P1 | Upstream + Glue | Planned | Reuse existing mode/session APIs |
+| Change mode | P1 | Upstream + Glue | Planned | Reject any change that raises remote permission to autoApprove/autopilot |
 | BYOK provider compatibility | P1 | Upstream | Planned | Do not recreate provider stack |
 | vLLM/OpenAI-compatible endpoint | P1 | Upstream | Planned | Through supported Copilot BYOK configuration |
 | Ollama compatibility | P1 | Upstream | Planned | Through supported Copilot BYOK configuration |
@@ -92,10 +97,11 @@ Legend:
 
 | Feature | Priority | Target | Notes |
 | --- | --- | --- | --- |
-| Detect proposed-API availability | P0 | Required | Activation guard |
-| First-run proposed-API explanation | P0 | Required | User consent before modification |
-| Persist extension ID in `argv.json` | P0 | Required for renamed VSIX | Preserve existing JSONC/content; back up first |
-| Full-restart instruction | P0 | Required | Reload Window is insufficient |
+| Validate bundled-fork proposal configuration | P0 | Required | Current architecture uses product/bundled extension configuration |
+| Detect proposed-API availability | P2 | Independent-extension research | Activation guard for a future own-ID build |
+| First-run proposed-API explanation | P2 | Independent-extension research | User consent before modification |
+| Persist extension ID in `argv.json` | P2 | Independent-extension research | Preserve JSONC/content; back up first |
+| Full-restart instruction | P2 | Independent-extension research | Reload Window is insufficient |
 | Bot connection test | P0 | Required | Validate token via Bot API |
 | Pairing wizard | P0 | Required | Local code -> Telegram confirmation |
 | Disable remote access | P0 | Required | Immediate local kill switch |
@@ -115,6 +121,9 @@ Legend:
 | Workspace/session context displayed on destructive actions | P0 | Required |
 | Log redaction | P0 | Required |
 | Remote disable/kill switch | P0 | Required |
+| Remote permission escalation prevention | P0 | Approve-once/deny only; no remote autoApprove/autopilot |
+| Non-E2E confidentiality disclosure | P0 | Required before enabling bot transport |
+| Singleton poller lease | P0 | One `getUpdates` consumer per bot token; competing consumer fails visibly |
 | Rate limiting | P1 | Planned |
 | Audit trail | P1 | Planned |
 | Configurable permission policy | P1 | Planned |
@@ -127,6 +136,7 @@ The project MUST NOT claim these capabilities unless upstream APIs change and th
 - guaranteed hidden chain-of-thought access,
 - automatic use of every model registered in `vscode.lm` as a full Copilot coding agent,
 - public Marketplace compatibility while the project requires proposed APIs,
+- end-to-end encryption for Telegram bot conversations,
 - seamless operation in Remote SSH, Dev Containers or Codespaces in V1,
 - remote control of arbitrary native Copilot sessions through the small public `GitHub.copilot-chat` exported API alone,
 - zero-maintenance compatibility with future proposed-API changes.

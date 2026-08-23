@@ -12,7 +12,7 @@ The goal is to make upgrade risk explicit.
 | Upstream Copilot internal service | Source-level service inside `extensions/copilot` | Medium |
 | Stable VS Code API | Public `vscode.*` API | Low |
 | Proposed VS Code API | `vscode.proposed.*` / gated API | High |
-| Internal workbench command/service | Not a supported extension contract | High; avoid for core behavior |
+| Internal workbench command/service | Not a supported external extension contract | High; allowed only where the current source fork already requires and tests it |
 | Telegram Bot API | Public HTTPS API | Low/medium |
 | Downstream glue | This project | Controlled by us |
 
@@ -21,21 +21,22 @@ The goal is to make upgrade risk explicit.
 | Feature | Primary API/service | Dependency class | Feasibility | Notes |
 | --- | --- | --- | --- | --- |
 | List Copilot CLI sessions | `ICopilotCLISessionService.getAllSessions()` | Upstream internal | Yes | Preferred because Telegram targets the same VS Code sessions |
-| Get session | `ICopilotCLISessionService.getSession()` | Upstream internal | Yes | Avoid second SDK session manager |
-| Create session | `ICopilotCLISessionService.createSession()` | Upstream internal | Yes | Reuse workspace/MCP/worktree setup |
-| Session history | `getChatHistory()` / SDK events | Upstream + SDK | Yes | Useful for attaching Telegram to existing session |
-| Normal prompt | existing `CopilotCLISession` request path / SDK `send` | Upstream + SDK | Yes | Preserve upstream request lifecycle |
-| Mid-turn steering | SDK `send(... mode: 'immediate')` | Copilot SDK | Yes | Upstream Copilot already uses this pattern |
+| Get session | `ICopilotCLISessionService.getSession()` | Upstream internal | Yes | Returns `IReference<ICopilotCLISession>`; caller must dispose it |
+| Create session | `ICopilotCLISessionService.createSession()` | Upstream internal | Yes | Reuse workspace/MCP/worktree setup and dispose returned reference |
+| Session history/replay | `getChatHistory()` + session-bridge access to `sdkSession.getEvents()` | Upstream + SDK | Yes | Filter persisted replay types; buffer/deduplicate live overlap |
+| Normal prompt | pending request context + `workbench.action.chat.openSessionWithPrompt.copilotcli` | Upstream internal command | Yes in current fork | Dispatch without awaiting the full turn; required for real `ChatRequest`/token; no direct SDK send |
+| Mid-turn steering | same native request path, then upstream SDK `send(... mode: 'immediate')` | Upstream internal + SDK | Yes | Busy-session detection remains inside `CopilotCLISession` |
+| Remote origin attribution | registry-created discriminated origin | Downstream seam | Required | Never infer permission/mode from `SendOptions.source` string prefixes |
 | Queueing | SDK enqueue/default send behavior | Copilot SDK | Yes | P1 |
-| Abort | SDK/session `abort()` | Copilot SDK/upstream | Yes | P0 |
+| Abort | registry session binding -> wrapped SDK `abort()` | Downstream seam + SDK | Yes | Not present on `ICopilotCLISession` today |
 | Assistant streaming | `assistant.message_delta`, `assistant.message` | Copilot SDK | Yes | Telegram renderer coalesces deltas |
 | Intent/status | `assistant.intent` and session state events | Copilot SDK | Yes where exposed | Do not synthesize hidden reasoning |
 | Reasoning stream | `assistant.reasoning[_delta]` | Copilot SDK | Conditional | Model/provider may expose readable, opaque or no reasoning |
 | Tool activity | `tool.execution_*` | Copilot SDK | Yes | P0 |
 | Permission prompt | `permission.requested` | Copilot SDK/upstream | Yes | Remote callback must correlate request ID |
-| Permission response | `respondToPermission()` | Copilot SDK | Yes | Same semantic used by Mission Control |
+| Permission response | registry result consumed by `CopilotCLISession`, then SDK `respondToPermission()` | Downstream seam + SDK | Yes | Do not expose raw SDK session to Telegram |
 | Agent question | `user_input.requested` | Copilot SDK | Yes | Choice/freeform input |
-| User-input response | `respondToUserInput()` | Copilot SDK | Yes | P0 |
+| User-input response | registry result consumed by `CopilotCLISession`, then SDK `respondToUserInput()` | Downstream seam + SDK | Yes | P0 |
 | Plan approval/exit | current session/SDK plan request APIs | Upstream + SDK | Yes | P1; follow current source API names |
 | Subagent status | `subagent.*` events | Copilot SDK | Yes | P1 |
 | Usage/context | `assistant.usage`, `session.usage_info` | Copilot SDK | Yes | Some aggregate metrics may evolve |
@@ -50,13 +51,14 @@ The goal is to make upgrade risk explicit.
 | Native diff | `vscode.diff` command | Stable VS Code command | Yes | Existing upstream behavior |
 | Native chat session UI | `vscode.chat.*` session-provider/controller APIs | Proposed VS Code API | Yes only when proposed API enabled | Inherited from upstream fork |
 | Native advanced model provider integration | richer LM/chat provider proposals | Proposed VS Code API | Yes only when enabled | Inherited from upstream fork |
-| Native remote prompt rendered in same chat | upstream internal workbench command path | Internal | Upstream can do it | Telegram SHOULD avoid depending on this unless necessary |
+| Native remote prompt rendered in same chat | pending request context + upstream internal workbench command | Internal | Required in current fork | Both controller implementations use this route; guard with compatibility tests |
 | Telegram long polling | `getUpdates` | Telegram Bot API | Yes | Default transport |
 | Telegram buttons | `InlineKeyboardMarkup` / callback queries | Telegram Bot API | Yes | Permissions, models, sessions |
 | Live status edit | `editMessageText` / reply markup edit | Telegram Bot API | Yes | Needed to avoid chat flooding |
 | Telegram file download | `getFile` / file endpoint | Telegram Bot API | Yes | P1 |
-| Proposed API persistent enablement | `argv.json` `enable-proposed-api` | VS Code runtime configuration | Yes | User consent + full restart |
-| Marketplace publication with proposals | Marketplace policy | VS Code policy | No for current architecture | VSIX distribution first |
+| Bundled fork proposal access | VS Code product configuration + bundled Copilot identity | Fork/product configuration | Yes in current development architecture | Validate in the built fork; no `argv.json` mutation by default |
+| Independent-extension proposal access | `argv.json` `enable-proposed-api` / development flag | VS Code runtime configuration | Development/private only | Applies to future own-ID extension path; user consent + full restart |
+| Marketplace publication with proposals | Marketplace policy | VS Code policy | No for independent current-API design | Requires stable APIs or an upstream-supported extension point |
 
 ## 3. Upstream Copilot services we intentionally reuse
 
@@ -81,6 +83,8 @@ Current source exposes session lifecycle and methods including:
 
 These are internal source interfaces, not public third-party extension APIs. Because this project is a downstream fork, using them is acceptable but creates rebase risk that must be covered by tests.
 
+`getSession()` and `createSession()` return `IReference<ICopilotCLISession>`, not a bare session. Code must retain the reference only while the remote binding or operation needs it and dispose it deterministically. Treat reference acquire/release as part of the API contract and test it.
+
 ### `CopilotCLISession`
 
 Source: [`../../src/extension/chatSessions/copilotcli/node/copilotcliSession.ts`](../../src/extension/chatSessions/copilotcli/node/copilotcliSession.ts)
@@ -99,6 +103,22 @@ Current source already demonstrates:
 
 This is the most important reference implementation for Telegram remote semantics.
 
+However, `ICopilotCLISession` itself exposes none of the following:
+
+- persistent SDK event subscription,
+- abort,
+- `respondToPermission()`,
+- `respondToUserInput()`,
+- selected-model mutation.
+
+Those capabilities are on the concrete wrapper/its `sdkSession` or inside request-local code. Most SDK listeners used for native rendering are registered inside `_handleRequestImplInner` and disposed with that request. Mission Control adds its own persistent wildcard listener only while remote control is active. The implementation therefore requires a small transport-neutral seam in `CopilotCLISession`; a Telegram-side cast to the concrete class is not the supported design.
+
+Current Mission Control detection uses `source.startsWith('command-')` and then consults shared `_mcState.mcMode`. The registry refactor must replace this as a permission/mode discriminator with a typed origin carried separately from the SDK source string. It must also consolidate overlapping request/persistent Mission Control forwarding so each SDK event ID is exported once.
+
+### Controller path
+
+`ChatSessionsContrib` currently selects between `registerCopilotCLIServices()` (session-controller path) and `registerCopilotCLIServicesV1()` (older non-controller path). Initial implementation and tests target the controller path. The V1 path is a separate compatibility milestone, not an implicit requirement for the first spike.
+
 ### `ICopilotCLIModels` / `CopilotCLISDK`
 
 Source: [`../../src/extension/chatSessions/copilotcli/node/copilotCli.ts`](../../src/extension/chatSessions/copilotcli/node/copilotCli.ts)
@@ -111,7 +131,7 @@ Source: [`../../src/extension/chatSessions/copilotcli/node/mcpHandler.ts`](../..
 
 Telegram must not create a parallel IDE tool bridge. The same Copilot session should continue using upstream MCP/VS Code integration.
 
-## 4. Proposed VS Code APIs
+## 4. Proposed VS Code APIs and packaging modes
 
 The upstream Copilot manifest declares many proposed APIs. A downstream extension with a different extension ID is not automatically granted the same product-level allowlist.
 
@@ -122,9 +142,12 @@ VS Code source behavior:
 - `--enable-proposed-api=<extension-id>` adds an extension ID to the runtime-enabled set,
 - otherwise a non-builtin extension requesting proposals has those proposal declarations removed and logs an error.
 
-Project consequence:
+Project consequences differ by packaging mode:
 
-> A renamed downstream VSIX needs a first-run setup that persistently enables its extension ID in `argv.json`, followed by a full VS Code restart.
+- **Current fork:** the modified Copilot extension is bundled with the VS Code fork and receives proposal access through the fork's product configuration. Verify this in the built product; do not modify `argv.json` as a normal setup step.
+- **Future independent extension/own-ID VSIX:** proposal access must be explicitly enabled for development/private use, commonly through the runtime flag or `argv.json`, followed by a full restart. This is not a normal Marketplace contract.
+
+Whether a self-built VS Code/Copilot fork can reuse every hosted GitHub Copilot authentication path is a separate source/runtime validation item. Do not infer a definitive signing restriction without that investigation.
 
 Official guidance: https://code.visualstudio.com/api/advanced-topics/using-proposed-api
 
@@ -144,13 +167,19 @@ The following are not dependent on the privileged Copilot extension identity and
 
 Therefore the extension ID issue primarily affects **proposed/native Copilot integration surfaces**, not basic Telegram connectivity or the Copilot SDK runtime itself.
 
-## 6. APIs to avoid as core dependencies
+## 6. High-risk and forbidden dependencies
 
 ### Internal workbench commands
 
-Upstream Mission Control currently routes some remote prompts through an internal workbench command so the message appears correctly in the native chat UI.
+Upstream Mission Control routes remote prompts through `workbench.action.chat.openSessionWithPrompt.copilotcli` after staging data with `setPendingCopilotCLIRequestContext(...)`. Both current controller implementations also use the command when opening a Copilot CLI session.
 
-This is valuable reference behavior but should not become a mandatory Telegram dependency unless there is no alternative. Internal command IDs and argument shapes may change without compatibility guarantees.
+For a third-party companion extension this would be an unsuitable core dependency. Inside this source fork it is the required current path: it creates a real `ChatRequest`, supplies the `ChatParticipantToolToken`, preserves the native request lifecycle and makes the message visible in chat. Feature-detect it, keep its arguments centralized and fail visibly when compatibility tests detect an upstream change. Direct SDK `send()` is not a V1 fallback.
+
+The command action awaits `responseCompletePromise`. Remote transports therefore dispatch it fire-and-forget, immediately acknowledge accepted input, observe the returned promise for errors and perform correlation-safe pending-context cleanup on rejection.
+
+### Raw concrete session / SDK access
+
+Telegram code must not cast `ICopilotCLISession` to `CopilotCLISession` or retain its `sdkSession`. Extend the transport-neutral registry/session seam instead.
 
 ### Public `GitHub.copilot-chat` extension export
 

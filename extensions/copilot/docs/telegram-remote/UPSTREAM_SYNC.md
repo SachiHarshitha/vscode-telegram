@@ -8,7 +8,7 @@ Keep the Telegram feature isolated enough that new upstream VS Code/Copilot chan
 
 Primary rule:
 
-> Prefer adding new downstream files and one narrow composition/integration seam over editing large upstream Copilot files.
+> Prefer downstream files plus two deliberate, narrow integration points: service composition and the transport-neutral session hook. Avoid Telegram-specific changes in upstream Copilot code.
 
 ## 2. Repository model
 
@@ -39,11 +39,12 @@ Prefer a commit stack like:
 upstream/main
    |
    +-- T1 docs/specification
-   +-- T2 remote-control abstraction/integration seam
-   +-- T3 Telegram transport + auth
-   +-- T4 Telegram renderer/commands
-   +-- T5 setup/release tooling
-   +-- T6 tests
+   +-- T2 remote-control registry + Mission Control migration
+   +-- T3 Mission Control regression + in-memory second-transport tests
+   +-- T4 Telegram transport + auth
+   +-- T5 Telegram renderer/commands
+   +-- T6 setup/release tooling
+   +-- T7 tests
 ```
 
 Do not squash every downstream concern into one giant commit. Small thematic commits make upstream rebases, `git range-diff`, conflict review and cherry-picking easier.
@@ -62,12 +63,14 @@ extensions/copilot/docs/telegram-remote/**
 Potential examples:
 
 - `chatSessions.ts` — instantiate/register `TelegramRemoteContrib` using the existing Copilot CLI service container.
-- a session/service interface — expose the minimum event/action seam if current internal types are inaccessible.
+- `copilotcliSession.ts` — publish session events to the registry, race registry permission/question results with local UI, and attach safe controls. This is required because the current interface and request-scoped listeners are insufficient.
+- new transport-neutral files beside the Copilot CLI integration — registry contracts, registry implementation and Mission Control adapter.
+- a session/service interface — expose only the minimum additional lifecycle/action types if needed.
 - `package.json` — downstream configuration/commands/settings/proposed API declarations if required.
 
 ### Avoid
 
-- broad rewrites of `copilotcliSession.ts`,
+- Telegram types/branches or broad rewrites in `copilotcliSession.ts`,
 - copying the session service into a Telegram-specific version,
 - replacing upstream Mission Control behavior,
 - modifying tool implementations for Telegram-only reasons,
@@ -128,6 +131,8 @@ Also monitor changes to:
 - Telegram-related Node/runtime dependency restrictions,
 - session event names/types.
 
+`copilotcliSession.ts` is an intentional high-risk patch point. The registry reduces repeated conflicts by replacing Mission Control-only branches with one transport-neutral hook; keep the hook compact and covered by focused source-level tests.
+
 ## 8. Compatibility metadata
 
 Add a generated or maintained file in a later implementation phase, for example:
@@ -177,7 +182,14 @@ For each upstream update verify:
 
 - [ ] session service methods still exist or migration understood
 - [ ] session events required by Telegram still exist
+- [ ] request-scoped versus session-lifetime listener ownership still understood
+- [ ] overlapping Mission Control observers cannot export the same SDK event twice
+- [ ] forwarded event IDs/parent IDs remain valid and no event is its own parent
 - [ ] steering semantics unchanged
+- [ ] pending request context and `workbench.action.chat.openSessionWithPrompt.copilotcli` still create a real request for both controller paths
+- [ ] native command still awaits response completion and remote dispatch remains deliberately non-blocking
+- [ ] `sdkSession.getEvents()` replay types/order and replay/live deduplication remain valid
+- [ ] typed origin—not `SendOptions.source` prefix—controls Mission Control mode inheritance
 - [ ] permission request/response shapes unchanged
 - [ ] user-input request/response shapes unchanged
 - [ ] model selection API still valid
@@ -185,22 +197,28 @@ For each upstream update verify:
 - [ ] proposed API names still exist
 - [ ] VS Code runtime argument behavior unchanged
 - [ ] Mission Control changes reviewed for reusable improvements
+- [ ] Mission Control command/control semantics unchanged behind the registry while duplicate event export remains eliminated
+- [ ] `IReference<ICopilotCLISession>` acquire/dispose contract unchanged
+- [ ] singleton Telegram poller lease still prevents competing consumers
 - [ ] Copilot SDK/CLI license/dependency changes reviewed
 
-## 11. Upstream-first refactoring
+## 11. Shared remote-control refactoring
 
-If Telegram needs a generic abstraction that also improves Mission Control or other remote clients, prefer designing it as a clean upstreamable change.
+The transport-neutral abstraction is required before Telegram is added because the current Mission Control state is hard-coded into permission and question flows.
 
 Example candidate:
 
 ```ts
 interface IRemoteControlTransport {
-    publishEvent(event: SessionEvent): void;
-    onCommand(listener: (command: RemoteCommand) => void): IDisposable;
+    readonly id: string;
+    readonly onDidReceiveCommand: Event<RemoteCommand>;
+    publish(sessionId: string, event: RemoteAgentEvent): void;
+    requestPermission?(...): Promise<PermissionRequestResult | undefined>;
+    requestUserInput?(...): Promise<UserInputResponse | undefined>;
 }
 ```
 
-However, do not perform a large upstream refactor merely to make V1 architecturally perfect. Prove the Telegram path with minimal hooks first, then generalize once the actual common behavior is known.
+Preserve Mission Control's protocol-specific API client, buffering and polling inside its adapter. The shared change should be limited to transport registration, typed origin, exactly-once event publication/replay, response arbitration and safe session actions. Prove it first with Mission Control plus an in-memory transport, then add Telegram.
 
 ## 12. Long-term exit from fork
 

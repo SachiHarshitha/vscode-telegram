@@ -9,9 +9,11 @@ Tests therefore prioritize:
 1. authorization,
 2. request/session correlation,
 3. same-session control semantics,
-4. upstream compatibility,
-5. transport reliability,
-6. rendering correctness.
+4. Mission Control compatibility after registry migration,
+5. deterministic reference/listener/poller ownership,
+6. upstream compatibility,
+7. transport reliability,
+8. rendering correctness.
 
 ## 2. Test layers
 
@@ -90,7 +92,7 @@ Cover:
 - old events drop from compact history,
 - session switch clears previous activity state.
 
-### `argv.json` updater
+### Optional independent-extension `argv.json` updater
 
 Use temporary files covering:
 
@@ -107,17 +109,20 @@ Use temporary files covering:
 
 ## 4. Mock interfaces
 
-Create small mocks/fakes around the seam rather than mocking the whole Copilot extension.
+Create small mocks/fakes around the registry seam rather than mocking the whole Copilot extension or exposing the raw SDK session to Telegram.
 
 Suggested interfaces:
 
 ```ts
-interface TestSession {
-    sessionId: string;
-    status: string;
-    send(...): Promise<void>;
-    abort(): void;
-    emit(event: TestSessionEvent): void;
+interface TestRemoteTransport {
+    id: string;
+    publish(event: TestRemoteEvent): void;
+    answerPermission(...): void;
+    answerUserInput(...): void;
+}
+
+interface TestSessionControl {
+    abort(): Promise<void>;
 }
 
 interface TestTelegramClient {
@@ -130,6 +135,21 @@ interface TestTelegramClient {
 
 The production code should remain close enough to these abstractions that transport and routing tests do not require real LLM calls.
 
+### Remote-control registry
+
+Cover:
+
+- zero, one and two registered remote transports,
+- event fan-out ordering,
+- exactly one publication per SDK event ID when request-scoped and persistent legacy observers overlap,
+- duplicate event IDs are suppressed before fan-out,
+- no forwarded event has `parentId === id`,
+- one transport failing without breaking the other,
+- first valid permission/question response wins,
+- losing transport is cancelled/invalidated,
+- session attachment replacement disposes the old binding,
+- registry shutdown cancels pending waiters and listeners.
+
 ## 5. Integration tests — session bridge
 
 Critical cases:
@@ -137,16 +157,23 @@ Critical cases:
 ### Same-session prompt
 
 - create/get an upstream session,
-- select it in remote coordinator,
-- send remote prompt,
-- verify prompt reaches that session object,
+- select it through the Telegram session router/registry binding,
+- stage `setPendingCopilotCLIRequestContext(...)`,
+- verify `workbench.action.chat.openSessionWithPrompt.copilotcli` is invoked with the selected session resource,
+- simulate VS Code creating the real `ChatRequest`/`toolInvocationToken`,
+- verify the chat participant resolves and invokes that same session object,
 - verify no second Copilot SDK client/session is created for Telegram.
+- verify Telegram receives an immediate acknowledgement without awaiting `responseCompletePromise`,
+- verify the command promise is observed for rejection without blocking the transport update loop,
+- verify command failure clears only its correlated pending request context and cannot clear a newer request,
+- verify failure does not fall back to direct SDK `send()`.
 
 ### Steering
 
 - mark/start session as busy,
 - send Telegram text,
-- verify `mode: immediate`/existing upstream steering path is used,
+- verify the native request command path is used,
+- verify upstream busy handling selects `mode: immediate`,
 - verify original turn remains the same session.
 
 ### Abort
@@ -161,6 +188,15 @@ Critical cases:
 - select session,
 - delete/close it upstream,
 - remote command must fail explicitly and require reselection.
+
+### Session reference lifecycle
+
+- one-shot operation disposes its `IReference<ICopilotCLISession>` in success and error paths,
+- long-lived binding retains one reference until detach,
+- reselection disposes the previous reference,
+- session deletion, Telegram disable and extension deactivation dispose the reference,
+- repeated attach/detach leaves no reference or listener leak,
+- disposed sessions receive no later remote action.
 
 ## 6. Permission integration tests
 
@@ -186,6 +222,15 @@ Invariant:
 
 > Exactly one valid response reaches the SDK for each request.
 
+Additional invariants:
+
+- Telegram can return only approve-once or deny,
+- Telegram cannot call `setPermissionLevel()`,
+- remote mode input cannot raise the effective permission level to `autoApprove` or `autopilot`,
+- with Mission Control active in `autopilot`, a typed Telegram-origin prompt still uses the non-elevated local permission policy,
+- a Telegram payload/source value beginning `command-` cannot change the registry-created origin or inherit Mission Control mode,
+- only a typed `missionControl` origin may apply `mcMode`.
+
 ## 7. User-input integration tests
 
 Cases:
@@ -197,6 +242,18 @@ Cases:
 - stale reply,
 - unrelated Telegram message while a question is pending,
 - cancellation.
+
+### Existing-session event replay
+
+Cover:
+
+- the live listener is installed before the history snapshot and buffers during replay,
+- `sdkSession.getEvents()` is reached only through the session bridge,
+- only the supported persisted event types are replayed,
+- persisted events retain order and upstream IDs/timestamps where present,
+- ephemeral deltas are not assumed to exist,
+- live events arriving during replay are flushed afterward,
+- an event present in both history and the temporary live buffer is published once.
 
 ## 8. Telegram transport tests
 
@@ -214,6 +271,8 @@ Cover:
 - reconnect after failure,
 - clean shutdown,
 - no duplicate pollers after restart/re-enable,
+- a second VS Code host/process cannot acquire the same bot-token poller lease,
+- an abandoned lease is recovered only under the documented safe-expiry rules,
 - update offset persistence/recovery behavior.
 
 ## 9. VS Code extension-host tests
@@ -230,6 +289,8 @@ Cover:
 - proposed API preflight behavior,
 - extension deactivation disposes poller/listeners.
 
+For the current bundled-fork target, also verify the product configuration grants the modified Copilot extension its required proposals without changing user `argv.json`. Run `argv.json` preflight tests only for the optional independent-extension experiment.
+
 When proposed APIs are part of the test, CI must launch the test host with the correct extension-ID enablement.
 
 ## 10. Upstream regression tests
@@ -240,17 +301,21 @@ After every upstream rebase run:
 - upstream tests relevant to Copilot CLI sessions,
 - Telegram unit tests,
 - Telegram session integration tests,
-- proposed API preflight test,
+- optional independent-extension proposed API preflight test when that artifact is in scope,
 - packaging smoke test.
 
 Specific upstream behavior to protect:
 
 - native VS Code Copilot session still works without Telegram configured,
 - Mission Control remote control still works,
+- Mission Control replay/export, prompt, steering, abort, permission, question and command-completion semantics are unchanged behind `MissionControlTransport`,
+- each SDK event is exported once even when a request is active and the session-lifetime listener is installed,
 - local permission UI still works,
 - normal session model selection still works,
 - worktree/checkpoint behavior unchanged,
 - Telegram disabled means no Telegram network activity.
+
+Run the Mission Control suite once with only its transport registered and once with an in-memory second transport registered to catch hidden single-transport assumptions.
 
 ## 11. Local/BYOK model tests
 
@@ -279,33 +344,39 @@ Required before V1:
 - bot token absent from logs/errors/snapshots,
 - Telegram Markdown escaping prevents unintended markup/control,
 - high-rate input does not create unbounded queues,
-- Stop action cannot target a different session through stale state.
+- Stop action cannot target a different session through stale state,
+- remote inputs cannot enable `autoApprove`/`autopilot`,
+- Telegram-origin prompts cannot inherit active Mission Control `autopilot` state or spoof it with a `command-*` source string,
+- setup clearly discloses that Telegram bot conversations are not end-to-end encrypted,
+- a second poller cannot silently consume updates for the same bot token.
 
 ## 13. Manual smoke test script
 
-Run for candidate VSIX builds:
+Run for candidate bundled-fork builds:
 
-1. Install on a clean matching VS Code profile.
-2. Verify proposed-API setup prompt when using downstream ID.
-3. Enable and fully restart VS Code.
+1. Install/run a clean matching bundled-fork build.
+2. Verify required Copilot proposals are available from product configuration without editing `argv.json`.
+3. Confirm the non-E2E Telegram disclosure.
 4. Configure bot token.
 5. Pair Telegram user.
 6. Open/start a Copilot CLI session in a test repository.
 7. Select the session from Telegram.
 8. Send: `Inspect this repository and tell me the test command.`
-9. Start a longer task.
-10. While running, steer: `Do not modify files yet; only diagnose.`
-11. Trigger an operation that requires permission.
-12. Approve/deny remotely.
-13. Trigger/answer an agent question if available.
-14. Verify live tool/activity updates.
-15. Press Stop during another long task.
-16. Return to VS Code and verify the same session/history/state is intact.
-17. Disable Telegram locally and verify remote commands no longer act.
+9. Verify the remote message appears in native VS Code chat.
+10. Start a longer task.
+11. While running, steer: `Do not modify files yet; only diagnose.`
+12. Trigger an operation that requires permission.
+13. Approve/deny remotely and verify no persistent permission increase.
+14. Trigger/answer an agent question if available.
+15. Verify live tool/activity updates.
+16. Press Stop during another long task.
+17. Return to VS Code and verify the same session/history/state is intact.
+18. Enable/smoke-test Mission Control and confirm it still works.
+19. Disable Telegram locally and verify remote commands no longer act.
 
 ## 14. Release compatibility report
 
-Every released VSIX should have a machine/generated report containing at least:
+Every released build/artifact should have a machine-generated report containing at least:
 
 ```text
 Upstream VS Code commit
@@ -345,6 +416,7 @@ A candidate is release-ready only if:
 - all P0 Telegram tests pass,
 - security suite passes,
 - clean-profile manual smoke test passes,
-- proposed API setup/rollback passes,
+- bundled product proposal configuration passes,
+- optional independent-extension proposed API setup/rollback passes if that artifact is produced,
 - exact upstream compatibility metadata is recorded,
 - license/notice packaging has been reviewed.

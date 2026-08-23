@@ -29,18 +29,21 @@ Rebuilding the Copilot extension would unnecessarily duplicate a large and battl
 
 ## 4. Architecture objective
 
-The intended abstraction is transport-neutral:
+The required abstraction is transport-neutral and shared with Mission Control:
 
 ```text
-Copilot SDK Session
+CopilotCLISession
       |
-      +-- VS Code native UI
-      +-- GitHub Mission Control (upstream)
-      +-- Telegram Remote Transport (this project)
-      +-- future transports
+      +-- VS Code native request/UI lifecycle
+      +-- RemoteControlRegistry
+              +-- MissionControlTransport
+              +-- TelegramTransport
+              +-- future transports
 ```
 
-Telegram must not become intertwined with agent execution logic. Telegram-specific code should live in its own module and communicate with existing session services through a narrow adapter/coordinator.
+Telegram must not become intertwined with agent execution logic. The registry is introduced before Telegram and replaces Mission Control-only branches for events, permissions and user questions. Telegram-specific code lives in its own module.
+
+Remote user messages are injected through the existing VS Code native chat command path so VS Code creates a real `ChatRequest` and `toolInvocationToken`. Telegram does not call SDK `send()` directly and does not own an independent agent session.
 
 ## 5. Primary users
 
@@ -81,9 +84,11 @@ The user SHALL be able to:
 - steer an in-progress turn,
 - stop/abort execution.
 
+Live session access SHALL respect the `IReference<ICopilotCLISession>` acquire/dispose contract.
+
 ### FR-4 Live activity
 
-The extension SHALL project useful SDK session events to Telegram, including as available:
+The extension SHALL project useful SDK session events through an explicit session-lifetime registry hook, including as available:
 
 - assistant intent/status,
 - assistant text deltas,
@@ -96,13 +101,19 @@ The extension SHALL project useful SDK session events to Telegram, including as 
 - usage/context information,
 - errors.
 
-The UI SHALL avoid flooding Telegram. High-frequency events SHALL be coalesced into an editable activity/status message where practical.
+The native renderer's request-scoped listeners SHALL NOT be treated as a reusable persistent session feed. The Telegram UI SHALL avoid flooding Telegram; high-frequency events SHALL be coalesced into an editable activity/status message where practical.
+
+Remote projection SHALL publish each supported SDK event exactly once within the session process. Attaching to an existing session SHALL use filtered `sdkSession.getEvents()` replay through the session bridge, with buffered live events and event-ID deduplication across the replay/live boundary.
 
 ### FR-5 Permission handling
 
 When the SDK requests permission, the Telegram user SHALL be able to approve or deny the request with structured callback buttons.
 
-Where the upstream VS Code UI also presents the same permission, the design SHOULD support a first-valid-response-wins pattern similar to upstream Mission Control behavior.
+Where the upstream VS Code UI and other registered remote transports present the same permission, the design SHALL support first-valid-response-wins semantics.
+
+Telegram SHALL expose only approve-once and deny in V1. It SHALL NOT raise the session permission level to `autoApprove` or `autopilot`, directly or through a remote mode change.
+
+Transport origin SHALL be created by the registry and carried as a discriminated internal value. SDK `SendOptions.source` strings SHALL NOT determine transport identity, effective mode or permission level; Telegram SHALL remain non-elevated while Mission Control is active in `autopilot`.
 
 ### FR-6 User questions and plan approval
 
@@ -135,12 +146,14 @@ Telegram SHALL show enough context to prevent accidental operations in the wrong
 
 ### FR-10 Settings and onboarding
 
-The extension SHALL provide a first-run setup flow for:
+The bundled-fork build SHALL provide a first-run setup flow for:
 
-- proposed-API enablement when using a non-privileged downstream extension identity,
 - Telegram bot token entry,
 - Telegram pairing,
+- disclosure that Telegram bot chats are not end-to-end encrypted,
 - security defaults.
+
+Proposed-API enablement for a future independent/own-ID extension is a separate experimental path, not a V1 setup requirement for the bundled fork.
 
 Sensitive secrets SHALL use VS Code secret storage or an equivalently protected local mechanism.
 
@@ -164,7 +177,7 @@ If pairing, permission state, session routing or security state is ambiguous, re
 
 Every accepted Telegram control message SHALL result in one of:
 
-- acknowledgement/dispatch,
+- immediate acknowledgement/dispatch without awaiting the full agent turn,
 - queued/steering state,
 - explicit rejection,
 - explicit error.
@@ -176,6 +189,10 @@ Temporary Telegram failures, VS Code reloads and transient network errors SHOULD
 ### NFR-6 Testability
 
 Telegram transport, routing, permission mapping and event rendering SHALL be testable without a real Telegram account through mock Bot API and mock session interfaces.
+
+### NFR-7 Deterministic lifecycle
+
+Session references, SDK listeners, pending-response waiters and the Telegram poller lease SHALL have explicit owners and deterministic disposal. Only one consumer may long-poll a bot token; a competing consumer fails visibly.
 
 ## 8. V1 scope
 
@@ -194,8 +211,8 @@ V1 includes:
 - Model/mode visibility and supported selection.
 - Basic session/workspace metadata.
 - Secure bot token storage.
-- Proposed-API first-run setup support.
-- VSIX packaging.
+- Bundled VS Code fork packaging/configuration.
+- Optional proposed-API setup research for a future independent extension.
 - Upstream sync metadata.
 
 ## 9. Explicit non-goals for V1
@@ -211,13 +228,13 @@ V1 includes:
 - Rich web dashboard.
 - Tailscale dependency.
 - Remote SSH/Dev Containers/Codespaces support guarantees.
-- Public Visual Studio Marketplace publication while proposed APIs remain required.
+- Public Visual Studio Marketplace publication while proposed APIs and source-level Copilot internals remain required.
 
 ## 10. Success criteria
 
 V1 is successful when a developer can:
 
-1. install the project VSIX,
+1. install/run the matching bundled VS Code fork build,
 2. complete first-run setup,
 3. pair a Telegram account,
 4. select an existing Copilot CLI session,
@@ -228,15 +245,18 @@ V1 is successful when a developer can:
 9. stop the task remotely,
 10. return to VS Code and continue using the same underlying session without a parallel/reimplemented agent state.
 
+The same acceptance run must also show that Mission Control behavior remains unchanged after the registry refactor and that a second poller cannot consume the configured bot token.
+
 ## 11. Technical principles
 
 1. **Reuse upstream first.** If Copilot already provides it, call it rather than recreating it.
 2. **Transport independence.** Agent/session logic must not depend on Telegram-specific types.
-3. **Structured commands.** Permissions and destructive actions use callback IDs/state, never natural-language guessing.
-4. **Explicit context.** Always show session/workspace identity on remote control screens.
-5. **Secure by default.** Unpaired users receive no session information.
-6. **Observable behavior, not hidden CoT.** Render reliable agent events and readable reasoning only when explicitly exposed.
-7. **Rebaseability over cleverness.** Prefer a slightly less elegant hook if it materially reduces modifications to upstream files.
+3. **Native request lifecycle.** Remote prompts use the existing pending-context + VS Code chat command path; Telegram never fabricates a tool token or bypasses `handleRequest()`.
+4. **Structured commands.** Permissions and destructive actions use callback IDs/state, never natural-language guessing.
+5. **Explicit context.** Always show session/workspace identity on remote control screens.
+6. **Secure by default.** Unpaired users receive no session information and remote input cannot raise permission level.
+7. **Observable behavior, not hidden CoT.** Render reliable agent events and readable reasoning only when explicitly exposed.
+8. **Rebaseability with a deliberate seam.** Accept the narrow `copilotcliSession.ts` registry hook because it removes transport-specific branches and reduces later conflicts.
 
 ## 12. Upstream dependencies
 

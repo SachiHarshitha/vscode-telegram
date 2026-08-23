@@ -15,6 +15,8 @@ The design is based on two upstream patterns already present in the Copilot code
 1. **Copilot SDK session -> event projection -> remote transport** — the same pattern used by GitHub Mission Control remote sessions.
 2. **Copilot SDK -> VS Code MCP bridge -> IDE context/tools** — the existing Copilot CLI integration pattern for diagnostics, selection, diffs, and other IDE-aware behavior.
 
+The source review also found that Mission Control is currently hard-coded into permission/question handling and that `ICopilotCLISession` does not expose a complete remote-control API. The first code milestone is therefore a transport-neutral `RemoteControlRegistry` that preserves Mission Control and then hosts Telegram as a second transport.
+
 ## Core design rule
 
 > Do not reimplement functionality already provided by upstream Copilot. Add only the minimum integration surface required for Telegram transport, authentication, rendering, and remote actions.
@@ -31,7 +33,7 @@ This keeps the downstream patch small and allows upstream bug fixes and new Copi
 | [CALL_FLOWS.md](./CALL_FLOWS.md) | Mermaid call/sequence diagrams for prompts, steering, events, permissions, models and setup |
 | [API_AND_COMPATIBILITY.md](./API_AND_COMPATIBILITY.md) | Mapping from features to Copilot SDK, VS Code APIs, proposed APIs and Telegram APIs |
 | [SECURITY.md](./SECURITY.md) | Threat model, pairing, authorization, secret handling and permission policy |
-| [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md) | First-run setup, proposed API enablement, VSIX distribution, licensing and release constraints |
+| [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md) | Bundled-fork setup/release, optional independent-extension research, licensing and distribution constraints |
 | [UPSTREAM_SYNC.md](./UPSTREAM_SYNC.md) | Fork maintenance, patch discipline and upstream rebase process |
 | [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) | Phased implementation plan and initial source touch-points |
 | [TEST_STRATEGY.md](./TEST_STRATEGY.md) | Unit, integration, regression, security and release testing |
@@ -40,18 +42,22 @@ This keeps the downstream patch small and allows upstream bug fixes and new Copi
 
 ```mermaid
 flowchart LR
-    TG[Telegram Client] <-->|Bot API / long polling| TA[Telegram Remote Contribution]
-    TA <--> RC[Remote Control Coordinator]
-    RC <--> SS[Copilot CLI Session Service]
-    SS <--> S[Copilot SDK Session]
+    TG[Telegram Client] <-->|Bot API / long polling| TA[TelegramTransport]
+    GH[GitHub web/mobile] <--> MC[MissionControlTransport]
+    TA <--> RC[RemoteControlRegistry]
+    MC <--> RC
+    RC <--> CS[CopilotCLISession]
+    CS <--> S[Copilot SDK Session]
     S --> EV[SDK Events]
-    EV --> RC
+    EV --> CS
     S <--> MCP[VS Code MCP Bridge]
     MCP <--> IDE[VS Code workspace / diagnostics / diffs / selection]
     S <--> AGENT[Copilot agent runtime]
 ```
 
 Telegram is a **transport and presentation layer**, not the owner of the agent runtime.
+
+Remote prompts and steering enter through `setPendingCopilotCLIRequestContext(...)` plus `workbench.action.chat.openSessionWithPrompt.copilotcli`. That native path creates the real VS Code request/tool token and preserves chat rendering; Telegram does not call SDK `send()` directly.
 
 ## Upstream source seams
 
@@ -63,7 +69,7 @@ The initial implementation should prefer existing Copilot services instead of cr
 - [`src/extension/chatSessions/copilotcli/node/mcpHandler.ts`](../../src/extension/chatSessions/copilotcli/node/mcpHandler.ts) — existing IDE-to-agent MCP bridge.
 - [`src/extension/chatSessions/copilotcli/node/copilotCli.ts`](../../src/extension/chatSessions/copilotcli/node/copilotCli.ts) — Copilot SDK and model services.
 
-The preferred first integration point is the existing Copilot CLI service composition in `ChatSessionsContrib`: instantiate a Telegram contribution after the upstream Copilot CLI services are available.
+The first integration points are the controller-path service composition in `ChatSessionsContrib` and a narrow, transport-neutral hook in `CopilotCLISession`. Mission Control is moved behind the registry before Telegram is registered. The older V1/non-controller registration path is a later compatibility target.
 
 ## V1 product boundary
 
@@ -78,8 +84,8 @@ V1 targets **VS Code Desktop with a local extension host** and Telegram long pol
 - Mode and model selection where the underlying session supports it.
 - Workspace/session metadata.
 - Secure storage of the Telegram bot token.
-- First-run proposed-API enablement support for a downstream extension identity.
-- Reliable VSIX packaging and upstream-version tracking.
+- Reliable bundled-fork packaging/configuration and upstream-version tracking.
+- Optional later research for an independently installed own-ID extension.
 
 Remote SSH, Dev Containers, Codespaces, multi-machine federation, Telegram Mini Apps and additional messaging channels are later phases.
 
@@ -97,9 +103,17 @@ Tailscale may be added later for an optional rich local web dashboard, but it is
 
 ## Important constraints
 
-- The downstream implementation may use VS Code proposed APIs already used by upstream Copilot. A renamed extension identity requires explicit proposed-API enablement at VS Code startup.
-- Proposed APIs are not suitable for normal Visual Studio Marketplace publication. Initial distribution is therefore VSIX/internal/developer release.
-- Do not depend on undocumented native Copilot commands for core behavior when the same operation can be performed through the Copilot SDK/session services.
+- The downstream implementation uses proposed VS Code APIs already used by upstream Copilot. Only a future renamed independent extension identity needs explicit runtime proposal enablement.
+- The current implementation target is a VS Code fork with the modified Copilot extension bundled and configured by the product. The renamed-extension/`argv.json` path is a separate future experiment.
+- Proposed APIs and source-level Copilot internals are not a normal Marketplace contract.
+- The internal native chat command is a required, high-risk dependency in the current fork because `handleRequest()` needs a real `ChatParticipantToolToken`; protect it with compatibility tests.
+- Dispatch the native command without awaiting the full turn; its promise follows `responseCompletePromise`. Acknowledge Telegram immediately and correlate any later failure cleanup.
+- Remote origin is a registry-created typed value. Never treat SDK `source` prefixes such as `command-` as authorization or permission-mode evidence.
+- Remote events have one session-lifetime publication point. Use filtered `sdkSession.getEvents()` replay plus buffered live-event deduplication when attaching to an existing session.
+- `getSession()`/`createSession()` return disposable session references; every remote binding must release them deterministically.
+- Only one long poller may consume a bot token. Competing VS Code hosts must coordinate or the later consumer must fail visibly.
+- Telegram may approve once or deny, but it may never raise the session permission level to `autoApprove`/`autopilot`.
+- Telegram bot chats are not end-to-end encrypted. Selected prompts, code, paths, diffs and tool metadata transit Telegram infrastructure.
 - Do not promise access to hidden chain-of-thought. Surface SDK-exposed reasoning/status events where available plus reliable tool/activity telemetry.
 - Do not patch the `@github/copilot` CLI runtime. Keep third-party runtime dependencies unmodified.
 
