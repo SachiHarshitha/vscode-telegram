@@ -56,8 +56,17 @@ The goal is to make upgrade risk explicit.
 | Telegram buttons | `InlineKeyboardMarkup` / callback queries | Telegram Bot API | Yes | Permissions, models, sessions |
 | Live status edit | `editMessageText` / reply markup edit | Telegram Bot API | Yes | Needed to avoid chat flooding |
 | Telegram file download | `getFile` / file endpoint | Telegram Bot API | Yes | P1 |
-| Bundled fork proposal access | VS Code product configuration + bundled Copilot identity | Fork/product configuration | Yes in current development architecture | Validate in the built fork; no `argv.json` mutation by default |
-| Independent-extension proposal access | `argv.json` `enable-proposed-api` / development flag | VS Code runtime configuration | Development/private only | Applies to future own-ID extension path; user consent + full restart |
+| Session-list remote indicator | `ChatSessionItem.description` / `tooltip` | Proposed VS Code API | Yes | `badge`, `status` and `metadata` are already consumed upstream; these two are free |
+| Live indicator refresh | existing `refreshSession({reason:'update'})` on the content provider | Upstream internal | Yes | No new provider or API proposal needed |
+| Status bar indicator + kill switch | `vscode.window.createStatusBarItem` | Stable VS Code API | Yes | Precedent: `copilot.networkStatus` in `extension/log/vscode-node/loggingActions.ts` |
+| Modal consent gate | `vscode.window.showWarningMessage(..., { modal: true })` | Stable VS Code API | Yes | Cancel is the default action |
+| Setup wizard | `window.showInputBox({ password: true })` / `showQuickPick` | Stable VS Code API | Yes | No webview in V1 |
+| Bot token storage | `IVSCodeExtensionContext.secrets` | Stable VS Code API | Yes | Pattern: `byok/vscode-node/byokStorageService.ts` |
+| In-chat attach notice | `stream.warning()` on the routed response stream | Proposed VS Code API | Yes | Already implemented on `CopilotCLIResponseStreamRouter`; no-ops without a UI stream |
+| Settings registration | `defineSetting()` + `contributes.configuration` | Upstream internal + manifest | Yes | Token must never be a setting |
+| V1 bundled-Copilot proposal access | Built-in extension + `package.json#enabledApiProposals` | Bundled extension manifest | Yes in current development architecture | Validate in the built fork; no separate Telegram extension ID and no `argv.json` mutation |
+| V2 fork-bundled own-ID companion | `product.json#extensionEnabledApiProposals` + matching manifest declaration | Fork build configuration | Development/private fork only | Build-time registration; activation can verify but cannot self-authorize |
+| V2 standalone own-ID experiment | `argv.json` `enable-proposed-api` / development flag | VS Code runtime configuration | Development/private only | Explicit consent + full restart; does not create a Copilot session-control API |
 | Marketplace publication with proposals | Marketplace policy | VS Code policy | No for independent current-API design | Requires stable APIs or an upstream-supported extension point |
 
 ## 3. Upstream Copilot services we intentionally reuse
@@ -137,15 +146,16 @@ The upstream Copilot manifest declares many proposed APIs. A downstream extensio
 
 VS Code source behavior:
 
-- product-configured extension IDs can receive an explicit proposal allowlist,
+- product-configured extension IDs can receive an explicit proposal allowlist through `product.json#extensionEnabledApiProposals`; when present, that product list overrides the extension manifest list,
 - extension development can receive proposal access depending on build mode,
 - `--enable-proposed-api=<extension-id>` adds an extension ID to the runtime-enabled set,
-- otherwise a non-builtin extension requesting proposals has those proposal declarations removed and logs an error.
+- otherwise a non-builtin extension requesting proposals has those proposal declarations removed and logs an error; a built-in extension is not stripped by that final restriction.
 
 Project consequences differ by packaging mode:
 
-- **Current fork:** the modified Copilot extension is bundled with the VS Code fork and receives proposal access through the fork's product configuration. Verify this in the built product; do not modify `argv.json` as a normal setup step.
-- **Future independent extension/own-ID VSIX:** proposal access must be explicitly enabled for development/private use, commonly through the runtime flag or `argv.json`, followed by a full restart. This is not a normal Marketplace contract.
+- **V1 current fork:** the modified Copilot extension is built in and declares its proposals in its manifest. Verify access in the built product; do not create a separate Telegram extension ID or modify `argv.json` as a normal setup step.
+- **V2 fork-bundled own-ID companion:** register the exact extension ID and proposal list in `product.json#extensionEnabledApiProposals` during the product build and verify the product/manifest lists remain synchronized. Runtime activation only performs a fail-closed preflight.
+- **V2 private standalone own-ID VSIX:** explicitly enable proposal access through the runtime flag or `argv.json`, followed by a full restart. This is not a normal Marketplace contract.
 
 Whether a self-built VS Code/Copilot fork can reuse every hosted GitHub Copilot authentication path is a separate source/runtime validation item. Do not infer a definitive signing restriction without that investigation.
 

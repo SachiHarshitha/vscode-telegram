@@ -79,6 +79,25 @@ Legend:
 | Notifications on completion | P1 | Planned | Completion/failure/approval-needed |
 | Telegram Mini App | P2 | Optional | Rich dashboard only if bot UI becomes limiting |
 
+## VS Code UI features
+
+All native indicators render transport-neutral registry state; Telegram strings never enter upstream files. See [ARCHITECTURE.md](./ARCHITECTURE.md) section 16.
+
+| Feature | Priority | Ownership | Target | Notes |
+| --- | --- | --- | --- | --- |
+| Remote indicator in session list | P0 | Glue | Required | `ChatSessionItem.description` + `tooltip`; `badge`/`status`/`metadata` already used upstream |
+| Live indicator refresh | P0 | Glue | Required | Existing `refreshSession({reason:'update'})` driven by `onDidChangeAttachments` |
+| Status bar item | P0 | Telegram | Required | Connecting/connected/attached/error; warning background while attached |
+| One-click kill switch | P0 | Telegram | Required | QuickPick from the status bar item |
+| In-chat attach notice | P0 | Glue | Required | `stream.warning()` on the existing routed stream; no-ops when no UI stream |
+| Modal consent gate | P0 | Telegram | Required | Blocks first enable; cancel is default |
+| Setup wizard | P0 | Telegram | Required | QuickPick/InputBox; token entry masked |
+| Settings + disclosure text | P0 | Telegram | Required | `defineSetting()` + `markdownDescription` warning; token never a setting |
+| Command palette gating | P1 | Telegram | Planned | `enablement` clauses so pairing actions hide when disabled |
+| Diagnostics output channel | P1 | Telegram | Planned | Attach/detach audit trail, redacted |
+| Session-list remote filter | P2 | Glue | Optional | Only if many sessions are attached at once |
+| Webview dashboard | P2 | Telegram | Rejected for V1 | Commands + settings cover the surface; revisit only if it stops scaling |
+
 ## Workspace and Git context
 
 | Feature | Priority | Ownership | Target | Notes |
@@ -97,11 +116,12 @@ Legend:
 
 | Feature | Priority | Target | Notes |
 | --- | --- | --- | --- |
-| Validate bundled-fork proposal configuration | P0 | Required | Current architecture uses product/bundled extension configuration |
-| Detect proposed-API availability | P2 | Independent-extension research | Activation guard for a future own-ID build |
-| First-run proposed-API explanation | P2 | Independent-extension research | User consent before modification |
-| Persist extension ID in `argv.json` | P2 | Independent-extension research | Preserve JSONC/content; back up first |
-| Full-restart instruction | P2 | Independent-extension research | Reload Window is insufficient |
+| Validate V1 bundled-Copilot proposal access | P0 | Required | Verify the built-in extension retains the proposals declared by its manifest; do not require `argv.json` |
+| Register an own-ID companion in fork product configuration | P2 | V2 research | Build-time `extensionEnabledApiProposals` entry synchronized with the companion manifest; never changed during activation |
+| Detect proposed-API availability | P2 | V2 own-ID research | Fail-closed activation guard before proposed APIs are touched |
+| First-run proposed-API explanation | P2 | Private standalone research | User consent before runtime-argument modification |
+| Persist extension ID in `argv.json` | P2 | Private standalone research | Preserve JSONC/content; back up first |
+| Full-restart instruction | P2 | Private standalone research | Reload Window is insufficient |
 | Bot connection test | P0 | Required | Validate token via Bot API |
 | Pairing wizard | P0 | Required | Local code -> Telegram confirmation |
 | Disable remote access | P0 | Required | Immediate local kill switch |
@@ -121,6 +141,8 @@ Legend:
 | Workspace/session context displayed on destructive actions | P0 | Required |
 | Log redaction | P0 | Required |
 | Remote disable/kill switch | P0 | Required |
+| Modal consent before first enable | P0 | Required; cancel is the default action |
+| Persistent local indicator while attached | P0 | Session list + status bar |
 | Remote permission escalation prevention | P0 | Approve-once/deny only; no remote autoApprove/autopilot |
 | Non-E2E confidentiality disclosure | P0 | Required before enabling bot transport |
 | Singleton poller lease | P0 | One `getUpdates` consumer per bot token; competing consumer fails visibly |

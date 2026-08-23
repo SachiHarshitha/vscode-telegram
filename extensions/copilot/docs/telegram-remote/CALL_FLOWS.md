@@ -22,7 +22,7 @@ sequenceDiagram
     TR->>REG: register Telegram transport
     TR->>TR: acquire singleton poller lease when enabled
 
-    Note over PRE,VS: ProposedApiSetup is only for a future independent/own-ID extension path
+    Note over PRE,VS: ProposedApiSetup is V2-only; V1 adds no third-party extension ID
 ```
 
 ## 2. Telegram long-poll lifecycle
@@ -331,7 +331,34 @@ Remote forwarding has exactly one publication point. Request-scoped native rende
 
 Reference: https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events
 
-## 13. Future independent-extension proposed API enablement
+## 13. Future own-ID extension proposal authorization
+
+### 13.1 Fork-bundled V2 companion
+
+```mermaid
+sequenceDiagram
+    participant B as Product build
+    participant M as Companion package.json
+    participant P as product.json
+    participant VS as VS Code startup
+    participant E as Own-ID companion activation
+
+    B->>M: read extension ID + enabledApiProposals
+    B->>P: validate matching extensionEnabledApiProposals entry
+    B-->>B: fail build on missing ID or proposal mismatch
+    VS->>P: resolve proposed-API authorization before activation
+    VS->>E: activate companion
+    E->>E: preflight required APIs
+    alt APIs available
+        E->>E: continue initialization
+    else APIs unavailable
+        E-->>VS: fail closed with product-registration diagnostic
+    end
+```
+
+Activation never edits `product.json`. This path is not needed by V1, which runs inside the bundled Copilot extension.
+
+### 13.2 Private standalone V2 experiment
 
 ```mermaid
 sequenceDiagram
@@ -353,7 +380,7 @@ sequenceDiagram
 
 A simple window reload is not considered sufficient because startup arguments are read by the VS Code main process.
 
-This flow does not run for the current bundled-fork architecture; the fork supplies proposal access through product configuration.
+This `argv.json` flow does not run for V1 or for a correctly registered fork-bundled V2 companion.
 
 Reference: https://code.visualstudio.com/api/advanced-topics/using-proposed-api
 

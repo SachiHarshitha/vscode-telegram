@@ -411,26 +411,125 @@ This preserves upstream behavior for diagnostics, selection, diff/open-diff flow
 
 ## 15. Packaging modes and proposed APIs
 
-The current implementation target is a VS Code source fork with the modified Copilot extension bundled into the product. It should use the fork's product configuration and existing Copilot activation path. Do not make `argv.json` mutation a prerequisite for this path.
+The current implementation target is a VS Code source fork with the modified Copilot extension bundled into the product. V1 runs inside that built-in extension, whose manifest already declares its proposed APIs, and uses the existing Copilot activation path. Validate proposal availability in the built product, but do not add a separate Telegram extension ID or make `argv.json` mutation a prerequisite for V1.
 
-A future independently installed extension/renamed VSIX has a different constraint: VS Code normally strips proposed API access unless its ID is enabled through product configuration, extension-development mode or `--enable-proposed-api`. The preflight flow below applies to that future path only:
+A future V2 own-ID companion has two possible authorization paths:
 
-Any such independent-extension experiment needs a preflight activation path that uses only stable/basic functionality before touching proposed APIs:
+- **Fork-bundled companion:** add its exact extension ID and proposal list to `product.json#extensionEnabledApiProposals` at build time. Keep that list synchronized with the companion's `package.json#enabledApiProposals`. Activation verifies the result but never edits `product.json`.
+- **Private standalone VSIX experiment:** enable its ID through extension-development mode or `--enable-proposed-api`/`argv.json`, with explicit consent and a full application restart.
+
+Product registration or runtime proposal enablement grants only VS Code API proposals. It does not provide the missing public Copilot session-control seam, so V2 remains blocked on an upstream-supported API or a separately designed fork bridge.
+
+Any such V2 experiment needs a preflight activation path that uses only stable/basic functionality before touching proposed APIs:
 
 ```mermaid
 flowchart TD
     A[Extension activation] --> B{Required proposed APIs usable?}
     B -->|yes| C[Normal Copilot + Telegram activation]
-    B -->|no| D[First-run explanation]
-    D --> E{User approves?}
-    E -->|no| F[Remain disabled]
-    E -->|yes| G[Safely update argv.json]
-    G --> H[Require full VS Code restart]
+    B -->|no| D{Packaging mode}
+    D -->|fork-bundled| E[Report missing build-time product registration]
+    D -->|private standalone| F[First-run explanation]
+    F --> G{User approves?}
+    G -->|no| H[Remain disabled]
+    G -->|yes| I[Safely update argv.json]
+    I --> J[Require full VS Code restart]
 ```
+
+The fork-bundled branch fails closed with an actionable build diagnostic; it cannot repair product registration at runtime because proposed-API authorization is resolved before extension activation.
 
 See [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md). Hosted Copilot authentication/entitlement for a self-built fork requires a separate source-level validation; these documents do not assume that Microsoft signing either permits or prevents it.
 
-## 16. Source ownership boundary
+## 16. VS Code UI surfaces
+
+Remote control is invisible in the current native UI: Mission Control only prints a one-time markdown banner into the chat stream when `/remote` runs. A session can therefore be remotely steerable with nothing on screen to say so. That is unacceptable for a transport that can approve shell commands, so the local UI must make remote attachment continuously visible and locally revocable.
+
+### 16.1 Design constraint
+
+All native indicators are rendered from **transport-neutral** state. Upstream files ask the registry "which transports are attached to this session?" and render the returned label/icon. Telegram strings, emoji and bot identities never appear in `copilotCLIChatSessions.ts` or `copilotcliSession.ts`.
+
+```ts
+interface IRemoteAttachmentInfo {
+    readonly transportId: string;
+    readonly label: string;     // localized, e.g. "Telegram"
+    readonly themeIcon: string; // codicon id, e.g. 'radio-tower'
+}
+
+// on IRemoteControlRegistry
+getAttachments(sessionId: string): readonly IRemoteAttachmentInfo[];
+readonly onDidChangeAttachments: Event<string /* sessionId */>;
+```
+
+### 16.2 Session list indicator (primary)
+
+`ChatSessionItem` (proposed `chatSessionsProvider`) exposes `label`, `description`, `badge`, `status`, `tooltip` and `metadata`. Upstream already consumes `badge` (repo/folder), `status` (session state) and `metadata`; **`description` and `tooltip` are unused and are the correct slots.**
+
+Rendered in `CopilotCLIChatSessionContentProvider` where `badge`/`metadata` are already assigned:
+
+```ts
+const attachments = this._remoteControlRegistry.getAttachments(session.id);
+if (attachments.length) {
+    const description = new vscode.MarkdownString(
+        attachments.map(a => `$(${a.themeIcon}) ${a.label}`).join(' '));
+    description.supportThemeIcons = true;
+    item.description = description;
+    item.tooltip = buildRemoteTooltip(attachments); // transport + who is paired + how to revoke
+}
+```
+
+Live updates reuse the existing refresh contract rather than a new mechanism:
+
+```ts
+refreshSession({ reason: 'update', sessionId });
+```
+
+subscribed from `onDidChangeAttachments`. No new provider, no new API proposal.
+
+### 16.3 Global status bar item
+
+A single window-level item, following the precedent of `copilot.networkStatus` in `extension/log/vscode-node/loggingActions.ts`:
+
+| State | Text | Background |
+| --- | --- | --- |
+| disabled | hidden | — |
+| connecting/retrying | `$(sync~spin) Telegram` | none |
+| connected, no session attached | `$(radio-tower) Telegram` | none |
+| session attached | `$(radio-tower) Telegram: <session title>` | `statusBarItem.warningBackground` |
+| unauthorized/error | `$(alert) Telegram` | `statusBarItem.errorBackground` |
+
+Clicking opens a QuickPick: *Show status* / *Open log* / *Unpair user* / **Disable remote access**. The kill switch must never be more than one click away, and this item is the only always-visible affordance, so it owns that role.
+
+### 16.4 In-chat notice
+
+When a transport attaches while a request stream is live, emit one notice through the existing routed stream:
+
+```ts
+stream.warning(l10n.t('This session is now remotely controllable from {0}. Permission prompts may be answered remotely.', label));
+```
+
+`stream.warning()` already exists on `CopilotCLIResponseStreamRouter` and no-ops safely when no UI stream is attached, so this needs no null-guarding and no new plumbing. Do **not** use `addUserAssistantMessage()` for notices — it emits a synthetic `assistant.message` into the SDK session and would pollute both the transcript and the model's context. Attach/detach events go to the extension log for the audit trail instead.
+
+### 16.5 Configuration and setup
+
+V1 uses commands and settings only. No webview, no custom editor — the setup surface is small and a webview would add proposed-API-independent maintenance cost for no benefit.
+
+- `Telegram Remote: Set Up` — a `QuickPick`/`InputBox` wizard: consent (16.6) → bot token (`password: true`) → validate via `getMe` → show pairing challenge → wait for `/pair` → confirm.
+- Settings under `github.copilot.telegram.*` registered with `defineSetting()` in `platform/configuration/common/configurationService.ts` plus matching `contributes.configuration` entries. The bot token is **never** a setting; it lives in `IVSCodeExtensionContext.secrets`.
+- Every command is `enablement`-gated so the palette does not advertise pairing actions when the feature is disabled.
+
+### 16.6 Consent gate
+
+The first enable is blocked on an explicit modal. This is the single point where the risk is stated in full; see [SECURITY.md](./SECURITY.md) section 20 for the required content and wording rules.
+
+```ts
+const choice = await vscode.window.showWarningMessage(
+    l10n.t('Enable Telegram remote control of Copilot?'),
+    { modal: true, detail: /* risk disclosure */ },
+    l10n.t('Enable'), l10n.t('Learn More'));
+```
+
+Default is cancel. Declining leaves the feature disabled and does not persist a token.
+
+## 17. Source ownership boundary
 
 ### Upstream-owned
 
@@ -460,7 +559,7 @@ See [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md). Hosted C
 
 The registry contract and Mission Control adapter are shared integration code. Only the narrow glue required to publish existing session events, race interactive responses and expose safe actions should touch `copilotcliSession.ts`.
 
-## 17. Architecture quality gate
+## 18. Architecture quality gate
 
 A proposed implementation change should be rejected if it:
 
@@ -475,4 +574,7 @@ A proposed implementation change should be rejected if it:
 - loses or leaks an `IReference<ICopilotCLISession>`,
 - starts a second long poller for the same bot token,
 - lets Telegram raise permission level to `autoApprove` or `autopilot`,
+- renders a transport-specific string or icon inside an upstream file,
+- leaves a session remotely attached with no persistent local indicator,
+- enables remote access without an explicit modal consent gate,
 - requires inbound networking for the default Telegram transport.

@@ -279,9 +279,9 @@ High-frequency SDK events must be coalesced before Bot API calls.
 
 Only one `getUpdates` consumer may hold the poller lease for a bot token. Competing VS Code windows/processes must coordinate through a lock/lease or the later consumer must fail closed with a visible diagnostic. Silent competing pollers can lose or reorder control messages.
 
-## 18. Future independent-extension proposed API setup security
+## 18. Future V2 own-ID proposed API setup security
 
-A future own-ID independent extension experiment may offer to modify VS Code `argv.json` after explicit consent. The current bundled-fork setup does not.
+A fork-bundled V2 companion receives its proposal authorization from build-time product configuration. It may diagnose missing registration during activation, but it must never edit `product.json` at runtime. A private standalone V2 experiment may offer to modify VS Code `argv.json` after explicit consent. V1 does neither because Telegram runs inside the built-in Copilot extension.
 
 Rules:
 
@@ -313,7 +313,59 @@ Rules:
 | Extension disabled remotely by attacker | Local enablement/disable state remains authoritative |
 | Public inbound service exposed | Long polling; no inbound listener in V1 |
 
-## 20. Security acceptance criteria
+## 20. Consent, disclosure and local visibility
+
+Remote control is opt-in, must be understood before it is enabled, and must remain visible while it is active. Pairing proves *who* is connected; it does not make the transport safe or private.
+
+### 20.1 Enable-time consent gate
+
+Enabling the transport for the first time (and again after the token is changed) requires an explicit modal acknowledgement. Default action is cancel.
+
+The modal MUST state, in plain language:
+
+1. A paired Telegram user can send prompts that cause this machine to **write files, run shell commands, access the network and perform Git operations**.
+2. That user can **approve permission requests remotely**, so an operation may proceed without anyone at the keyboard.
+3. Telegram bot chats are **not end-to-end encrypted**. Prompts, code, file paths, diffs and tool output sent to the bot transit Telegram infrastructure.
+4. Anyone who obtains the **bot token** can impersonate the bot; anyone who obtains the paired **Telegram account** gains this control.
+5. Exactly which workstation and workspace will be exposed.
+6. How to turn it off (status bar item → *Disable remote access*).
+
+The implementation MUST ensure:
+
+- enabling the transport without passing the modal consent gate is not possible from any entry point, including the setting,
+- an attached session always renders a local indicator in the session list and status bar,
+- the kill switch is reachable in one click from the status bar item.
+
+Wording rules:
+
+- No minimizing language ("just", "simply", "safe").
+- Do not imply GitHub or Microsoft endorsement.
+- The `Enable` button is never the pre-selected default.
+- Declining persists nothing — no token, no pairing, no enabled flag.
+
+### 20.2 Settings disclosure
+
+`github.copilot.telegram.enabled` uses a `markdownDescription` carrying an abbreviated form of the same warning, so the risk is visible to anyone who finds the setting without running the wizard. Toggling the setting on directly still routes through the consent gate; the setting alone must not activate the transport.
+
+### 20.3 Continuous local visibility
+
+A remotely attached session MUST be identifiable without opening a chat:
+
+- session list entry carries a remote indicator and tooltip,
+- the status bar shows an attached-state item with a warning background,
+- a one-time in-chat notice is emitted when a transport attaches during a live request.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) section 16 for the implementation. **A session that is remotely controllable with no local indicator is a security defect, not a cosmetic one**, and is covered by the architecture quality gate.
+
+### 20.4 Telegram-side context
+
+The bot must not let an operator forget what they are driving. `/start`, the home card and every permission or destructive-action prompt state the workstation name, workspace/repository and session title. A permission prompt that does not identify its session is rejected rather than rendered.
+
+### 20.5 Non-goals of consent
+
+Acknowledgement is not a substitute for the technical controls. Consent does not permit relaxing pairing, permission-escalation prevention, redaction or the singleton poller lease.
+
+## 21. Security acceptance criteria
 
 Before V1 release:
 
@@ -329,4 +381,5 @@ Before V1 release:
 - long-poll retry cannot spawn duplicate consumers,
 - a competing process/window cannot acquire a second poller lease,
 - setup displays and records acknowledgement of the non-E2E confidentiality warning,
-- if the optional independent-extension setup is built, it never overwrites unrelated `argv.json` entries.
+- if a V2 fork-bundled companion is built, activation never attempts to edit `product.json`,
+- if the optional standalone V2 setup is built, it never overwrites unrelated `argv.json` entries.

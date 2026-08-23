@@ -212,7 +212,7 @@ V1 includes:
 - Basic session/workspace metadata.
 - Secure bot token storage.
 - Bundled VS Code fork packaging/configuration.
-- Optional proposed-API setup research for a future independent extension.
+- Optional V2 proposal-registration/setup research for a future own-ID companion extension.
 - Upstream sync metadata.
 
 ## 9. Explicit non-goals for V1

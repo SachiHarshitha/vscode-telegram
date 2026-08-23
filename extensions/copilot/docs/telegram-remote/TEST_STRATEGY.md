@@ -92,7 +92,7 @@ Cover:
 - old events drop from compact history,
 - session switch clears previous activity state.
 
-### Optional independent-extension `argv.json` updater
+### Optional V2 standalone `argv.json` updater
 
 Use temporary files covering:
 
@@ -289,7 +289,16 @@ Cover:
 - proposed API preflight behavior,
 - extension deactivation disposes poller/listeners.
 
-For the current bundled-fork target, also verify the product configuration grants the modified Copilot extension its required proposals without changing user `argv.json`. Run `argv.json` preflight tests only for the optional independent-extension experiment.
+For V1, verify that the built-in modified Copilot extension retains every proposal declared by its manifest without adding a Telegram extension ID or changing user `argv.json`.
+
+If a V2 own-ID companion is produced, add a build-level contract test that:
+
+- its exact extension ID exists in `product.json#extensionEnabledApiProposals` for a fork-bundled build,
+- the product and companion-manifest proposal lists match exactly,
+- a missing or incomplete product entry fails the build,
+- activation preflight fails closed rather than attempting to edit `product.json`.
+
+Run `argv.json` updater tests only for the optional private standalone V2 experiment.
 
 When proposed APIs are part of the test, CI must launch the test host with the correct extension-ID enablement.
 
@@ -301,7 +310,7 @@ After every upstream rebase run:
 - upstream tests relevant to Copilot CLI sessions,
 - Telegram unit tests,
 - Telegram session integration tests,
-- optional independent-extension proposed API preflight test when that artifact is in scope,
+- optional V2 own-ID proposal registration/preflight test when that artifact is in scope,
 - packaging smoke test.
 
 Specific upstream behavior to protect:
@@ -355,7 +364,7 @@ Required before V1:
 Run for candidate bundled-fork builds:
 
 1. Install/run a clean matching bundled-fork build.
-2. Verify required Copilot proposals are available from product configuration without editing `argv.json`.
+2. Verify the built-in Copilot extension has every proposal declared by its manifest without adding a Telegram extension ID or editing `argv.json`.
 3. Confirm the non-E2E Telegram disclosure.
 4. Configure bot token.
 5. Pair Telegram user.
@@ -416,7 +425,8 @@ A candidate is release-ready only if:
 - all P0 Telegram tests pass,
 - security suite passes,
 - clean-profile manual smoke test passes,
-- bundled product proposal configuration passes,
-- optional independent-extension proposed API setup/rollback passes if that artifact is produced,
+- V1 bundled Copilot manifest proposal access passes,
+- V2 fork-bundled companion product registration passes if that artifact is produced,
+- V2 standalone proposed API setup/rollback passes if that artifact is produced,
 - exact upstream compatibility metadata is recorded,
 - license/notice packaging has been reviewed.
