@@ -67,4 +67,16 @@ describe('TelegramEventRenderer', () => {
 		expect(card).toContain('host&lt;&amp;&gt;');
 		expect(card.length).toBeLessThanOrEqual(telegramMaximumMessageLength);
 	});
+
+	it('labels model usage as input, output, and total tokens', () => {
+		const rendered = renderTelegramEvent({
+			...base,
+			kind: 'assistant.usage',
+			model: 'claude-haiku-4.5',
+			inputTokens: 86_435,
+			outputTokens: 197,
+		}, { detail: 'compact' });
+
+		expect(rendered.usage).toBe('Latest model call: claude-haiku-4.5 — 86435 input, 197 output (86632 total)');
+	});
 });

@@ -59,6 +59,11 @@ import { IAccessibilityService } from '../../../../../platform/accessibility/com
 
 export type AgentSessionListItem = IAgentSession | IAgentSessionSection | IAgentSessionShowMore | IAgentSessionShowLess;
 
+function isIconOnlyDescription(description: string | IMarkdownString | undefined): boolean {
+	const value = typeof description === 'string' ? description : description?.value;
+	return !!value && /^(?:\$\([a-z0-9-]+\)\s*)+$/i.test(value);
+}
+
 //#region Agent Session Renderer
 
 interface IAgentSessionItemTemplate {
@@ -425,13 +430,15 @@ export class AgentSessionRenderer extends Disposable implements ICompressibleTre
 
 
 		// Description
+		const iconOnlyDescription = isIconOnlyDescription(session.element.description);
+		template.description.classList.toggle('icon-only', iconOnlyDescription);
 		const hasDescription = this.renderDescription(session, template);
 
 		// Status
 		const hasStatus = this.renderStatus(session, template);
 
 		// When in progress with a description, only show description in the details row
-		const hideDetails = hasDescription && isSessionInProgressStatus(session.element.status);
+		const hideDetails = hasDescription && !iconOnlyDescription && isSessionInProgressStatus(session.element.status);
 		template.badge.classList.toggle('has-badge', hasBadge && !hideDetails);
 		template.diffContainer.classList.toggle('has-diff', hasDiff && !hideDetails);
 		template.statusContainer.classList.toggle('hidden', hideDetails);

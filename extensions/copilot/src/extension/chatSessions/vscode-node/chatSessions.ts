@@ -196,7 +196,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 		this._register(copilotcliAgentInstaService.invokeFunction(accessor => accessor.get(ICopilotCLISessionTracker)));
 		this._register(copilotcliAgentInstaService.createInstance(CopilotCLIContrib));
 		this._register(copilotcliAgentInstaService.createInstance(MissionControlTransport));
-		this.registerTelegramRemoteControllerHost(copilotcliAgentInstaService, logService);
+		this.registerTelegramRemoteControllerHost(copilotcliAgentInstaService, copilotcliChatSessionContentProvider, logService);
 
 		copilotModels.registerLanguageModelChatProvider(vscode.lm);
 
@@ -213,7 +213,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 	/**
 	 * Sole composition point for Telegram Remote contributions.
 	 */
-	private registerTelegramRemoteControllerHost(instantiationService: IInstantiationService, logService: ILogService): void {
+	private registerTelegramRemoteControllerHost(instantiationService: IInstantiationService, sessionCreator: CopilotCLIChatSessionContentProvider, logService: ILogService): void {
 		const compatibility = resolveTelegramRemoteHostCompatibility({
 			sessionController: true,
 			agentSessionsWorkspace: vscode.workspace.isAgentSessionsWorkspace,
@@ -254,6 +254,9 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			sessionService,
 			registry,
 			instantiationService.invokeFunction(accessor => accessor.get(IRemotePromptDispatcher)),
+			{
+				createSession: (workspaceRoot, prompt) => sessionCreator.createTelegramSession(vscode.Uri.parse(workspaceRoot.toString()), prompt),
+			},
 			telegramCommandEnvironment,
 			sessionScopePolicy,
 			activityCoalescer,

@@ -315,7 +315,7 @@ export function folderMRUToChatProviderOptions(mruItems: FolderRepositoryMRUEntr
  */
 export interface ISessionOptionGroupBuilder {
 	readonly _serviceBrand: undefined;
-	provideChatSessionProviderOptionGroups(previousInputState: vscode.ChatSessionInputState | undefined): Promise<vscode.ChatSessionProviderOptionGroup[]>;
+	provideChatSessionProviderOptionGroups(previousInputState: vscode.ChatSessionInputState | undefined, selectedFolderUri?: vscode.Uri): Promise<vscode.ChatSessionProviderOptionGroup[]>;
 	buildBranchOptionGroup(branches: vscode.ChatSessionProviderOptionItem[], headBranchName: string | undefined, isolationEnabled: boolean, currentIsolation: IsolationMode | undefined, previousSelection: vscode.ChatSessionProviderOptionItem | undefined): vscode.ChatSessionProviderOptionGroup | undefined;
 	handleInputStateChange(state: vscode.ChatSessionInputState): Promise<void>;
 	rebuildInputState(state: vscode.ChatSessionInputState, selectedFolderUri?: vscode.Uri): Promise<void>;

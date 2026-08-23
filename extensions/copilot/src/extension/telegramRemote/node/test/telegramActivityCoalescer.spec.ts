@@ -117,6 +117,7 @@ describe('TelegramActivityCoalescer', () => {
 		expect(finalMessages[0][1]).not.toContain('javascript:');
 		expect(lastActivityText(test.host)).not.toContain('Done');
 		expect(lastActivityText(test.host)).toContain('Request completed');
+		expect(lastActivityText(test.host).match(/Request completed/g)).toHaveLength(1);
 		expect(terminal).toHaveBeenCalledOnce();
 	});
 

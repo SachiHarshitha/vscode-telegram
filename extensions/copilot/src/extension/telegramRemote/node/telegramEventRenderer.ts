@@ -53,17 +53,17 @@ export function renderTelegramEvent(event: RemoteAgentEvent, options: TelegramEv
 			return { action: action('session-error', l10n.t('Session failed — {0}', safeFailureSummary(event.message))), urgent: true };
 		case 'session.task_complete':
 			return {
-				action: action('task-complete', event.success === false ? l10n.t('Task failed') : l10n.t('Task completed'), options.detail === 'compact' ? undefined : event.summary),
+				action: action('request', event.success === false ? l10n.t('Request failed') : l10n.t('Request completed'), options.detail === 'compact' ? undefined : event.summary),
 				terminal: event.success === false ? 'failed' : 'completed',
 			};
 		case 'session.shutdown':
-			return { action: action('session', l10n.t('Session stopped'), options.detail === 'compact' ? undefined : event.reason), terminal: 'failed' };
+			return { action: action('request', l10n.t('Request failed'), options.detail === 'compact' ? undefined : event.reason), terminal: 'failed' };
 		case 'abort':
-			return { action: action('abort', l10n.t('Task stopped'), options.detail === 'compact' ? undefined : event.reason), terminal: 'cancelled' };
+			return { action: action('request', l10n.t('Request cancelled'), options.detail === 'compact' ? undefined : event.reason), terminal: 'cancelled' };
 		case 'assistant.turn_start':
-			return { action: action('turn', l10n.t('Copilot is working')) };
+			return { action: action('request', l10n.t('Copilot is working')) };
 		case 'assistant.turn_end':
-			return { action: action('turn', l10n.t('Copilot finished the turn')) };
+			return { action: action('request', l10n.t('Request completed')) };
 		case 'assistant.intent':
 			return { action: action('intent', l10n.t('Copilot is planning')) };
 		case 'assistant.message':
@@ -105,12 +105,15 @@ export function renderTelegramEvent(event: RemoteAgentEvent, options: TelegramEv
 		case 'subagent.failed':
 			return { action: action(`subagent:${event.toolCallId}`, l10n.t('Subagent {0} failed — {1}', event.name, safeFailureSummary(event.error))), urgent: true };
 		case 'session.idle':
-			return { action: action('session', event.aborted ? l10n.t('Task cancelled') : l10n.t('Copilot is idle')), terminal: event.aborted ? 'cancelled' : 'completed' };
+			return { action: action('request', event.aborted ? l10n.t('Request cancelled') : l10n.t('Request completed')), terminal: event.aborted ? 'cancelled' : 'completed' };
 		case 'session.usage_info':
 			return { usage: l10n.t('Context: {0}% ({1} / {2} tokens)', Math.min(100, Math.round(event.currentTokens / event.tokenLimit * 100)), event.currentTokens, event.tokenLimit) };
 		case 'assistant.usage': {
 			const tokens = (event.inputTokens ?? 0) + (event.outputTokens ?? 0);
-			return { usage: tokens > 0 ? l10n.t('Latest model call: {0}, {1} tokens', event.model, tokens) : l10n.t('Latest model call: {0}', event.model) };
+			const usage = event.inputTokens !== undefined && event.outputTokens !== undefined
+				? l10n.t('Latest model call: {0} — {1} input, {2} output ({3} total)', event.model, event.inputTokens, event.outputTokens, tokens)
+				: tokens > 0 ? l10n.t('Latest model call: {0} — {1} tokens total', event.model, tokens) : l10n.t('Latest model call: {0}', event.model);
+			return { usage };
 		}
 	}
 }

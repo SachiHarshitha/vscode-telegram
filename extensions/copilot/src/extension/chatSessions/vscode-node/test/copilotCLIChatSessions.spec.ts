@@ -166,7 +166,7 @@ class TestCustomSessionTitleService extends mock<ICustomSessionTitleService>() {
 	override generateSessionTitle = vi.fn(async () => undefined);
 }
 
-function createProvider() {
+function createProvider(workspaceFolders: readonly URI[] = []) {
 	const sessionService = new TestSessionService();
 	const worktreeService = new TestWorktreeService();
 	const metadataStore = new class extends mock<IChatSessionMetadataStore>() {
@@ -219,7 +219,7 @@ function createProvider() {
 		gitService,
 		workspaceFolderService,
 		metadataStore,
-		new NullWorkspaceService(),
+		new NullWorkspaceService([...workspaceFolders]),
 		worktreeService,
 		remoteControlRegistry,
 	);
@@ -231,6 +231,7 @@ function createProvider() {
 		worktreeService,
 		gitService,
 		octoKitService,
+		folderRepositoryManager,
 		remoteControlRegistry,
 	};
 }
@@ -250,6 +251,21 @@ describe('CopilotCLIChatSessionContentProvider', () => {
 		);
 
 		expect(detectSpy).toHaveBeenCalledWith('session-1');
+	});
+
+	it('stages a Telegram-created session in its authorized workspace', () => {
+		const workspaceRoot = URI.file('C:\\workspace');
+		const { provider, sessionService, folderRepositoryManager } = createProvider([workspaceRoot]);
+
+		const item = provider.createTelegramSession(workspaceRoot, 'Inspect the repository');
+
+		expect(item).toEqual(expect.objectContaining({
+			id: 'new-session',
+			label: 'Inspect the repository',
+			workingDirectory: workspaceRoot,
+		}));
+		expect(sessionService.createNewSessionId).toHaveBeenCalledOnce();
+		expect(folderRepositoryManager.setNewSessionFolder).toHaveBeenCalledWith('new-session', workspaceRoot);
 	});
 
 	it('persists detected pull request url and state on session open', async () => {
@@ -542,7 +558,7 @@ describe('CopilotCLIChatSessionContentProvider (additional)', () => {
 			description: (item.description as vscode.MarkdownString).value,
 			tooltip: (item.tooltip as vscode.MarkdownString).value,
 		}).toEqual({
-			description: '$(radio-tower) Test Remote',
+			description: '$(radio-tower)',
 			tooltip: 'Remotely controllable from: Test Remote. Use the transport controls to disable remote access.',
 		});
 	});

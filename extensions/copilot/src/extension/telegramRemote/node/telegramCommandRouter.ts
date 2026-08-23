@@ -26,6 +26,7 @@ const emptyInlineKeyboard: TelegramInlineKeyboardMarkup = { inline_keyboard: [] 
 export interface TelegramCommandEnvironment {
 	readonly workstationLabel: string;
 	readonly workspaceLabel: string;
+	readonly workspaceRoots?: readonly NonNullable<ICopilotCLISessionItem['workingDirectory']>[];
 	readonly remotePermissionResponses?: boolean;
 }
 
@@ -37,6 +38,10 @@ export interface TelegramPromptDispatchResult {
 
 export interface TelegramPromptDispatcher {
 	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin): TelegramPromptDispatchResult;
+}
+
+export interface TelegramSessionCreator {
+	createSession(workspaceRoot: NonNullable<ICopilotCLISessionItem['workingDirectory']>, prompt: string): ICopilotCLISessionItem;
 }
 
 export interface TelegramRequestActivity {
@@ -94,6 +99,10 @@ interface TrackedStatusMessage {
 /** Routes only already-authorized Telegram updates into metadata and narrow remote-control seams. */
 export class TelegramCommandRouter extends Disposable {
 	private readonly activePickerRequestIds = new Map<string, string>();
+	private readonly activeNewSessionRequestIds = new Map<string, string>();
+	private readonly pendingNewSessionPrompts = new Map<string, string | undefined>();
+	private readonly pendingNewSessionRoots = new Map<string, NonNullable<ICopilotCLISessionItem['workingDirectory']>>();
+	private readonly provisionalSessions = new Map<string, ICopilotCLISessionItem>();
 	private readonly selectionRevisionIds = new Map<string, string>();
 	private readonly activeDispatches = new Map<string, ActiveDispatch>();
 	private readonly statusMessages = new Map<string, TrackedStatusMessage>();
@@ -105,6 +114,7 @@ export class TelegramCommandRouter extends Disposable {
 		private readonly sessionService: ICopilotCLISessionService,
 		private readonly registry: IRemoteControlRegistry,
 		private readonly promptDispatcher: TelegramPromptDispatcher,
+		private readonly sessionCreator: TelegramSessionCreator,
 		private readonly environment: TelegramCommandEnvironment,
 		private readonly sessionScopePolicy: TelegramSessionScopePolicy,
 		private readonly activity: TelegramRequestActivity,
@@ -139,6 +149,9 @@ export class TelegramCommandRouter extends Disposable {
 				case 'status':
 					await this.sendStatus(identity);
 					return;
+				case 'new':
+					await this.beginNewSession(update, identity, parseCommandArgument(text));
+					return;
 				case 'sessions':
 					await this.sendSessionPicker(identity);
 					return;
@@ -149,9 +162,12 @@ export class TelegramCommandRouter extends Disposable {
 					await this.stopActiveDispatch(identity);
 					return;
 				case 'unknown':
-					await this.safeSend(identity.chatId, l10n.t('Unknown Telegram Remote command. Use /start, /status, /sessions, /deselect, or /stop.'));
+					await this.safeSend(identity.chatId, l10n.t('Unknown Telegram Remote command. Use /start, /new, /status, /sessions, /deselect, or /stop.'));
 					return;
 				case undefined:
+					if (await this.dispatchPendingNewSession(update, identity, text)) {
+						return;
+					}
 					await this.dispatchPrompt(update, identity, text);
 			}
 		} catch {
@@ -168,9 +184,34 @@ export class TelegramCommandRouter extends Disposable {
 			return;
 		}
 
-		const pickerRequestId = this.activePickerRequestIds.get(identity.pairingId);
 		const callbackMessageId = callback.message?.message_id;
 		const statusMessage = this.statusMessages.get(identity.pairingId);
+		const newSessionRequestId = this.activeNewSessionRequestIds.get(identity.pairingId);
+		if (newSessionRequestId && callbackMessageId !== undefined && statusMessage?.messageId === callbackMessageId && statusMessage.chatId === identity.chatId) {
+			const creation = this.host.consumeCallback(update, { requestId: newSessionRequestId, action: 'session.create' });
+			if (creation) {
+				const workspaceRoot = this.environment.workspaceRoots?.find(root => root.toString() === creation.value);
+				const prompt = this.pendingNewSessionPrompts.get(newSessionRequestId);
+				this.activeNewSessionRequestIds.delete(identity.pairingId);
+				this.pendingNewSessionPrompts.delete(newSessionRequestId);
+				if (!workspaceRoot) {
+					await this.safeAnswer(callback.id, { text: l10n.t('That workspace is no longer available.'), showAlert: true });
+					return;
+				}
+				await this.safeAnswer(callback.id, { text: l10n.t('Workspace selected.') });
+				await this.safeRemoveReplyMarkup(identity.chatId, callbackMessageId);
+				this.statusMessages.delete(identity.pairingId);
+				if (prompt) {
+					await this.createAndDispatchNewSession(update, identity, workspaceRoot, prompt);
+				} else {
+					this.pendingNewSessionRoots.set(identity.pairingId, workspaceRoot);
+					await this.sendOrEditStatus(identity, l10n.t('New Copilot session ready in {0}. Send its first prompt.', workspaceRoot.fsPath || workspaceRoot.toString()));
+				}
+				return;
+			}
+		}
+
+		const pickerRequestId = this.activePickerRequestIds.get(identity.pairingId);
 		if (pickerRequestId && callbackMessageId !== undefined && statusMessage?.messageId === callbackMessageId && statusMessage.chatId === identity.chatId) {
 			const selection = this.host.consumeCallback(update, { requestId: pickerRequestId, action: 'session.select' });
 			if (selection) {
@@ -213,6 +254,76 @@ export class TelegramCommandRouter extends Disposable {
 		await this.safeAnswer(callback.id, { text: l10n.t('This control is stale. Use /status to refresh it.'), showAlert: true });
 	}
 
+	private async beginNewSession(update: TelegramUpdate, identity: TelegramPairedIdentity, prompt: string | undefined): Promise<void> {
+		if (prompt && prompt.length > maximumPromptLength) {
+			await this.safeSend(identity.chatId, l10n.t('That prompt is too long. Shorten it and try again.'));
+			return;
+		}
+		const workspaceRoots = this.environment.workspaceRoots ?? [];
+		if (workspaceRoots.length === 0) {
+			await this.safeSend(identity.chatId, l10n.t('Open and authorize a workspace in VS Code before creating a Copilot session.'));
+			return;
+		}
+
+		this.pendingNewSessionRoots.delete(identity.pairingId);
+		if (workspaceRoots.length === 1) {
+			if (prompt) {
+				await this.createAndDispatchNewSession(update, identity, workspaceRoots[0], prompt);
+			} else {
+				this.pendingNewSessionRoots.set(identity.pairingId, workspaceRoots[0]);
+				await this.sendOrEditStatus(identity, l10n.t('New Copilot session ready in {0}. Send its first prompt.', workspaceRoots[0].fsPath || workspaceRoots[0].toString()));
+			}
+			return;
+		}
+
+		const requestId = randomUUID();
+		this.activeNewSessionRequestIds.set(identity.pairingId, requestId);
+		this.pendingNewSessionPrompts.set(requestId, prompt);
+		const rows = workspaceRoots.slice(0, maximumSessionButtons).map(workspaceRoot => {
+			const callback = this.host.registerCallback({
+				identity,
+				sessionId: 'new-session',
+				requestId,
+				action: 'session.create',
+				value: workspaceRoot.toString(),
+			});
+			return [{ text: truncate(basename(workspaceRoot), maximumButtonLabelLength), callback_data: callback.callbackData }];
+		});
+		await this.sendOrEditStatus(identity, prompt
+			? l10n.t('Choose the authorized workspace for the new Copilot session.')
+			: l10n.t('Choose an authorized workspace, then send the first prompt.'),
+		{ replyMarkup: { inline_keyboard: rows } });
+	}
+
+	private async dispatchPendingNewSession(update: TelegramUpdate, identity: TelegramPairedIdentity, prompt: string): Promise<boolean> {
+		const workspaceRoot = this.pendingNewSessionRoots.get(identity.pairingId);
+		if (!workspaceRoot) {
+			return false;
+		}
+		this.pendingNewSessionRoots.delete(identity.pairingId);
+		await this.createAndDispatchNewSession(update, identity, workspaceRoot, prompt);
+		return true;
+	}
+
+	private async createAndDispatchNewSession(
+		update: TelegramUpdate,
+		identity: TelegramPairedIdentity,
+		workspaceRoot: NonNullable<ICopilotCLISessionItem['workingDirectory']>,
+		prompt: string,
+	): Promise<void> {
+		const item = this.sessionCreator.createSession(workspaceRoot, prompt);
+		const scope = this.sessionScopePolicy.authorizeSession(item);
+		if (!scope) {
+			throw new Error('Created Telegram session is outside the authorized workspace.');
+		}
+		await this.supersedeActiveDispatch(identity);
+		this.invalidateRoutingState(identity);
+		this.provisionalSessions.set(item.id, item);
+		await this.sessionState.select(identity, item.id, scope.fingerprint);
+		this.rotateSelectionRevision(identity);
+		await this.dispatchPrompt(update, identity, prompt);
+	}
+
 	private async sendStatus(identity: TelegramPairedIdentity): Promise<void> {
 		const selected = await this.getValidSelectedSession(identity);
 		const lines = [
@@ -228,7 +339,7 @@ export class TelegramCommandRouter extends Disposable {
 			this.environment.remotePermissionResponses
 				? l10n.t('Permissions: supported prompts may be answered remotely')
 				: l10n.t('Permissions: approval is required locally in this build'),
-			l10n.t('Commands: /sessions, /status, /deselect, /stop'),
+			l10n.t('Commands: /new, /sessions, /status, /deselect, /stop'),
 		];
 		let replyMarkup: TelegramInlineKeyboardMarkup | undefined;
 		if (selected) {
@@ -294,6 +405,7 @@ export class TelegramCommandRouter extends Disposable {
 		const removed = await this.sessionState.deselect(identity);
 		if (selectedSessionId) {
 			this.host.invalidateSessionCallbacks(selectedSessionId);
+			this.provisionalSessions.delete(selectedSessionId);
 		}
 		await this.sendOrEditStatus(identity, removed
 			? l10n.t('The Copilot session is no longer remotely attached. Use /sessions to select another session.')
@@ -357,7 +469,11 @@ export class TelegramCommandRouter extends Disposable {
 		if (!sessionId) {
 			return undefined;
 		}
-		const item = await this.sessionService.getSessionItem(sessionId, CancellationToken.None);
+		const persistedItem = await this.sessionService.getSessionItem(sessionId, CancellationToken.None);
+		if (persistedItem) {
+			this.provisionalSessions.delete(sessionId);
+		}
+		const item = persistedItem ?? this.provisionalSessions.get(sessionId);
 		const scope = item && this.sessionScopePolicy.authorizeSession(item);
 		if (item && scope && this.sessionState.getSelectedSessionScopeFingerprint(identity) === scope.fingerprint) {
 			return { item, scope };
@@ -391,6 +507,7 @@ export class TelegramCommandRouter extends Disposable {
 	}
 
 	private async handleDeletedSession(sessionId: string): Promise<void> {
+		this.provisionalSessions.delete(sessionId);
 		this.host.invalidateSessionCallbacks(sessionId);
 		const identity = this.currentIdentity;
 		const wasSelected = identity && this.sessionState.getSelectedSessionId(identity) === sessionId;
@@ -405,6 +522,9 @@ export class TelegramCommandRouter extends Disposable {
 	private blockRemoteRouting(): void {
 		const drainingSessionId = this.activity.closeRemoteConnection();
 		this.activePickerRequestIds.clear();
+		this.activeNewSessionRequestIds.clear();
+		this.pendingNewSessionPrompts.clear();
+		this.pendingNewSessionRoots.clear();
 		this.selectionRevisionIds.clear();
 		for (const [pairingId, active] of this.activeDispatches) {
 			if (active.sessionId !== drainingSessionId) {
@@ -427,6 +547,12 @@ export class TelegramCommandRouter extends Disposable {
 	private invalidateRoutingState(identity: TelegramPairedIdentity): void {
 		this.host.invalidateAllCallbacks();
 		this.activePickerRequestIds.delete(identity.pairingId);
+		const newSessionRequestId = this.activeNewSessionRequestIds.get(identity.pairingId);
+		if (newSessionRequestId) {
+			this.pendingNewSessionPrompts.delete(newSessionRequestId);
+		}
+		this.activeNewSessionRequestIds.delete(identity.pairingId);
+		this.pendingNewSessionRoots.delete(identity.pairingId);
 		this.selectionRevisionIds.delete(identity.pairingId);
 		this.activeDispatches.delete(identity.pairingId);
 	}
@@ -510,7 +636,7 @@ export class TelegramCommandRouter extends Disposable {
 	}
 }
 
-function parseCommand(text: string): 'start' | 'status' | 'sessions' | 'deselect' | 'stop' | 'unknown' | undefined {
+function parseCommand(text: string): 'start' | 'new' | 'status' | 'sessions' | 'deselect' | 'stop' | 'unknown' | undefined {
 	if (!text.startsWith('/')) {
 		return undefined;
 	}
@@ -519,9 +645,14 @@ function parseCommand(text: string): 'start' | 'status' | 'sessions' | 'deselect
 		return 'unknown';
 	}
 	const command = match[1].toLowerCase();
-	return command === 'start' || command === 'status' || command === 'sessions' || command === 'deselect' || command === 'stop'
+	return command === 'start' || command === 'new' || command === 'status' || command === 'sessions' || command === 'deselect' || command === 'stop'
 		? command
 		: 'unknown';
+}
+
+function parseCommandArgument(text: string): string | undefined {
+	const match = /^\/[a-z]+(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]+))?$/i.exec(text);
+	return match?.[1]?.trim() || undefined;
 }
 
 function formatSessionButton(session: ICopilotCLISessionItem): string {

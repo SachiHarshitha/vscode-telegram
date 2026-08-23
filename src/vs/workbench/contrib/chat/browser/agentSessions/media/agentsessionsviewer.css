@@ -284,6 +284,14 @@
 			display: none;
 		}
 
+		.agent-session-description.icon-only {
+			display: flex;
+			align-items: center;
+			justify-content: flex-end;
+			flex: 1;
+			overflow: visible;
+		}
+
 		.agent-session-description.has-separator::before {
 			content: '\00B7';
 			margin-right: 4px;

@@ -138,6 +138,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 
 	private readonly controller: vscode.ChatSessionItemController;
 	private readonly newSessions = new ResourceMap<vscode.ChatSessionItem>();
+	private readonly newSessionFolders = new ResourceMap<vscode.Uri>();
 	constructor(
 		@ICopilotCLISessionService private readonly sessionService: ICopilotCLISessionService,
 		@IChatSessionWorktreeService private readonly copilotCLIWorktreeManagerService: IChatSessionWorktreeService,
@@ -199,9 +200,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 			void this.refreshSession({ reason: 'update', sessionId }).catch(error => this.logService.error(error, 'Failed to refresh session attachment state'));
 		}));
 		controller.newChatSessionItemHandler = async (context) => {
-			const sessionId = this.sessionService.createNewSessionId();
-			const resource = SessionIdForCLI.getResource(sessionId);
-			const session = controller.createChatSessionItem(resource, context.request.prompt ?? context.request.command ?? '');
+			const { sessionId, resource, session } = this.createProvisionalSession(context.request.prompt ?? context.request.command ?? '');
 			this.customSessionTitleService.generateSessionTitle(sessionId, context.request, CancellationToken.None)
 				.then(async title => {
 					if (title) {
@@ -214,8 +213,6 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 				})
 				.catch(ex => this.logService.error(ex, 'Failed to generate custom session title'));
 
-			controller.items.add(session);
-			this.newSessions.set(resource, session);
 			return session;
 		};
 		if (this.configurationService.getConfig(ConfigKey.Advanced.CLIForkSessionsEnabled)) {
@@ -243,7 +240,9 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 			};
 		}
 		this._register(this.sessionService.onDidDeleteSession(async (e) => {
-			controller.items.delete(SessionIdForCLI.getResource(e));
+			const resource = SessionIdForCLI.getResource(e);
+			controller.items.delete(resource);
+			this.clearProvisionalSession(e);
 		}));
 		this._register(this.sessionService.onDidChangeSession(async (e) => {
 			// Push path: VS Code uses the item we provide as source of truth and does not
@@ -254,6 +253,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		}));
 		this._register(this.sessionService.onDidCreateSession(async (e) => {
 			const resource = SessionIdForCLI.getResource(e.id);
+			this.clearProvisionalSession(e.id);
 			if (controller.items.get(resource)) {
 				return;
 			}
@@ -310,7 +310,10 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 				const groups = await this._optionGroupBuilder.buildExistingSessionInputStateGroups(sessionResource, token);
 				return controller.createChatSessionInputState(groups);
 			} else {
-				const groups = await this._optionGroupBuilder.provideChatSessionProviderOptionGroups(context.previousInputState);
+				const groups = await this._optionGroupBuilder.provideChatSessionProviderOptionGroups(
+					context.previousInputState,
+					sessionResource ? this.newSessionFolders.get(sessionResource) : undefined,
+				);
 				const state = controller.createChatSessionInputState(groups);
 				// Only wire dynamic updates for new sessions (existing sessions are fully locked).
 				// Note: don't use the getChatSessionInputState token here — it's a one-shot token
@@ -345,6 +348,41 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		this._register(this._workspaceService.onDidChangeWorkspaceFolders(refreshActiveInputState));
 	}
 
+	/** Creates a provisional controller session that the first native chat request materializes. */
+	public createTelegramSession(workspaceRoot: vscode.Uri, prompt: string): ICopilotCLISessionItem {
+		if (!this._workspaceService.getWorkspaceFolder(workspaceRoot)) {
+			throw new Error('Telegram session workspace is not open in this window.');
+		}
+		const label = prompt.length > 80 ? `${prompt.slice(0, 79)}…` : prompt;
+		const { sessionId, resource } = this.createProvisionalSession(label);
+		this.newSessionFolders.set(resource, workspaceRoot);
+		this.folderRepositoryManager.setNewSessionFolder(sessionId, workspaceRoot);
+		const created = Date.now();
+		return {
+			id: sessionId,
+			label,
+			timing: { created, startTime: created },
+			status: vscode.ChatSessionStatus.Completed,
+			workingDirectory: workspaceRoot,
+		};
+	}
+
+	private createProvisionalSession(label: string): { readonly sessionId: string; readonly resource: vscode.Uri; readonly session: vscode.ChatSessionItem } {
+		const sessionId = this.sessionService.createNewSessionId();
+		const resource = SessionIdForCLI.getResource(sessionId);
+		const session = this.controller.createChatSessionItem(resource, label);
+		this.controller.items.add(session);
+		this.newSessions.set(resource, session);
+		return { sessionId, resource, session };
+	}
+
+	private clearProvisionalSession(sessionId: string): void {
+		const resource = SessionIdForCLI.getResource(sessionId);
+		this.newSessions.delete(resource);
+		this.newSessionFolders.delete(resource);
+		this.folderRepositoryManager.deleteNewSessionFolder(sessionId);
+	}
+
 	public getAssociatedSessions(folder: Uri): string[] {
 		return this._metadataStore.getSessionIdsForFolder(folder);
 	}
@@ -361,6 +399,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 			await Promise.allSettled(refreshOptions.sessionIds.map(async sessionId => {
 				const item = await this.sessionService.getSessionItem(sessionId, CancellationToken.None);
 				if (item) {
+					this.clearProvisionalSession(sessionId);
 					// Push path — include changes eagerly (see `onDidChangeSession`).
 					const chatSessionItem = await this.toChatSessionItem(item, { includeChanges: true });
 					this.controller.items.add(chatSessionItem);
@@ -369,6 +408,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		} else {
 			const item = await this.sessionService.getSessionItem(refreshOptions.sessionId, CancellationToken.None);
 			if (item) {
+				this.clearProvisionalSession(refreshOptions.sessionId);
 				// Push path — include changes eagerly (see `onDidChangeSession`).
 				const chatSessionItem = await this.toChatSessionItem(item, { includeChanges: true });
 				this.controller.items.add(chatSessionItem);
@@ -421,7 +461,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		item.metadata = metadata;
 		const attachments = this._remoteControlRegistry.getAttachments(session.id);
 		if (attachments.length > 0) {
-			const description = new vscode.MarkdownString(attachments.map(attachment => `$(${attachment.themeIcon}) ${attachment.label}`).join(' '));
+			const description = new vscode.MarkdownString(attachments.map(attachment => `$(${attachment.themeIcon})`).join(' '));
 			description.supportThemeIcons = true;
 			item.description = description;
 			item.tooltip = buildRemoteAttachmentTooltip(attachments);
@@ -618,7 +658,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 					requestHandler: undefined,
 				};
 			} else {
-				this.newSessions.delete(resource);
+				this.clearProvisionalSession(copilotcliSessionId);
 				// Fire-and-forget: detect PR when the user opens a session.
 				this._prDetectionService.detectPullRequest(copilotcliSessionId);
 

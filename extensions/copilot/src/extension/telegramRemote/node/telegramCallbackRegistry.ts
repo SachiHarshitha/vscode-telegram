@@ -13,6 +13,7 @@ const defaultCallbackLifetimeMs = 5 * 60_000;
 const defaultMaximumPendingCallbacks = 500;
 const allowedCallbackActions = new Set<TelegramCallbackAction>([
 	'session.select',
+	'session.create',
 	'session.deselect',
 	'session.stop',
 	'permission.approveOnce',
@@ -24,6 +25,7 @@ const allowedCallbackActions = new Set<TelegramCallbackAction>([
 
 export type TelegramCallbackAction =
 	| 'session.select'
+	| 'session.create'
 	| 'session.deselect'
 	| 'session.stop'
 	| 'permission.approveOnce'
