@@ -1,499 +1,491 @@
 # Implementation Plan
 
-## 1. Delivery strategy
+## 1. Revalidated baseline
 
-Build the smallest end-to-end path first, then expand features without widening the upstream patch unnecessarily.
+This plan was revalidated against the repository at:
 
-The first milestone is not a polished Telegram UI. It is proof that a Telegram message can control the **same Copilot CLI session object used by VS Code**, and that SDK events from that session can be projected back to Telegram.
+| Item | Value |
+| --- | --- |
+| VS Code commit | `2b514caa28dd1a2d41a4494a618b1188e03355ef` |
+| Copilot extension | `GitHub.copilot-chat` `0.63.0` |
+| Copilot runtime package | `@github/copilot` `^1.0.73` |
+| VS Code engine | `^1.135.0` |
+| Node engine | `>=22.14.0` |
+| Implementation status | Design/docs only; no Telegram source exists yet |
 
-## 2. Phase 0 — baseline and guardrails
+The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
-### Tasks
+### Code findings that change the previous plan
 
-- Record upstream commit/version metadata.
-- Confirm the current Copilot extension builds/tests unchanged on the downstream branch.
-- Add Telegram project docs and source directory skeleton.
-- Confirm the current controller-path configuration (`registerCopilotCLIServices`) and record the V1/non-controller path as a later compatibility target.
-- Confirm the initial packaging target is the VS Code fork with its bundled Copilot extension; do not require an independent extension ID for this milestone.
-- Add a compile-time/downstream marker so logs identify the Telegram build.
+| Finding in the current source | Planning consequence |
+| --- | --- |
+| `ChatSessionsContrib` selects the controller path only when `chat.cli.sessionController.enabled` is true; its current default is false. The repository-local `AGENTS.md` says new work must use the controller path and that `registerCopilotCLIServicesV1` is deprecated. | The fork build must explicitly enable the controller path. Telegram code will not be added to `copilotCLIChatSessionsContribution.ts`. |
+| `pendingRequestContext.ts` stores one value per session and `clearPendingCopilotCLIRequestContext()` clears it without correlation. | Replace the session-only slot with correlation-ID entries. A local request or an older failed dispatch must not consume/clear a newer remote request. |
+| `workbench.action.chat.openSessionWithPrompt.copilotcli` calls `chatService.sendRequest()` without a queue mode. While a request is active, `sendRequest()` can return `rejected` before `CopilotCLISession` gets a chance to use SDK `mode: 'immediate'`. The action also ignores rejected results. | Extend the internal action with an explicit `queue: 'steering'` option and throw on rejected dispatch. Remote prompting cannot be considered proven until this path is tested. |
+| The internal command already accepts `attachedContext`, and `ChatRequest.references` preserves each reference ID. | Carry an opaque correlation marker through `attachedContext`; the Copilot participant consumes it before prompt resolution. This gives exact request-to-context matching without putting a nonce in model-visible prompt text. |
+| `ICopilotCLISession` does not expose SDK events, abort, replay, mode, or model mutation. | Add a small transport-neutral session bridge. Telegram never casts to `CopilotCLISession` or retains `sdkSession`. |
+| `CopilotCLISession` currently has a request-scoped wildcard listener and a second persistent Mission Control wildcard listener. | Publish through one wrapper-lifetime wildcard listener and deduplicate by SDK event ID in the registry. Remove both Mission Control publication paths during migration. |
+| `ICopilotCLISessionService.getSession()` requires full workspace/model/agent options; on a cached wrapper it selects or clears the custom agent. | Session selection must not call `getSession()` with guessed/incomplete options. Registry attachment is logical state; live safe controls register only for the lifetime of a wrapper created by the native request path. |
+| The controller provider creates session-list items in `copilotCLIChatSessions.ts`; `description` and `tooltip` are currently unused there. | The native attachment indicator belongs in this file, not the deprecated `copilotCLIChatSessionsContribution.ts`. |
+| Model catalog/read APIs exist, but selected-model mutation is private to `CopilotCLISession.updateModel()` and the SDK session. | Ship model visibility first. Remote selection must be carried as a validated per-request model option through the native workbench command; do not add a raw SDK setter as a shortcut. |
+| Settings in this subsystem use the `github.copilot.chat.cli.*` namespace. | Use `github.copilot.chat.cli.telegram.*`, not `github.copilot.telegram.*`. |
+| The modified Copilot extension is built in and already declares `chatSessionsProvider` and the other required proposals. | Product V1 needs no new extension ID and no `argv.json` mutation. Own-ID proposal work remains optional V2 research. |
+
+## 2. Delivery and dependency order
+
+Build the smallest secure path in this order:
+
+```text
+baseline/controller lock
+  -> correlated native prompt dispatcher
+  -> session bridge + remote-control registry
+  -> Mission Control migration
+  -> Telegram polling
+  -> pairing + consent/local kill switch
+  -> select/prompt/steer/abort end to end
+  -> event projection
+  -> permissions/questions/plan approval
+  -> models/modes
+  -> release hardening
+```
+
+Telegram-specific work does not begin until the native dispatcher and the transport-neutral registry have tests. A phase is not complete merely because it compiles; its exit tests are part of the phase.
+
+## 3. Phase 0 — baseline, controller path and guardrails
+
+### Code and metadata changes
+
+- Add machine-readable compatibility metadata containing the baseline values above, the enabled API proposal list, and a Telegram patch revision.
+- Add a downstream build marker used only in diagnostics/logs.
+- Enable `ConfigKey.Advanced.CLISessionController` in the downstream fork and mirror the default in `package.json`. Keep the deprecated implementation available only as an upstream fallback, not as a Telegram target.
+- Do not start Telegram in an Agent Sessions workspace for product V1. Multi-extension-host ownership is deferred; the poller lease in Phase 2 still protects multiple ordinary windows.
+- Add a compatibility assertion that Telegram contribution registration occurs only in `registerCopilotCLIServices()`.
+- Record a clean baseline typecheck and the existing Copilot CLI unit-test result before behavioral edits.
+
+### Files
+
+```text
+extensions/copilot/src/platform/configuration/common/configurationService.ts
+extensions/copilot/package.json
+extensions/copilot/docs/telegram-remote/compatibility.json       (new)
+```
 
 ### Exit criteria
 
-- Clean upstream-equivalent build succeeds.
-- No behavior changes yet.
-- Documentation and compatibility baseline committed.
+- The controller implementation is active in a normal downstream window.
+- The extension has no Telegram network activity and no Telegram UI yet.
+- Baseline build/test results and exact versions are recorded.
 
-## 3. Phase 1 — remote-control registry and Mission Control migration
+## 4. Phase 1 — native control seam and Mission Control generalization
 
-> **Sequencing note.** Phase 1 is split. The full registry plus Mission Control migration is the largest and least testable chunk in the project: proving "Mission Control unchanged" needs a real GitHub repository, permissive auth and a live Mission Control backend. Phase 1a first lands the two members that unlock a complete observe/prompt/steer/abort loop with no registry at all, so Telegram can be proven end to end before the migration starts. The registry is unavoidable only for interactive responses, because permission and question racing has exactly one occupied slot.
+### Phase 1a — correlated native prompt dispatcher
 
-### Phase 1a — session event and abort seam
+Create a single transport-neutral dispatcher used by Mission Control and Telegram.
 
-Add exactly two transport-neutral members to `ICopilotCLISession`:
+#### Files
 
-```ts
-readonly onDidReceiveSessionEvent: Event<SessionEvent>;
-abort(): void;
+```text
+extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts          (new)
+extensions/copilot/src/extension/chatSessions/copilotcli/common/pendingRequestContext.ts       (modify)
+extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/remotePromptDispatcher.ts  (new)
+extensions/copilot/src/extension/chatSessions/vscode-node/copilotCLIChatSessions.ts              (modify)
+src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts                   (narrow modify)
 ```
 
-Backed by a session-lifetime listener installed in the `CopilotCLISession` constructor (the 17 listeners in `_handleRequestImplInner` are request-scoped, and Mission Control's persistent listener is `/remote`-gated), plus a one-line delegation to the wrapped SDK `abort()`.
+#### Required behavior
 
-This adds no transport branch, no Telegram type and touches no Mission Control code. It is the same seam the registry consumes later.
+- Define a registry-created discriminated `RemoteRequestOrigin`; transport input cannot provide or overwrite it.
+- Store pending contexts by a random correlation ID and validate both correlation ID and session ID when taking one.
+- Put a non-model correlation marker in the command's `attachedContext`. `resolveInput()` finds the marker in `ChatRequest.references`, consumes exactly that context, and does not forward the marker to the prompt resolver or SDK.
+- Make set/take/clear operations idempotent and correlation-specific. Expire abandoned contexts and bound the store.
+- Extend `workbench.action.chat.openSessionWithPrompt.<type>` options with `queue?: 'queued' | 'steering'`, forward it to `chatService.sendRequest()`, and surface `rejected` results as command failures.
+- The remote dispatcher uses `queue: 'steering'`. Core sends immediately when idle and requests the active handler to yield when busy; the next real `ChatRequest` then reaches the existing `CopilotCLISession` steering branch and SDK `mode: 'immediate'`.
+- Dispatch without awaiting the full turn, acknowledge the transport immediately, observe rejection, and clear/report only the matching correlation ID.
+- Keep SDK `SendOptions.source` as telemetry/correlation data only. Permission and mode decisions use typed origin.
+- Do not implement direct SDK `send()` fallback.
 
 #### Exit criteria
 
-- A local dev command lists sessions, sends a prompt through the native path, receives SDK events between requests and aborts.
-- Total upstream delta is roughly fifteen lines in `copilotcliSession.ts` plus one line in `chatSessions.ts`.
+- Two rapid remote requests to one session consume their own contexts in order without overwrite.
+- A local request interleaved with a remote request cannot consume the remote origin.
+- An active native turn yields, receives a second real `ChatRequest`, and reaches `send({ mode: 'immediate' })` on the same session.
+- A rejected/unknown/read-only session dispatch produces an observable error rather than a false success.
 
-### Phase 1b — registry and Mission Control migration
+### Phase 1b — wrapper-lifetime session bridge
 
-### Goal
+Add only transport-neutral members to `ICopilotCLISession`:
 
-Create the N-transport seam before any Telegram-specific control logic is added. Mission Control must remain semantically compatible after moving behind the seam; duplicate remote event delivery is an existing defect to remove, not behavior to preserve.
-
-### Source work
-
-Create:
-
-```text
-src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts
-src/extension/chatSessions/copilotcli/node/remoteControlRegistry.ts
-src/extension/chatSessions/copilotcli/node/missionControlTransport.ts
+```ts
+readonly onDidReceiveSessionEvent: Event<SessionEvent>;
+getReplayEvents(): readonly SessionEvent[];
+abort(): Promise<void>;
+notifyRemoteAttachment(label: string): void;
+getCurrentMode(): string | undefined;
 ```
 
-Modify:
+`getSelectedModelId()` already exists and remains the model read seam.
+
+#### Required behavior
+
+- Install one wildcard SDK listener in the `CopilotCLISession` constructor, register its disposer immediately, log the event once, and fire `onDidReceiveSessionEvent`.
+- `getReplayEvents()` returns a read-only snapshot from `sdkSession.getEvents()`; the raw SDK session remains private.
+- `abort()` delegates to and awaits the SDK abort operation.
+- `notifyRemoteAttachment()` writes a localized warning through the existing stream router and safely no-ops when no stream is attached.
+- Remove Mission Control publication from the request-scoped wildcard listener after its adapter subscribes to the bridge.
+- Register live safe controls with the registry for wrapper lifetime. Logical transport attachment persists separately by session ID, so Telegram does not retain a guessed `IReference<ICopilotCLISession>` between turns.
+- After `CopilotCLIChatSessionInitializer` attaches the response stream, query the registry and call `notifyRemoteAttachment()` once when the session has a logical remote attachment. Registration can happen before a stream exists, so the registry-binding path must not be the only notification trigger.
+
+#### Files
 
 ```text
-src/extension/chatSessions/vscode-node/chatSessions.ts
-src/extension/chatSessions/copilotcli/node/copilotcliSession.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts   (only for registry binding/read helpers)
+extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/copilotCLIChatSessionInitializer.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/node/test/copilotcliSession.spec.ts
 ```
 
-The `copilotcliSession.ts` change is deliberate: current permission/question handling is hard-coded to `_mcState`, most native SDK listeners are request-scoped, and `ICopilotCLISession` does not expose the required remote actions. Add only transport-neutral publication, response-race and safe-control hooks.
+#### Exit criteria
 
-### Required sequence
+- A fake transport observes session events outside the request-scoped renderer, reads replay through the bridge, and aborts exactly once.
+- Wrapper disposal unregisters controls/listeners; selecting an idle session does not create or mutate a session wrapper.
+- No new public access to `sdkSession` is added.
 
-1. Introduce `IRemoteControlTransport`, normalized remote request/event types and a discriminated `RemoteRequestOrigin`.
-2. Introduce `RemoteControlRegistry` with per-session bindings, correlation and disposal.
-3. Replace `source.startsWith('command-')` as an authorization/mode signal. Carry typed origin through pending request context and session input; serialize SDK `SendOptions.source` separately.
-4. Move Mission Control event, permission and user-input integration behind a `MissionControlTransport` adapter while retaining its API client, buffering and polling behavior.
-5. Consolidate request/persistent remote forwarding into one session-lifetime registry publication point with event-ID deduplication and self-parent protection.
-6. Verify Mission Control command completion, prompt/steering, abort, permission and question semantics are unchanged while each SDK event is exported once.
-7. Register an in-memory second transport in tests and prove event fan-out, first-valid permission/question resolution, prompt routing and abort with both transports present.
-8. Prove registry teardown releases all listeners and pending requests.
+### Phase 1c — remote-control registry and Mission Control migration
 
-### Session/reference lifecycle
-
-- `getSession()`/`createSession()` return `IReference<ICopilotCLISession>`.
-- A one-shot action disposes the reference in `finally`.
-- A bound remote session stores the reference in the binding's `DisposableStore` and releases it on deselection, session deletion, transport disable or extension shutdown.
-- Tests assert no use-after-dispose and no leaked reference after repeated attach/detach.
-
-### Native prompt constraint
-
-The in-memory transport sends prompts through:
+#### Files
 
 ```text
-setPendingCopilotCLIRequestContext(...)
--> workbench.action.chat.openSessionWithPrompt.copilotcli
--> real ChatRequest/toolInvocationToken
--> CopilotCLISession.handleRequest(...)
+extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/node/remoteControlRegistry.ts             (new)
+extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/missionControlTransport.ts     (new)
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts                   (modify)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts                             (composition)
 ```
 
-Do not use direct SDK `send()` as the spike shortcut.
+The Mission Control adapter is in `vscode-node`, not `node`, because it invokes the native VS Code command path and owns `/remote` UI. Its API client remains in `node/missionControlApiClient.ts`.
 
-The workbench command's promise lasts until the agent response completes. Dispatch it without awaiting the turn, acknowledge the transport immediately and attach a rejection handler. Pending-context cleanup is correlated by session + origin/command ID so an older failure cannot clear a newer request.
+#### Required behavior
+
+- Register any number of transports and logical per-session attachments.
+- Keep live session controls separate from logical attachments; loss of a wrapper makes abort unavailable but does not silently deselect the Telegram session.
+- Fan out normalized events in order. Deduplicate upstream event IDs and reject/repair `parentId === id` before transport delivery.
+- Replay by installing the live listener first, buffering, reading `getReplayEvents()`, filtering supported persisted event types, publishing unseen events, then flushing unseen buffered events.
+- Coordinate permission, user-input, and later plan-response races with first-valid-response-wins and cancellation of losing responders.
+- Move Mission Control state, buffering, export, polling, command parsing, prompt dispatch, permission/question waiters, QR/status UI, and teardown out of `CopilotCLISession`.
+- Preserve `/remote` through a generic remote-command handler registration rather than a Telegram or Mission Control branch in agent execution logic.
+- Only a registry-created `missionControl` origin may apply Mission Control mode. A Telegram origin remains non-elevated regardless of its payload or `source` string.
+- Keep the Mission Control adapter alive independently of wrapper churn and route its prompt commands through `RemotePromptDispatcher`.
+
+#### Exit criteria
+
+- Mission Control prompt, steering, abort, permission, question, replay, completion acknowledgement, and teardown tests pass.
+- Each SDK event is exported once, including while a native request is active.
+- An in-memory second transport can attach concurrently without changing Mission Control semantics.
+- `copilotcliSession.ts` contains no transport API client, poller, or transport-specific permission branch.
+
+## 5. Phase 2 — Telegram Bot API transport
+
+### Files
+
+```text
+extensions/copilot/src/extension/telegramRemote/common/telegramTypes.ts             (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramBotClient.ts           (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramPollerLease.ts          (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts              (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts            (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts (new)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts            (composition)
+```
+
+### Implement
+
+- Use the existing `IFetcherService` and its abort controller so proxy/certificate/network behavior matches the extension.
+- Implement the small Bot API subset: `getMe`, `getUpdates`, `sendMessage`, `editMessageText`, `editMessageReplyMarkup`, and `answerCallbackQuery`.
+- Validate Telegram envelopes and `ok/result` shapes at the boundary; never let unvalidated JSON become control commands.
+- Advance the update offset only after an update has been accepted for bounded processing; deduplicate update IDs.
+- Abort the in-flight long poll on disable/disposal and use bounded exponential backoff with Telegram `retry_after` handling.
+- Implement a cross-process, token-fingerprint lease using an atomic create operation, owner PID/nonce, heartbeat, and conservative stale recovery. Never put the bot token or full request URL in logs.
+- Keep dependencies at zero unless a documented comparison shows a framework reduces lifecycle/security risk enough to justify its bundle and transitive dependencies.
 
 ### Exit criteria
 
-- Mission Control semantic regression tests pass with exactly one export per SDK event.
-- An in-memory second transport can observe and safely control the same session.
-- A Telegram-origin request cannot inherit Mission Control `autopilot`, even when Mission Control is active in that mode or a transport payload contains a `command-*` string.
-- No transport-specific branch has been added to `CopilotCLISession`.
-- References/listeners are released deterministically.
+- Mock-server tests cover success, empty poll, timeout, abort, 401, 429, 5xx, malformed JSON, restart, and offset recovery.
+- A second host fails visibly before calling `getUpdates` for the same token.
+- Disabling or disposing the contribution aborts polling and releases the verified lease.
 
-## 4. Phase 2 — Telegram transport foundation
+## 6. Phase 3 — pairing, authorization and secret state
 
-Create:
+### Files
 
 ```text
-telegramBotClient.ts
-telegramService.ts
-telegramTransport.ts
-telegramTypes.ts
-telegramSettings.ts
+extensions/copilot/src/extension/telegramRemote/node/telegramPairingService.ts  (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramAuthorization.ts   (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramCallbackRegistry.ts (new)
 ```
 
 ### Implement
 
-- Bot API HTTPS wrapper or carefully selected dependency.
-- `getMe` token validation.
-- `getUpdates` long polling.
-- update offset/deduplication.
-- clean enable/disable lifecycle.
-- singleton poller lease keyed by bot identity/token fingerprint,
-- explicit rejection of a second consumer when a cross-process lease cannot be acquired,
-- bounded retry/backoff.
-- `sendMessage`.
-- `editMessageText`.
-- callback-query acknowledgement.
-
-### Design preference
-
-Avoid a large Telegram framework dependency unless it materially reduces security/lifecycle complexity. The required Bot API surface for V1 is small enough that a lightweight client is viable.
+- Store the bot token in `IVSCodeExtensionContext.secrets`, following the BYOK storage pattern. Do not store it in configuration, global state, telemetry, or logs.
+- Generate a cryptographically random, single-use, expiring pairing challenge with attempt throttling.
+- Accept `/pair` before authorization only in a Telegram private chat.
+- Bind authorization to both numeric `from.id` and the private `chat.id`; reject channels, anonymous senders, bots, groups, and missing identity fields in product V1.
+- Store only non-secret paired identity metadata in extension global state.
+- Authorize before session lookup so an unauthorized sender cannot learn whether a session exists.
+- Correlate callbacks by paired identity, session ID, request ID, action, random nonce, and expiry; make callbacks one-shot.
+- Add local revoke and disable operations that invalidate pending callbacks immediately.
 
 ### Exit criteria
 
-VS Code can send/receive Telegram messages reliably; stopping the contribution releases the lease; reload/re-enable and competing-host tests never produce duplicate pollers.
+- Only the paired private chat can list metadata or issue actions.
+- Expired/reused/wrong-user/wrong-chat challenges and callbacks fail closed.
+- Token redaction tests cover errors, logs, snapshots, status UI, and lease files.
 
-## 5. Phase 3 — pairing and authorization
+## 7. Phase 3b — consent, native visibility and kill switch
 
-Create:
+This phase blocks remote attachment and prompt dispatch.
+
+### Files
 
 ```text
-telegramPairingService.ts
-telegramAuthorization.ts
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramSetupWizard.ts (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramStatusBar.ts    (new)
+extensions/copilot/src/extension/chatSessions/vscode-node/copilotCLIChatSessions.ts (modify)
+extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/copilotCLIChatSessionInitializer.ts (modify)
+extensions/copilot/src/platform/configuration/common/configurationService.ts        (modify)
+extensions/copilot/package.json                                                      (modify)
+extensions/copilot/package.nls.json                                                  (modify)
 ```
 
 ### Implement
 
-- secret storage for bot token,
-- single-use expiring pairing code,
-- numeric Telegram user-ID allowlist,
-- `/pair` handling,
-- unauthorized-user rejection,
-- revoke/unpair local command,
-- remote disable local command.
+- Register settings under `github.copilot.chat.cli.telegram.*` with matching `defineSetting()` entries and localized manifest descriptions.
+- Use a versioned global consent record. A true setting alone never starts networking; the poller starts only after consent exists and token validation succeeds.
+- If the setting is toggled directly, show the modal before starting. Decline/cancel restores disabled state and persists neither consent nor token.
+- Setup flow: disclosure/consent -> masked token -> `getMe` -> pairing challenge -> confirmation.
+- Render session attachment state in controller-based `CopilotCLIChatSessionContentProvider.toChatSessionItem()` using `description` and `tooltip`, and refresh it through `refreshSession({ reason: 'update', sessionId })` on attachment changes.
+- Render a stable status bar item for connecting/connected/attached/error. Its command opens a QuickPick with Disable Remote Access directly available.
+- Local disable first blocks new dispatch, invalidates callbacks, detaches sessions, aborts the poll, then releases the lease and clears indicators.
+- Immediately after the native initializer attaches a live response stream, emit one localized in-chat warning through `notifyRemoteAttachment()` when the registry reports a logical attachment. Never call `addUserAssistantMessage()` for UI notices.
+- Keep `copilotCLIChatSessions.ts` transport-neutral: it renders attachment labels/icons supplied by the registry and contains no Telegram-specific string or identity.
 
 ### Exit criteria
 
-Only the paired user can query any session metadata or issue commands.
+- No command, configuration change, restart, or error-recovery path starts Telegram without the current consent version.
+- Attached state appears in the session list and status bar within one registry refresh.
+- The local kill switch works while the network is unavailable and leaves no active dispatcher, callback, poll, lease, or indicator.
 
-## 5a. Phase 3b — native VS Code UI, consent gate and kill switch
+## 8. Phase 4 — session selection, prompt, steering and abort
 
-Local visibility and revocation must exist **before** a Telegram user can attach to a session. A session that is remotely controllable with no local indicator is a security defect, so this phase blocks Phase 4 rather than following the Telegram UX work.
-
-Create:
-
-```text
-telegramStatusBar.ts
-telegramSetupWizard.ts
-remoteAttachmentIndicator.ts   (transport-neutral, lives with the registry)
-```
-
-Modify:
+### Files
 
 ```text
-src/extension/chatSessions/vscode-node/copilotCLIChatSessions.ts
+extensions/copilot/src/extension/telegramRemote/node/telegramCommandRouter.ts (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramSessionState.ts  (new)
 ```
 
 ### Implement
 
-- `IRemoteControlRegistry.getAttachments()` / `onDidChangeAttachments` returning `{ transportId, label, themeIcon }`.
-- `ChatSessionItem.description` + `tooltip` populated from that info, refreshed through the existing `refreshSession({ reason: 'update', sessionId })`.
-- Status bar item with connecting/connected/attached/error states and a warning background while attached.
-- QuickPick menu on the status bar item with *Disable remote access* reachable in one click.
-- Modal consent gate on first enable, per [SECURITY.md](./SECURITY.md) section 20; cancel is the default action and declining persists nothing.
-- Settings registered via `defineSetting()` with the abbreviated disclosure in `markdownDescription`; toggling `enabled` directly still routes through the consent gate.
-- Setup wizard: consent → masked token entry → `getMe` validation → pairing challenge → confirmation.
-- `stream.warning()` attach notice on the routed stream. Do not use `addUserAssistantMessage()`; it injects a synthetic assistant turn into the SDK session and the model's context.
+- `/start`, status, session list, inline selection, deselection, and explicit errors for deleted/closed sessions.
+- List with `getAllSessions()` and validate selection with `getSessionItem()`; neither operation acquires a live wrapper.
+- Store logical selected-session state per paired chat in Telegram-owned state and reflect it as a registry attachment.
+- Route normal text through `RemotePromptDispatcher` with a registry-created Telegram origin and immediate acknowledgement.
+- Always request the native steering queue; the workbench decides idle versus busy, and `CopilotCLISession` remains the only code that chooses SDK `mode: 'immediate'`.
+- Add Stop callback protection and call the registry's currently registered live control. If there is no live abortable wrapper, return “no active task” rather than acquiring/mutating a session.
+- Detach selection on upstream session deletion and reject stale session buttons.
 
 ### Exit criteria
 
-- No entry point can enable the transport without passing the consent modal.
-- An attached session shows an indicator in the session list and the status bar within one refresh cycle.
-- Disabling from the status bar tears down the poller, releases the lease and clears indicators.
-- `copilotCLIChatSessions.ts` contains no Telegram-specific string, icon or identity.
+- A Telegram prompt appears as a real native VS Code chat request with a real tool token.
+- Text during a long-running turn steers that same wrapper and is not rejected by the workbench queue.
+- Stop aborts once; stale Stop cannot target a later/different session.
+- There is no direct SDK send, concrete-session cast, or remote `getSession()` call.
 
-## 6. Phase 4 — session selection and prompting
+## 9. Phase 5 — event projection and Telegram activity UI
 
-Create:
+### Files
 
 ```text
-telegramCommandRouter.ts
-telegramSessionState.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteAgentEvent.ts       (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramEventRenderer.ts             (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramActivityCoalescer.ts          (new)
 ```
 
 ### Implement
 
-- `/start` / home card,
-- session list,
-- inline session picker,
-- selected-session state,
-- status display,
-- normal text prompt to an idle selected session through pending request context plus `workbench.action.chat.openSessionWithPrompt.copilotcli`,
-- typed Telegram request origin created by the registry rather than accepted from Telegram input,
-- immediate Telegram acknowledgement while the native command runs fire-and-forget,
-- clear errors for missing/closed sessions.
+- Normalize only SDK event names/types verified in the pinned runtime. The current source uses `assistant.message_delta`, `assistant.message`, `tool.execution_start`, `tool.execution_complete`, session lifecycle/usage, and subagent events; do not invent a tool-progress event when the SDK does not expose one.
+- Separate persisted replay types from ephemeral live types.
+- Preserve upstream event ID/timestamp when present and maintain a bounded per-binding seen-ID window across wrapper recreation.
+- Coalesce deltas, cap Telegram edit frequency, cap recent actions/history, split output within Bot API limits, and escape Telegram formatting.
+- Render useful observable output only; never claim hidden chain-of-thought.
+- Treat interactive request events as registry workflows, not duplicate generic activity cards.
 
 ### Exit criteria
 
-A Telegram user can select a VS Code Copilot session and send a normal prompt through a real VS Code `ChatRequest`; the message appears in native chat and no direct SDK fallback exists.
+- Replay/live overlap and wrapper recreation publish each supported event once.
+- High-frequency output produces bounded memory and bounded Bot API edits.
+- Renderer snapshot tests cover Markdown escaping, truncation, missing fields, and all supported event variants.
 
-## 7. Phase 5 — active-turn steering and abort
+## 10. Phase 6 — permissions, questions and plan-exit responses
+
+### Files
+
+```text
+extensions/copilot/src/extension/telegramRemote/node/telegramPermissionBridge.ts (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramUserInputBridge.ts  (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramPlanBridge.ts       (new)
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts (response-race modify)
+```
 
 ### Implement
 
-- inspect upstream session status,
-- treat normal Telegram text during an active turn as steering,
-- reuse the same native command path so upstream busy-session handling selects `mode: 'immediate'`,
-- Stop button/callback,
-- stale callback protection.
+- Race the existing local permission UI with all attached remote responders; exactly one valid response reaches `respondToPermission()`.
+- Telegram exposes only `approve-once` and `denied-interactively-by-user`. It cannot call `setPermissionLevel()`.
+- Race local and remote `user_input.requested` responses, supporting validated choices and a state-bound freeform next reply.
+- Invalidate Telegram buttons/reply state when any responder wins or the request/token is cancelled.
+- Add the same registry race to `exit_plan_mode.requested`. Telegram may select only SDK actions that do not elevate permission (`interactive` or `exit_only`) or deny/provide feedback; never expose `autopilot` or `autopilot_fleet`.
+- Support concurrent requests by session ID + SDK request ID + tool-call ID where present; never use display text as correlation.
 
 ### Exit criteria
 
-A long-running agent task can be redirected and aborted from Telegram while remaining the same underlying VS Code session.
+- Local, Mission Control, and Telegram race tests prove one SDK response per request.
+- Wrong-session/user/nonce/expired callbacks cannot resolve a request.
+- A Telegram-origin prompt remains interactive even while Mission Control is in autopilot.
 
-## 8. Phase 6 — event stream and live activity UI
+## 11. Phase 7 — models, reasoning effort and safe modes
 
-Create:
+### Stage A — read-only visibility
 
-```text
-remoteAgentEvent.ts
-telegramEventRenderer.ts
-telegramActivityCoalescer.ts
-```
+- Enumerate models through `ICopilotCLIModels.getModels()` and read the active wrapper with `getSelectedModelId()`.
+- Add a read-only session-service helper for an inactive session's selected model if needed; reuse the transient `getEvents()/getSelectedModel()/closeSession()` pattern in `getChatHistoryImpl()` rather than exposing the SDK session.
+- Display current mode from the session bridge only when known.
 
-Publish events through the registry's session-lifetime hook. Do not attach Telegram to the request-scoped listener store used by native chat rendering.
+### Stage B — validated per-request selection
 
-When attaching to an existing session, install a temporary-buffering live listener, obtain persisted events through the session bridge's `sdkSession.getEvents()`, replay only the supported event types in order, suppress duplicate IDs, flush unseen buffered events, then enter live mode. The SDK session itself remains hidden from Telegram code.
-
-### Event classes
-
-- assistant text/deltas,
-- intent,
-- reasoning where readable,
-- tool start/progress/complete,
-- session state,
-- subagent state,
-- usage/context,
-- errors.
-
-### Telegram rendering
-
-Default compact status example:
-
-```text
-🤖 Copilot · <model>
-<workspace> · <branch>
-
-🧠 Investigating startup flow
-
-Recent actions
-├─ 📖 ProcessorFactory.ts
-├─ 🔎 Search: CreateAsync
-└─ 💻 dotnet test
-
-⏱ Working…
-```
-
-Buttons:
-
-```text
-[ Stop ] [ Details ]
-[ Model ] [ Session ]
-```
-
-### Performance requirements
-
-- coalesce high-frequency deltas,
-- cap status edit frequency,
-- avoid unbounded event history,
-- avoid exceeding Telegram message limits.
-
-## 9. Phase 7 — permissions and agent questions
-
-Create:
-
-```text
-telegramPendingRequestRegistry.ts
-telegramPermissionBridge.ts
-telegramUserInputBridge.ts
-```
-
-### Implement
-
-- permission request rendering,
-- Approve once / Deny callbacks,
-- request/session/nonces correlation,
-- expiration,
-- first-valid-response semantics with local UI and every registered remote transport,
-- user choice questions,
-- freeform question replies,
-- invalidation of resolved buttons.
-
-Telegram V1 exposes only approve-once and deny. It MUST NOT call `setPermissionLevel()` or remotely select a mode that raises permission to `autoApprove`/`autopilot`.
+- Extend the internal workbench command options with `userSelectedModelId` and `userSelectedModelConfiguration`, forwarding them to `chatService.sendRequest()`.
+- Validate model ID and reasoning effort against `ICopilotCLIModels` before storing a Telegram-side preference.
+- Apply the preference to the next Telegram prompt through the real `ChatRequest`; `CopilotCLIChatSessionInitializer.resolveModel()` and `CopilotCLISession.updateModel()` remain authoritative.
+- Reflect the actual selected model after dispatch. A native user change may supersede Telegram state and must be shown rather than silently overwritten.
+- Expose only non-elevating mode operations. Product V1 may enter plan/interactive through supported request semantics; it must not offer remote `autoApprove`, `autopilot`, or `autopilot_fleet`.
+- Validate GitHub-hosted and configured BYOK/local providers through the same upstream catalog/runtime. Add no Telegram-specific provider stack.
 
 ### Exit criteria
 
-A task can continue entirely from the phone through a permission/question cycle.
+- Unsupported/stale model and reasoning choices fail visibly before dispatch.
+- A remote model preference arrives on the native `ChatRequest` and the SDK-selected model matches afterward.
+- Local/BYOK compatibility is reported only for backends that pass the full prompt/tool/permission/steering/abort matrix.
 
-## 10. Phase 8 — models and modes
-
-### Implement
-
-- display selected model,
-- enumerate current Copilot CLI model catalogue,
-- model picker,
-- safe model switching through current upstream API,
-- display/select reasoning effort where supported,
-- display agent mode,
-- mode picker where supported.
-
-### BYOK/local validation
-
-Test separately with at least:
-
-- normal GitHub-hosted Copilot model,
-- OpenAI-compatible local/vLLM model configured through supported upstream provider path,
-- Ollama provider if relevant.
-
-Do not special-case local model agent tooling in Telegram. If a model is not compatible with the upstream Copilot agent runtime, report that limitation.
-
-## 11. Phase 9 — optional V2 own-ID companion research
-
-This phase is not on the critical path for V1. V1 runs inside the bundled Copilot extension and adds no third-party extension ID.
-
-Before creating a V2 companion, verify that a supported Copilot session-control seam exists across the extension boundary. Product proposal authorization alone does not expose Copilot's internal services.
-
-If a V2 own-ID extension is pursued, create:
-
-```text
-proposedApiSetup.ts
-```
+## 12. Phase 8 — release hardening
 
 ### Implement
 
-- choose and record an extension ID owned by the project,
-- declare the exact required proposals in the companion `package.json`,
-- detect missing required proposal access safely,
-- run the preflight before initializing any proposal-dependent service,
-- fail closed with an actionable diagnostic.
+- Redacted output channel and diagnostics commands.
+- Rate limits and bounded queues for messages, callbacks, pairing, and Bot API retries.
+- Compatibility report with commit, extension/runtime versions, proposal list, test results, OS, and patch revision.
+- Dependency/license inventory, notices, artifact checksums, bundled-fork packaging, and clean-profile setup docs.
+- Rebase CI that runs targeted Copilot CLI tests, Telegram tests, controller/native-dispatch integration, Mission Control regression, typecheck, and packaging smoke tests.
+- Manual acceptance covering consent, pairing, prompt, steering, permission, question, plan exit, abort, Mission Control coexistence, disable, reload, and competing host.
 
-For a companion bundled into the custom VS Code fork:
+### Exit criteria
 
-- add the exact extension ID and proposal list to `product.json#extensionEnabledApiProposals` at build time,
-- add a build check that the product and manifest proposal lists match,
-- never edit `product.json` during extension activation.
+- Every P0 requirement and security acceptance test passes on a clean bundled build.
+- Telegram disabled produces no Telegram network request, listener, or status item.
+- The release contains exact compatibility metadata and no secret test data.
 
-For a private standalone VSIX experiment:
+## 13. Optional Phase 9 — own-ID companion research
 
-- show a consent UI,
-- locate runtime `argv.json`,
-- perform a JSONC-preserving update with backup/rollback,
-- add only this extension ID,
-- require a full restart,
-- verify availability after restart.
+This is not on the product V1 critical path. Do not create a companion until an upstream-supported Copilot session-control boundary exists across extension IDs.
 
-The current public `GitHub.copilot-chat` export is insufficient for that seam. Do not claim hosted Copilot authentication is allowed or blocked by Microsoft signing until a separate source/runtime investigation is complete.
+If pursued:
 
-## 12. Phase 10 — release hardening
+- Fork-bundled companion: declare proposals in its manifest and add the exact owned extension ID with a matching list to `product.json#extensionEnabledApiProposals` at build time.
+- Private standalone experiment: use explicit consent, JSONC-preserving `argv.json` update, backup/rollback, full restart, and fail-closed preflight.
+- Proposal authorization alone does not expose `ICopilotCLISessionService`, the registry, or the native prompt dispatcher.
+- Do not claim hosted Copilot entitlement behavior without a separate runtime/authentication investigation.
 
-### Implement
+## 14. Authoritative source touch list
 
-- diagnostic commands/log channel,
-- release compatibility metadata,
-- bundled-fork artifact packaging and optional explicitly scoped internal VSIX packaging,
-- dependency/license inventory,
-- checksums,
-- upstream rebase CI,
-- end-to-end regression suite,
-- user-facing setup/readme documentation.
-
-## 13. Suggested source touch points
-
-### Expected modified upstream files
-
-Phase 1a requires one narrow edit plus the composition-root line:
+### Required upstream edits
 
 ```text
-src/extension/chatSessions/copilotcli/node/copilotcliSession.ts
-src/extension/chatSessions/vscode-node/chatSessions.ts
+src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/common/pendingRequestContext.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/copilotCLIChatSessionInitializer.ts
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts
+extensions/copilot/src/extension/chatSessions/vscode-node/copilotCLIChatSessions.ts
+extensions/copilot/src/platform/configuration/common/configurationService.ts
+extensions/copilot/package.json
+extensions/copilot/package.nls.json
 ```
 
-Phase 1b rewires the interactive-response call sites in the same file. The native UI work adds one more:
+`copilotCLIChatSessionsContribution.ts` is explicitly out of scope because it is the deprecated non-controller implementation.
+
+### Downstream-owned directories
 
 ```text
-src/extension/chatSessions/vscode-node/copilotCLIChatSessions.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteAgentEvent.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/node/remoteControlRegistry.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/remotePromptDispatcher.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/missionControlTransport.ts
+extensions/copilot/src/extension/telegramRemote/**
 ```
 
-That edit sets `ChatSessionItem.description`/`tooltip` from registry attachment info and subscribes to `onDidChangeAttachments` to call the existing `refreshSession()`. It must remain transport-neutral — no Telegram label, icon or identity in this file.
+## 15. Configuration and commands
 
-### Possible additional seam edits
-
-Only if required:
+### Configuration
 
 ```text
-src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts
-package.json
+github.copilot.chat.cli.telegram.enabled
+github.copilot.chat.cli.telegram.activityDetail
+github.copilot.chat.cli.telegram.pollTimeout
+github.copilot.chat.cli.telegram.notifications.enabled
+github.copilot.chat.cli.telegram.statusBar.enabled
 ```
 
-Keep the `copilotcliSession.ts` patch narrow and transport-neutral. Its required responsibilities are event publication, interactive-response coordination and safe action binding; Telegram API types and rendering never enter this file.
+The bot token is never a setting. Poll timeout and rate-limit values must have strict validators and safe bounds.
 
-## 14. Suggested configuration keys
-
-Names are provisional and should follow upstream naming conventions.
+### Commands
 
 ```text
-github.copilot.telegram.enabled
-github.copilot.telegram.activityDetail
-github.copilot.telegram.pollTimeout
-github.copilot.telegram.notifications.enabled
-github.copilot.telegram.statusBar.enabled
+github.copilot.cli.telegram.setup
+github.copilot.cli.telegram.testConnection
+github.copilot.cli.telegram.startPairing
+github.copilot.cli.telegram.revokePairing
+github.copilot.cli.telegram.disable
+github.copilot.cli.telegram.showStatus
+github.copilot.cli.telegram.showLog
+github.copilot.cli.telegram.statusBarMenu
 ```
 
-Register with `defineSetting()` in `platform/configuration/common/configurationService.ts` and mirror in `contributes.configuration`. `enabled` carries the abbreviated risk disclosure in its `markdownDescription` and still routes through the consent gate when toggled directly.
+All labels/descriptions are localized. `statusBarMenu` is not shown in the command palette. Enablement clauses improve discoverability, but handlers still enforce consent/authorization because UI enablement is not a security boundary.
 
-Do NOT put the bot token into a configuration key.
+## 16. Validation map
 
-## 15. Suggested commands
+| Change | Minimum validation |
+| --- | --- |
+| Pending context/dispatcher | Targeted participant tests for marker correlation, cleanup, rejection, idle and steering queue |
+| Workbench action queue option | Core chat-session action test proving queued/steering/rejected behavior |
+| Session bridge/registry | `copilotcliSession.spec.ts` plus new registry tests for replay, dedup, disposal and response races |
+| Mission Control extraction | Existing Mission Control session/API tests plus adapter regression tests with a second fake transport |
+| Telegram client/poller | Mock HTTP tests with fake timers and cross-process lease tests |
+| Pairing/security | Parser, authorization, callback, consent and redaction unit tests |
+| Native indicators | `copilotCLIChatSessions.spec.ts` and contribution/status-bar tests |
+| Full extension changes | `npm run typecheck` and the smallest matching `npm run test:unit -- <test files>` from `extensions/copilot` |
+| Core VS Code change | Targeted core unit test; run broader compile/typecheck only if the targeted test exposes a dependency issue |
+| Release candidate | Clean bundled launch, extension-host smoke test, manual Telegram scenario and Mission Control coexistence run |
 
-Provisional:
-
-```text
-github.copilot.telegram.setup
-github.copilot.telegram.testConnection
-github.copilot.telegram.startPairing
-github.copilot.telegram.revokePairing
-github.copilot.telegram.disable
-github.copilot.telegram.showStatus
-github.copilot.telegram.showLog
-github.copilot.telegram.statusBarMenu
-github.copilot.telegram.configureProposedApi
-github.copilot.telegram.openRuntimeArguments
-```
-
-All commands declare `enablement` clauses so pairing and disable actions do not appear in the palette while the feature is off. `statusBarMenu` is the status bar item's command and is not surfaced in the palette (`f1: false` equivalent).
-
-## 16. Dependency decision
-
-Before selecting a Telegram library, compare:
-
-- direct Bot API implementation,
-- grammY,
-- Telegraf,
-- other maintained Node libraries.
-
-Decision criteria:
-
-- bundle size,
-- Node version compatibility with upstream Copilot extension,
-- long-poll lifecycle control,
-- callback typing,
-- dependency/security history,
-- ease of mocking,
-- upstream maintenance activity.
-
-V1 needs a small API subset; dependency minimization has real value inside an upstream-tracking fork.
-
-## 17. Definition of done for each phase
+## 17. Definition of done for every phase
 
 A phase is complete only when:
 
-- implementation compiles with upstream Copilot,
-- tests cover the new behavior,
-- no unrelated upstream functionality is duplicated,
-- errors are visible and safe,
-- session references, listeners and poller leases have deterministic ownership,
-- Mission Control regression tests pass after registry changes,
-- documentation is updated if the actual API differs from this plan,
-- the downstream patch remains reviewable against upstream.
+- implementation and targeted tests pass,
+- errors are visible and fail closed,
+- disposables are registered at creation and lifecycle ownership is tested,
+- no transport-specific type enters model/tool/worktree/session execution code,
+- no raw SDK session reaches Telegram code,
+- no accepted control message can be silently dropped,
+- local UI and Mission Control regressions for the touched seam pass,
+- the plan/API matrix is updated if the real source contract changes,
+- the downstream patch remains narrow and reviewable against upstream.
