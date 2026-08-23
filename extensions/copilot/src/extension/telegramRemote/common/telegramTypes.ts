@@ -1,0 +1,210 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) 2026 Sachith H. Liyanagama, Emagin8 UG. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import type { IAbortSignal } from '../../../platform/networking/common/fetcherService';
+
+export type TelegramChatId = number | string;
+
+export interface TelegramUser {
+	readonly id: number;
+	readonly is_bot: boolean;
+	readonly first_name: string;
+	readonly username?: string;
+	readonly language_code?: string;
+}
+
+export interface TelegramChat {
+	readonly id: number;
+	readonly type: 'private' | 'group' | 'supergroup' | 'channel';
+	readonly username?: string;
+	readonly first_name?: string;
+	readonly last_name?: string;
+	readonly title?: string;
+}
+
+export interface TelegramMessage {
+	readonly message_id: number;
+	readonly date: number;
+	readonly chat: TelegramChat;
+	readonly from?: TelegramUser;
+	readonly text?: string;
+}
+
+export interface TelegramCallbackQuery {
+	readonly id: string;
+	readonly from: TelegramUser;
+	readonly message?: TelegramMessage;
+	readonly inline_message_id?: string;
+	readonly data?: string;
+}
+
+export interface TelegramUpdate {
+	readonly update_id: number;
+	readonly message?: TelegramMessage;
+	readonly callback_query?: TelegramCallbackQuery;
+}
+
+export interface TelegramInlineKeyboardButton {
+	readonly text: string;
+	readonly callback_data?: string;
+	readonly url?: string;
+}
+
+export interface TelegramInlineKeyboardMarkup {
+	readonly inline_keyboard: readonly (readonly TelegramInlineKeyboardButton[])[];
+}
+
+export interface TelegramGetUpdatesOptions {
+	readonly offset?: number;
+	readonly limit?: number;
+	readonly timeoutSeconds?: number;
+	readonly allowedUpdates?: readonly ('message' | 'callback_query')[];
+	readonly signal?: IAbortSignal;
+}
+
+export interface TelegramSendMessageOptions {
+	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+	readonly disableNotification?: boolean;
+}
+
+export interface TelegramEditMessageTextOptions {
+	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+}
+
+export interface TelegramAnswerCallbackQueryOptions {
+	readonly text?: string;
+	readonly showAlert?: boolean;
+	readonly cacheTime?: number;
+}
+
+export interface ITelegramBotClient {
+	getMe(signal?: IAbortSignal): Promise<TelegramUser>;
+	getUpdates(options?: TelegramGetUpdatesOptions): Promise<readonly TelegramUpdate[]>;
+	sendMessage(chatId: TelegramChatId, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage>;
+	editMessageText(chatId: TelegramChatId, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true>;
+	editMessageReplyMarkup(chatId: TelegramChatId, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage | true>;
+	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<true>;
+}
+
+export type TelegramPollingStatus =
+	| { readonly state: 'stopped' }
+	| { readonly state: 'starting' }
+	| { readonly state: 'connected'; readonly bot: TelegramUser }
+	| { readonly state: 'retrying'; readonly retryInMs: number; readonly attempt: number; readonly reason: TelegramPollingFailureKind }
+	| { readonly state: 'failed'; readonly reason: TelegramPollingFailureKind };
+
+export type TelegramBotApiErrorKind = 'aborted' | 'authentication' | 'rate-limit' | 'server' | 'network' | 'invalid-response' | 'api';
+export type TelegramPollingFailureKind = TelegramBotApiErrorKind | 'handler' | 'lease' | 'storage';
+
+export class TelegramBotApiError extends Error {
+	constructor(
+		readonly kind: TelegramBotApiErrorKind,
+		message: string,
+		readonly httpStatus?: number,
+		readonly errorCode?: number,
+		readonly retryAfterSeconds?: number,
+	) {
+		super(message);
+		this.name = 'TelegramBotApiError';
+	}
+}
+
+export function parseTelegramUser(value: unknown, requireBot = false): TelegramUser {
+	const record = asRecord(value, 'Telegram user');
+	const user: TelegramUser = {
+		id: asSafeInteger(record.id, 'Telegram user id'),
+		is_bot: asBoolean(record.is_bot, 'Telegram user is_bot'),
+		first_name: asString(record.first_name, 'Telegram user first_name'),
+		username: asOptionalString(record.username, 'Telegram user username'),
+		language_code: asOptionalString(record.language_code, 'Telegram user language_code'),
+	};
+	if (requireBot && !user.is_bot) {
+		throw new TelegramBotApiError('invalid-response', 'Telegram getMe returned a non-bot user.');
+	}
+	return user;
+}
+
+export function parseTelegramMessage(value: unknown): TelegramMessage {
+	const record = asRecord(value, 'Telegram message');
+	return {
+		message_id: asSafeInteger(record.message_id, 'Telegram message id'),
+		date: asSafeInteger(record.date, 'Telegram message date'),
+		chat: parseTelegramChat(record.chat),
+		from: record.from === undefined ? undefined : parseTelegramUser(record.from),
+		text: asOptionalString(record.text, 'Telegram message text'),
+	};
+}
+
+export function parseTelegramUpdate(value: unknown): TelegramUpdate {
+	const record = asRecord(value, 'Telegram update');
+	return {
+		update_id: asSafeInteger(record.update_id, 'Telegram update id'),
+		message: record.message === undefined ? undefined : parseTelegramMessage(record.message),
+		callback_query: record.callback_query === undefined ? undefined : parseTelegramCallbackQuery(record.callback_query),
+	};
+}
+
+export function parseTelegramMessageOrTrue(value: unknown): TelegramMessage | true {
+	return value === true ? true : parseTelegramMessage(value);
+}
+
+function parseTelegramChat(value: unknown): TelegramChat {
+	const record = asRecord(value, 'Telegram chat');
+	const type = asString(record.type, 'Telegram chat type');
+	if (type !== 'private' && type !== 'group' && type !== 'supergroup' && type !== 'channel') {
+		throw new TelegramBotApiError('invalid-response', 'Telegram returned an unsupported chat type.');
+	}
+	return {
+		id: asSafeInteger(record.id, 'Telegram chat id'),
+		type,
+		username: asOptionalString(record.username, 'Telegram chat username'),
+		first_name: asOptionalString(record.first_name, 'Telegram chat first_name'),
+		last_name: asOptionalString(record.last_name, 'Telegram chat last_name'),
+		title: asOptionalString(record.title, 'Telegram chat title'),
+	};
+}
+
+function parseTelegramCallbackQuery(value: unknown): TelegramCallbackQuery {
+	const record = asRecord(value, 'Telegram callback query');
+	return {
+		id: asString(record.id, 'Telegram callback query id'),
+		from: parseTelegramUser(record.from),
+		message: record.message === undefined ? undefined : parseTelegramMessage(record.message),
+		inline_message_id: asOptionalString(record.inline_message_id, 'Telegram callback inline_message_id'),
+		data: asOptionalString(record.data, 'Telegram callback data'),
+	};
+}
+
+function asRecord(value: unknown, label: string): Record<string, unknown> {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		throw new TelegramBotApiError('invalid-response', `${label} has an invalid shape.`);
+	}
+	return value as Record<string, unknown>;
+}
+
+function asString(value: unknown, label: string): string {
+	if (typeof value !== 'string') {
+		throw new TelegramBotApiError('invalid-response', `${label} is invalid.`);
+	}
+	return value;
+}
+
+function asOptionalString(value: unknown, label: string): string | undefined {
+	return value === undefined ? undefined : asString(value, label);
+}
+
+function asBoolean(value: unknown, label: string): boolean {
+	if (typeof value !== 'boolean') {
+		throw new TelegramBotApiError('invalid-response', `${label} is invalid.`);
+	}
+	return value;
+}
+
+function asSafeInteger(value: unknown, label: string): number {
+	if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+		throw new TelegramBotApiError('invalid-response', `${label} is invalid.`);
+	}
+	return value;
+}

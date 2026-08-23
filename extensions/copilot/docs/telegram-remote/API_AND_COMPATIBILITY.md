@@ -214,6 +214,8 @@ V1 relies on stable Bot API primitives:
 - bot identity validation (`getMe`),
 - optional file APIs later.
 
+Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. The registered contribution remains network-dormant until Phase 3 provides consented secret storage and pairing.
+
 Reference: https://core.telegram.org/bots/api
 
 Long polling and webhooks are mutually exclusive. V1 chooses long polling because it requires no inbound connectivity.

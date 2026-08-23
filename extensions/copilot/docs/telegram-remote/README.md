@@ -2,7 +2,11 @@
 
 > Project documentation for the `copilot-telegram` downstream branch.
 >
-> Baseline validated against VS Code/Copilot source commit `0984c920744f2013d0ad2bc5e826fa45a64069ab` (August 2026).
+> Baseline validated against VS Code/Copilot source commit `58af001e0c7b342016db51cef2a026c7791f5d58` (August 2026).
+
+Phases 0-2 are implemented. The Bot API client, long poller, durable offset state and singleton poller lease are available, while production activation remains disabled until Phase 3 adds consented secret storage and pairing.
+
+For the Phase 2 mock and opt-in real-bot tests, see [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md#real-bot-smoke-test) or run `script/telegram-remote/test-phase2.ps1` from the Copilot extension directory.
 
 ## Purpose
 

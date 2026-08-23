@@ -170,6 +170,17 @@ Recommended sequence:
 
 No Tailscale or inbound firewall configuration is required for the default long-polling mode.
 
+### Phase 2 developer smoke test
+
+The development harness does not store the token in VS Code and is not the product setup flow. Copy `extensions/copilot/.env.sample` to `extensions/copilot/.env`, fill `TELEGRAM_BOT_TOKEN`, then run:
+
+```powershell
+cd extensions/copilot
+.\script\telegram-remote\test-phase2.ps1 -RealBot
+```
+
+By default the real test calls only `getMe` and a short `getUpdates`. Sending a test message additionally requires `TELEGRAM_TEST_CHAT_ID` and `TELEGRAM_REAL_TEST_SEND_MESSAGE=true`. The `.env` file is ignored and the runner never prints loaded values. Phase 3 replaces this development-only injection with consented VS Code SecretStorage.
+
 ## 7. Packaging
 
 For the current architecture, development artifacts should be built through the VS Code fork's product/build tooling so the modified built-in extension, its proposal declarations and integration source remain aligned. If V2 adds a fork-bundled own-ID companion, its product proposal registration becomes part of that build contract. If an internal standalone VSIX is also produced for targeted testing, document that it is not equivalent to the complete bundled-fork distribution and record the required host configuration.

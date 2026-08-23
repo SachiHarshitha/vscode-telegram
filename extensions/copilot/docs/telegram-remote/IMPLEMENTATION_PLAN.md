@@ -6,12 +6,12 @@ This plan was revalidated against the repository at:
 
 | Item | Value |
 | --- | --- |
-| VS Code commit | `58af001e0c7b342016db51cef2a026c7791f5d58` |
+| VS Code commit | `78d59cf49e13b49682661716ed5d8adece8f6348` |
 | Copilot extension | `GitHub.copilot-chat` `0.63.0` |
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Phases 0 and 1 implemented and validated; Telegram network/UI contributions are not registered |
+| Implementation status | Phases 0, 1 and 2 implemented and validated; the Telegram transport is registered but remains dormant until Phase 3 supplies consented secret storage and pairing |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -19,7 +19,7 @@ The product release called “V1” in these documents is not the deprecated non
 
 | Finding in the current source | Planning consequence |
 | --- | --- |
-| `ChatSessionsContrib` selects the controller path only when `chat.cli.sessionController.enabled` is true; its current default is false. The repository-local `AGENTS.md` says new work must use the controller path and that `registerCopilotCLIServicesV1` is deprecated. | The fork build must explicitly enable the controller path. Telegram code will not be added to `copilotCLIChatSessionsContribution.ts`. |
+| `ChatSessionsContrib` selects the controller path only when `chat.cli.sessionController.enabled` is true; the upstream baseline default was false and Phase 0 changed the downstream default to true. The repository-local `AGENTS.md` says new work must use the controller path and that `registerCopilotCLIServicesV1` is deprecated. | The fork build must keep the controller path enabled. Telegram code will not be added to `copilotCLIChatSessionsContribution.ts`. |
 | `pendingRequestContext.ts` stores one value per session and `clearPendingCopilotCLIRequestContext()` clears it without correlation. | Replace the session-only slot with correlation-ID entries. A local request or an older failed dispatch must not consume/clear a newer remote request. |
 | `workbench.action.chat.openSessionWithPrompt.copilotcli` calls `chatService.sendRequest()` without a queue mode. While a request is active, `sendRequest()` can return `rejected` before `CopilotCLISession` gets a chance to use SDK `mode: 'immediate'`. The action also ignores rejected results. | Extend the internal action with an explicit `queue: 'steering'` option and throw on rejected dispatch. Remote prompting cannot be considered proven until this path is tested. |
 | The internal command already accepts `attachedContext`, and `ChatRequest.references` preserves each reference ID. | Carry an opaque correlation marker through `attachedContext`; the Copilot participant consumes it before prompt resolution. This gives exact request-to-context matching without putting a nonce in model-visible prompt text. |
@@ -214,6 +214,31 @@ The Mission Control adapter is in `vscode-node`, not `node`, because it invokes 
 
 ## 5. Phase 2 — Telegram Bot API transport
 
+**Status:** Implemented and validated on 2026-08-23. The controller host registers a dormant Telegram transport. It performs no production network activity until the Phase 3 consent, secret-storage and authorization flow explicitly starts it.
+
+### Implementation record
+
+- `TelegramBotClient` uses `IFetcherService`, JSON POST requests and the fetcher's abort signal. It validates every envelope and method result before returning typed users, updates or messages.
+- The supported API subset is `getMe`, `getUpdates`, `sendMessage`, `editMessageText`, `editMessageReplyMarkup` and `answerCallbackQuery`; no Bot framework dependency was added.
+- `TelegramService` owns one abortable long poll, ordered update handling, in-process deduplication, durable per-token offsets, `retry_after` handling and bounded exponential backoff.
+- `telegramPollerLease.ts` uses an atomic `wx` lease file keyed by a truncated SHA-256 token fingerprint. The file contains only the fingerprint, PID, random nonce and timestamps; stale recovery requires both expiry and a dead owner process.
+- Offset advancement occurs only after the update handler succeeds and the new offset has been persisted. A failed handler is retried without confirming the update.
+- `TelegramRemoteContribution` registers the transport only in the supported controller host. The contribution is intentionally dormant, because Phase 2 has no secure token or paired identity yet.
+- All new Telegram TypeScript files live under `src/extension/telegramRemote` with downstream copyright ownership.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 2 PowerShell runner | Passed: 4 files, 18 tests via `script/telegram-remote/test-phase2.ps1` |
+| HTTP mock-server contracts | Passed: authentication, success, empty poll, long-poll timeout response, abort, 401, 429/`retry_after`, 5xx and malformed JSON/update shapes |
+| Polling lifecycle | Passed: deduplication, handler retry, durable offset, restart recovery, bounded backoff, disposal abort and lease release |
+| Singleton lease | Passed: exclusive acquisition, ownership-safe release, live-owner refusal and conservative dead-owner recovery |
+| Telegram Remote aggregate | Passed: 9 files and 42 tests; the one opt-in real-bot file/test was skipped |
+| TypeScript / lint / extension bundle | Passed: `npm run typecheck`, targeted ESLint with zero warnings, and `npm run compile` |
+| Source-workbench smoke | Passed: patch 3/controller/transport-ready marker observed with `--disable-workspace-trust`; no Telegram API traffic occurred |
+| Real-bot harness | Added and skipped by default; opt in with a local `.env` and `test-phase2.ps1 -RealBot` |
+
 ### Files
 
 ```text
@@ -224,6 +249,12 @@ extensions/copilot/src/extension/telegramRemote/node/telegramService.ts         
 extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts            (new)
 extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts (new)
 extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts            (composition)
+extensions/copilot/src/extension/telegramRemote/node/test/telegramBotClient.spec.ts  (new)
+extensions/copilot/src/extension/telegramRemote/node/test/telegramPollerLease.spec.ts (new)
+extensions/copilot/src/extension/telegramRemote/node/test/telegramService.spec.ts    (new)
+extensions/copilot/src/extension/telegramRemote/node/test/telegramBotClient.real.spec.ts (new, opt-in)
+extensions/copilot/.env.sample                                                       (new)
+extensions/copilot/script/telegram-remote/test-phase2.ps1                            (new)
 ```
 
 ### Implement
@@ -241,6 +272,19 @@ extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts       
 - Mock-server tests cover success, empty poll, timeout, abort, 401, 429, 5xx, malformed JSON, restart, and offset recovery.
 - A second host fails visibly before calling `getUpdates` for the same token.
 - Disabling or disposing the contribution aborts polling and releases the verified lease.
+
+### Real-bot smoke test
+
+From `extensions/copilot`:
+
+```powershell
+Copy-Item .env.sample .env
+# Fill TELEGRAM_BOT_TOKEN in .env. Optionally set TELEGRAM_TEST_CHAT_ID and
+# TELEGRAM_REAL_TEST_SEND_MESSAGE=true to test sendMessage.
+.\script\telegram-remote\test-phase2.ps1 -RealBot
+```
+
+The `.env` file is ignored by Git. The script accepts only the three variables in `.env.sample`, imports them only into its process, hides their values from output and runs the same production Bot API client used by the extension. Stop any other `getUpdates` poller for the same bot before the smoke test to avoid competing consumers.
 
 ## 6. Phase 3 — pairing, authorization and secret state
 

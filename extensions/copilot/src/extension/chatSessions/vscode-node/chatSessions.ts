@@ -46,6 +46,7 @@ import { CopilotCLIContrib, getServices } from '../copilotcli/vscode-node/contri
 import { MissionControlTransport } from '../../telegramRemote/vscode-node/missionControlTransport';
 import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../telegramRemote/vscode-node/remotePromptDispatcher';
 import { IRemoteControlRegistry } from '../../telegramRemote/common/remoteControlTypes';
+import { TelegramRemoteContribution } from '../../telegramRemote/vscode-node/telegramRemoteContribution';
 import { CopilotCLIFolderMruService } from '../copilotcli/vscode-node/copilotCLIFolderMru';
 import { ICopilotCLISessionTracker } from '../copilotcli/vscode-node/copilotCLISessionTracker';
 import { CustomSessionTitleService } from '../copilotcli/vscode-node/customSessionTitleServiceImpl';
@@ -123,7 +124,6 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 	}
 
 	private registerCopilotCLIServices(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {
-		this.registerTelegramRemoteControllerHost(logService);
 		const cloudSessionProvider = this.registerCopilotCloudAgent();
 		const copilotcliAgentInstaService = instantiationService.createChild(
 			new ServiceCollection(
@@ -189,6 +189,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 		this._register(copilotcliAgentInstaService.invokeFunction(accessor => accessor.get(ICopilotCLISessionTracker)));
 		this._register(copilotcliAgentInstaService.createInstance(CopilotCLIContrib));
 		this._register(copilotcliAgentInstaService.createInstance(MissionControlTransport));
+		this.registerTelegramRemoteControllerHost(copilotcliAgentInstaService, logService);
 
 		copilotModels.registerLanguageModelChatProvider(vscode.lm);
 
@@ -203,10 +204,9 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 	}
 
 	/**
-	 * Sole composition point for Telegram Remote contributions. Phase 0 intentionally registers
-	 * only the compatibility/build diagnostic; transport, network and UI work start in later phases.
+	 * Sole composition point for Telegram Remote contributions.
 	 */
-	private registerTelegramRemoteControllerHost(logService: ILogService): void {
+	private registerTelegramRemoteControllerHost(instantiationService: IInstantiationService, logService: ILogService): void {
 		const compatibility = resolveTelegramRemoteHostCompatibility({
 			sessionController: true,
 			agentSessionsWorkspace: vscode.workspace.isAgentSessionsWorkspace,
@@ -218,7 +218,8 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			return;
 		}
 
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=1; remote-control-registry=ready; telegram-contribution=not-registered`);
+		this._register(instantiationService.createInstance(TelegramRemoteContribution));
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=2; remote-control-registry=ready; telegram-transport=ready; telegram-network=disabled-awaiting-secure-token`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {
