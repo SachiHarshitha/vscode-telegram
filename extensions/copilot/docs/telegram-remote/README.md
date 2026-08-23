@@ -4,9 +4,11 @@
 >
 > Baseline validated against VS Code/Copilot source commit `58af001e0c7b342016db51cef2a026c7791f5d58` (August 2026).
 
-Phases 0-2 are implemented. The Bot API client, long poller, durable offset state and singleton poller lease are available, while production activation remains disabled until Phase 3 adds consented secret storage and pairing.
+Phases 0-3 are implemented. The Bot API client, long poller, durable offset state, singleton poller lease, SecretStorage-backed credentials, private-chat pairing and opaque callback authorization are available. Production activation remains disabled until Phase 3b adds the versioned consent and native setup/kill-switch surfaces.
 
 For the Phase 2 mock and opt-in real-bot tests, see [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md#real-bot-smoke-test) or run `script/telegram-remote/test-phase2.ps1` from the Copilot extension directory.
+
+For the Phase 3 transport/security regression suite, run `script/telegram-remote/test-phase3.ps1` from the Copilot extension directory. It never reads `.env` and does not contact Telegram.
 
 ## Purpose
 

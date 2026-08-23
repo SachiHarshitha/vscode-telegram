@@ -6,10 +6,12 @@
 import type { SessionEvent } from '@github/copilot/sdk';
 import { ILogService } from '../../../platform/log/common/logService';
 import { CancellationToken, CancellationTokenSource } from '../../../util/vs/base/common/cancellation';
+import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import {
 	IRemoteCommandContext,
 	IRemoteControlRegistry,
+	IRemoteAttachmentInfo,
 	IRemoteControlSession,
 	IRemoteControlSessionEvent,
 	IRemoteControlTransport,
@@ -54,6 +56,8 @@ interface ISessionBinding {
 
 export class RemoteControlRegistry extends Disposable implements IRemoteControlRegistry {
 	declare readonly _serviceBrand: undefined;
+	private readonly attachmentEmitter = this._register(new Emitter<string>());
+	readonly onDidChangeAttachments: Event<string> = this.attachmentEmitter.event;
 
 	private readonly transports = new Map<string, IRemoteControlTransport>();
 	private readonly attachmentsBySessionId = new Map<string, Map<string, ILogicalAttachment>>();
@@ -109,10 +113,13 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 			}
 			this.transports.delete(transport.id);
 			for (const [sessionId, attachments] of this.attachmentsBySessionId) {
-				attachments.delete(transport.id);
+				if (!attachments.delete(transport.id)) {
+					continue;
+				}
 				if (attachments.size === 0) {
 					this.attachmentsBySessionId.delete(sessionId);
 				}
+				this.attachmentEmitter.fire(sessionId);
 			}
 		});
 	}
@@ -141,9 +148,11 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 				lastEventId: null,
 			};
 			attachments.set(transportId, attachment);
+			this.attachmentEmitter.fire(sessionId);
 			const binding = this.bindingsBySessionId.get(sessionId);
 			if (binding) {
 				this.replayAttachment(sessionId, binding, attachment);
+				binding.session.notifyRemoteAttachment(this.transports.get(transportId)!.label);
 			}
 		}
 
@@ -160,6 +169,7 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 			}
 			if (--current.refCount <= 0) {
 				currentAttachments?.delete(transportId);
+				this.attachmentEmitter.fire(sessionId);
 			}
 			if (currentAttachments?.size === 0) {
 				this.attachmentsBySessionId.delete(sessionId);
@@ -167,15 +177,38 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		});
 	}
 
+	detachTransport(transportId: string): void {
+		for (const [sessionId, attachments] of this.attachmentsBySessionId) {
+			if (!attachments.delete(transportId)) {
+				continue;
+			}
+			if (attachments.size === 0) {
+				this.attachmentsBySessionId.delete(sessionId);
+			}
+			this.attachmentEmitter.fire(sessionId);
+		}
+	}
+
 	isTransportAttached(sessionId: string, transportId?: string): boolean {
 		const attachments = this.attachmentsBySessionId.get(sessionId);
 		return transportId ? attachments?.has(transportId) === true : !!attachments?.size;
 	}
 
-	getAttachedTransportLabels(sessionId: string): readonly string[] {
+	getAttachments(sessionId: string): readonly IRemoteAttachmentInfo[] {
 		return [...(this.attachmentsBySessionId.get(sessionId)?.keys() ?? [])]
-			.map(id => this.transports.get(id)?.label)
-			.filter((label): label is string => !!label);
+			.map(transportId => this.transports.get(transportId))
+			.filter((transport): transport is IRemoteControlTransport => !!transport)
+			.map(transport => ({ transportId: transport.id, label: transport.label, themeIcon: transport.themeIcon }));
+	}
+
+	getAttachedSessionIds(transportId: string): readonly string[] {
+		return [...this.attachmentsBySessionId.entries()]
+			.filter(([, attachments]) => attachments.has(transportId))
+			.map(([sessionId]) => sessionId);
+	}
+
+	getAttachedTransportLabels(sessionId: string): readonly string[] {
+		return this.getAttachments(sessionId).map(attachment => attachment.label);
 	}
 
 	registerCommandHandler(command: string, handler: RemoteCommandHandler): IDisposable {

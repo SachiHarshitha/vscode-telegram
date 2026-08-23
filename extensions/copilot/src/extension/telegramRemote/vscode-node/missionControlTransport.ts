@@ -105,6 +105,7 @@ const skippedEventTypes = new Set([
 export class MissionControlTransport extends Disposable implements IRemoteControlTransport {
 	readonly id = 'missionControl';
 	readonly label = l10n.t('GitHub Mission Control');
+	readonly themeIcon = 'github';
 
 	private readonly states = new Map<string, IMissionControlState>();
 	private readonly apiClient: MissionControlApiClient;

@@ -10,12 +10,13 @@ import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import type { Event } from '../../../util/vs/base/common/event';
 import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport } from '../common/remoteControlTypes';
 import type { TelegramPollingStatus, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
-import { TelegramService } from './telegramService';
+import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHandler } from './telegramService';
 
-/** Phase 2 transport shell. Session attachment and authorization are added in later phases. */
+/** Telegram Bot API transport; the contribution owns Phase 3 authorization and lifecycle policy. */
 export class TelegramTransport extends Disposable implements IRemoteControlTransport {
 	readonly id = 'telegram';
 	readonly label = l10n.t('Telegram');
+	readonly themeIcon = 'radio-tower';
 
 	private readonly service: TelegramService;
 	readonly onDidChangeStatus: Event<TelegramPollingStatus>;
@@ -36,8 +37,16 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		return this.service.currentStatus;
 	}
 
-	start(botToken: string, handleUpdate: (update: TelegramUpdate) => Promise<void>): Promise<TelegramUser> {
-		return this.service.start(botToken, handleUpdate);
+	start(botToken: string, handleUpdate: (update: TelegramUpdate) => Promise<void>, handleValidated?: TelegramValidatedHandler, options?: TelegramPollingOptions): Promise<TelegramUser> {
+		return this.service.start(botToken, handleUpdate, handleValidated, options);
+	}
+
+	sendMessage(chatId: number, text: string): Promise<void> {
+		return this.service.sendMessage(chatId, text);
+	}
+
+	answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+		return this.service.answerCallbackQuery(callbackQueryId, text);
 	}
 
 	stop(): Promise<void> {

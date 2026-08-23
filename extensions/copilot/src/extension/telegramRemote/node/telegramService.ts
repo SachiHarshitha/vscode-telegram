@@ -21,7 +21,9 @@ import {
 import { TelegramBotClient } from './telegramBotClient';
 import { acquireTelegramPollerLease, getTelegramBotTokenFingerprint, ITelegramPollerLease, TelegramPollerLeaseHeldError } from './telegramPollerLease';
 
-const longPollTimeoutSeconds = 25;
+const defaultLongPollTimeoutSeconds = 25;
+const minimumLongPollTimeoutSeconds = 1;
+const maximumLongPollTimeoutSeconds = 50;
 const maximumBackoffMs = 30_000;
 const initialBackoffMs = 1_000;
 const maximumRecentUpdateIds = 1_000;
@@ -41,6 +43,7 @@ interface TelegramPollingRun {
 	readonly bot: TelegramUser;
 	readonly recentUpdateIds: Set<number>;
 	readonly recentUpdateIdOrder: number[];
+	readonly longPollTimeoutSeconds: number;
 	requestedStop: boolean;
 	nextOffset: number | undefined;
 	promise: Promise<void>;
@@ -53,6 +56,11 @@ export interface ITelegramPollingRuntime {
 }
 
 export type TelegramUpdateHandler = (update: TelegramUpdate) => Promise<void>;
+export type TelegramValidatedHandler = (bot: TelegramUser) => Promise<void>;
+
+export interface TelegramPollingOptions {
+	readonly timeoutSeconds?: number;
+}
 
 /** Owns one abortable, durable Telegram getUpdates loop. */
 export class TelegramService extends Disposable {
@@ -79,7 +87,7 @@ export class TelegramService extends Disposable {
 		return this.status;
 	}
 
-	async start(botToken: string, handleUpdate: TelegramUpdateHandler): Promise<TelegramUser> {
+	async start(botToken: string, handleUpdate: TelegramUpdateHandler, handleValidated?: TelegramValidatedHandler, options?: TelegramPollingOptions): Promise<TelegramUser> {
 		await this.stop();
 		const generation = ++this.generation;
 		const controller = this.fetcherService.makeAbortController();
@@ -99,6 +107,11 @@ export class TelegramService extends Disposable {
 				await lease.release();
 				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
 			}
+			await handleValidated?.(bot);
+			if (generation !== this.generation) {
+				await lease.release();
+				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
+			}
 
 			const run: TelegramPollingRun = {
 				generation,
@@ -108,6 +121,7 @@ export class TelegramService extends Disposable {
 				bot,
 				recentUpdateIds: new Set(),
 				recentUpdateIdOrder: [],
+				longPollTimeoutSeconds: normalizeLongPollTimeout(options?.timeoutSeconds),
 				requestedStop: false,
 				nextOffset: await this.loadOffset(lease.tokenFingerprint),
 				promise: Promise.resolve(),
@@ -125,6 +139,22 @@ export class TelegramService extends Disposable {
 			}
 			throw error;
 		}
+	}
+
+	async sendMessage(chatId: number, text: string): Promise<void> {
+		const client = this.activeRun?.client;
+		if (!client) {
+			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
+		}
+		await client.sendMessage(chatId, text);
+	}
+
+	async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+		const client = this.activeRun?.client;
+		if (!client) {
+			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
+		}
+		await client.answerCallbackQuery(callbackQueryId, { text });
 	}
 
 	async stop(): Promise<void> {
@@ -149,7 +179,7 @@ export class TelegramService extends Disposable {
 				const updates = await run.client.getUpdates({
 					offset: run.nextOffset,
 					limit: 100,
-					timeoutSeconds: longPollTimeoutSeconds,
+					timeoutSeconds: run.longPollTimeoutSeconds,
 					allowedUpdates: ['message', 'callback_query'],
 					signal: run.controller.signal,
 				});
@@ -290,6 +320,13 @@ function rememberUpdateId(run: TelegramPollingRun, updateId: number): void {
 	while (run.recentUpdateIdOrder.length > maximumRecentUpdateIds) {
 		run.recentUpdateIds.delete(run.recentUpdateIdOrder.shift()!);
 	}
+}
+
+function normalizeLongPollTimeout(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value)) {
+		return defaultLongPollTimeoutSeconds;
+	}
+	return Math.min(maximumLongPollTimeoutSeconds, Math.max(minimumLongPollTimeoutSeconds, Math.trunc(value)));
 }
 
 function getRetryDelay(error: unknown, failureCount: number): number {

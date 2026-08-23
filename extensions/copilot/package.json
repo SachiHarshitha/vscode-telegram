@@ -2441,6 +2441,50 @@
         "title": "%github.copilot.command.triggerPermissiveSignIn%"
       },
       {
+        "command": "github.copilot.cli.telegram.setup",
+        "title": "%github.copilot.command.cli.telegram.setup%",
+        "category": "%github.copilot.command.cli.telegram.category%"
+      },
+      {
+        "command": "github.copilot.cli.telegram.testConnection",
+        "title": "%github.copilot.command.cli.telegram.testConnection%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled"
+      },
+      {
+        "command": "github.copilot.cli.telegram.startPairing",
+        "title": "%github.copilot.command.cli.telegram.startPairing%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled"
+      },
+      {
+        "command": "github.copilot.cli.telegram.revokePairing",
+        "title": "%github.copilot.command.cli.telegram.revokePairing%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled"
+      },
+      {
+        "command": "github.copilot.cli.telegram.disable",
+        "title": "%github.copilot.command.cli.telegram.disable%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled"
+      },
+      {
+        "command": "github.copilot.cli.telegram.showStatus",
+        "title": "%github.copilot.command.cli.telegram.showStatus%",
+        "category": "%github.copilot.command.cli.telegram.category%"
+      },
+      {
+        "command": "github.copilot.cli.telegram.showLog",
+        "title": "%github.copilot.command.cli.telegram.showLog%",
+        "category": "%github.copilot.command.cli.telegram.category%"
+      },
+      {
+        "command": "github.copilot.cli.telegram.statusBarMenu",
+        "title": "%github.copilot.command.cli.telegram.statusBarMenu%",
+        "category": "%github.copilot.command.cli.telegram.category%"
+      },
+      {
         "command": "github.copilot.cli.sessions.delete",
         "title": "%github.copilot.command.deleteAgentSession%",
         "icon": "$(close)",
@@ -5198,6 +5242,63 @@
             "agentsWindow": {
               "default": false
             }
+          },
+          "github.copilot.chat.cli.telegram.enabled": {
+            "type": "boolean",
+            "default": false,
+            "scope": "window",
+            "markdownDescription": "%github.copilot.config.cli.telegram.enabled%",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "github.copilot.chat.cli.telegram.activityDetail": {
+            "type": "string",
+            "default": "compact",
+            "scope": "window",
+            "enum": [
+              "compact",
+              "detailed",
+              "debug"
+            ],
+            "enumDescriptions": [
+              "%github.copilot.config.cli.telegram.activityDetail.compact%",
+              "%github.copilot.config.cli.telegram.activityDetail.detailed%",
+              "%github.copilot.config.cli.telegram.activityDetail.debug%"
+            ],
+            "markdownDescription": "%github.copilot.config.cli.telegram.activityDetail%",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "github.copilot.chat.cli.telegram.pollTimeout": {
+            "type": "number",
+            "default": 25,
+            "minimum": 1,
+            "maximum": 50,
+            "scope": "window",
+            "markdownDescription": "%github.copilot.config.cli.telegram.pollTimeout%",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "github.copilot.chat.cli.telegram.notifications.enabled": {
+            "type": "boolean",
+            "default": true,
+            "scope": "window",
+            "markdownDescription": "%github.copilot.config.cli.telegram.notifications.enabled%",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "github.copilot.chat.cli.telegram.statusBar.enabled": {
+            "type": "boolean",
+            "default": true,
+            "scope": "window",
+            "markdownDescription": "%github.copilot.config.cli.telegram.statusBar.enabled%",
+            "tags": [
+              "advanced"
+            ]
           },
           "github.copilot.chat.searchSubagent.enabled": {
             "type": "boolean",

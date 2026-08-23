@@ -19,6 +19,7 @@ import {
 	parseTelegramMessageOrTrue,
 	parseTelegramUpdate,
 	parseTelegramUser,
+	validateTelegramBotToken,
 } from '../common/telegramTypes';
 
 const telegramBotApiOrigin = 'https://api.telegram.org';
@@ -35,17 +36,15 @@ interface TelegramApiEnvelope {
 
 /** Strict, dependency-free client for the Bot API subset used by Telegram Remote. */
 export class TelegramBotClient implements ITelegramBotClient {
-	private readonly apiBaseUrl: string;
+	readonly #apiBaseUrl: string;
 
 	constructor(
 		botToken: string,
 		apiOrigin: string | undefined,
 		@IFetcherService private readonly fetcherService: IFetcherService,
 	) {
-		if (!/^\d+:[A-Za-z0-9_-]+$/.test(botToken) || botToken.length > 256) {
-			throw new TelegramBotApiError('authentication', 'The Telegram bot token is invalid.');
-		}
-		this.apiBaseUrl = `${apiOrigin ?? telegramBotApiOrigin}/bot${botToken}`;
+		validateTelegramBotToken(botToken);
+		this.#apiBaseUrl = `${apiOrigin ?? telegramBotApiOrigin}/bot${botToken}`;
 	}
 
 	async getMe(signal?: TelegramGetUpdatesOptions['signal']): Promise<TelegramUser> {
@@ -136,7 +135,7 @@ export class TelegramBotClient implements ITelegramBotClient {
 	): Promise<T> {
 		let response: Response;
 		try {
-			response = await this.fetcherService.fetch(`${this.apiBaseUrl}/${method}`, {
+			response = await this.fetcherService.fetch(`${this.#apiBaseUrl}/${method}`, {
 				method: 'POST',
 				json: withoutUndefinedValues(body),
 				signal,
@@ -201,7 +200,9 @@ function toApiError(httpStatus: number, envelope: TelegramApiEnvelope): Telegram
 		: kind === 'rate-limit' ? 'Telegram rate limited the bot.'
 			: kind === 'server' ? 'Telegram Bot API is temporarily unavailable.'
 				: 'Telegram Bot API rejected the request.';
-	return new TelegramBotApiError(kind, envelope.description || defaultMessage, httpStatus, errorCode, retryAfterSeconds);
+	// Bot API descriptions are remote-controlled text and may echo request data. Keep only the
+	// structured status fields and a local message so credentials cannot reach errors or logs.
+	return new TelegramBotApiError(kind, defaultMessage, httpStatus, errorCode, retryAfterSeconds);
 }
 
 function withoutUndefinedValues(value: Readonly<Record<string, unknown>>): Record<string, unknown> {

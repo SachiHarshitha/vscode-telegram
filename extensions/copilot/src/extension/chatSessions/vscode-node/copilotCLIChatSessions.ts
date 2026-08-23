@@ -39,7 +39,7 @@ import { getWorkingDirectory, IWorkspaceInfo } from '../common/workspaceInfo';
 import { ICustomSessionTitleService } from '../copilotcli/common/customSessionTitleService';
 import { IChatDelegationSummaryService } from '../copilotcli/common/delegationSummaryService';
 import { clearPendingCopilotCLIRequestContext, COPILOT_CLI_PENDING_REQUEST_MARKER_ID, createPendingCopilotCLIRequestCorrelationId, createPendingCopilotCLIRequestMarker, getPendingCopilotCLIRequestCorrelationId, setPendingCopilotCLIRequestContext, takePendingCopilotCLIRequestContext } from '../copilotcli/common/pendingRequestContext';
-import type { RemoteRequestOrigin } from '../../telegramRemote/common/remoteControlTypes';
+import { IRemoteControlRegistry, type IRemoteAttachmentInfo, type RemoteRequestOrigin } from '../../telegramRemote/common/remoteControlTypes';
 import { SessionIdForCLI } from '../copilotcli/common/utils';
 import { getCopilotCLISessionDir } from '../copilotcli/node/cliHelpers';
 import { ICopilotCLIModels, ICopilotCLISDK } from '../copilotcli/node/copilotCli';
@@ -153,6 +153,7 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		@IChatSessionMetadataStore private readonly _metadataStore: IChatSessionMetadataStore,
 		@IWorkspaceService private readonly _workspaceService: IWorkspaceService,
 		@IChatSessionWorktreeService chatSessionWorktreeService: IChatSessionWorktreeService,
+		@IRemoteControlRegistry private readonly _remoteControlRegistry: IRemoteControlRegistry,
 	) {
 		super();
 
@@ -193,6 +194,9 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		}));
 		this._register(chatSessionWorktreeService.onDidChangeWorktreeChanges(e => {
 			this.refreshSession({ reason: 'update', sessionId: e.sessionId });
+		}));
+		this._register(this._remoteControlRegistry.onDidChangeAttachments(sessionId => {
+			void this.refreshSession({ reason: 'update', sessionId }).catch(error => this.logService.error(error, 'Failed to refresh session attachment state'));
 		}));
 		controller.newChatSessionItemHandler = async (context) => {
 			const sessionId = this.sessionService.createNewSessionId();
@@ -415,6 +419,13 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		]);
 		item.badge = badge;
 		item.metadata = metadata;
+		const attachments = this._remoteControlRegistry.getAttachments(session.id);
+		if (attachments.length > 0) {
+			const description = new vscode.MarkdownString(attachments.map(attachment => `$(${attachment.themeIcon}) ${attachment.label}`).join(' '));
+			description.supportThemeIcons = true;
+			item.description = description;
+			item.tooltip = buildRemoteAttachmentTooltip(attachments);
+		}
 		return item;
 	}
 
@@ -657,6 +668,11 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		}
 	}
 
+}
+
+function buildRemoteAttachmentTooltip(attachments: readonly IRemoteAttachmentInfo[]): vscode.MarkdownString {
+	const labels = attachments.map(attachment => attachment.label).join(', ');
+	return new vscode.MarkdownString(l10n.t('Remotely controllable from: {0}. Use the transport controls to disable remote access.', labels));
 }
 
 export class CopilotCLIChatSessionParticipant extends Disposable {

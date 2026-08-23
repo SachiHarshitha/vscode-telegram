@@ -1048,7 +1048,11 @@ describe('CopilotCLISession', () => {
 		session.notifyRemoteAttachment('GitHub Mission Control');
 		session.notifyRemoteAttachment('GitHub Mission Control');
 
-		expect(stream.output.join('\n').match(/GitHub Mission Control/g)).toHaveLength(1);
+		const output = stream.output.join('\n');
+		expect({ output, occurrences: output.match(/GitHub Mission Control/g)?.length }).toEqual({
+			output: 'This session is now remotely controllable from GitHub Mission Control. Permission prompts may be answered remotely.',
+			occurrences: 1,
+		});
 	});
 
 	it('routes /remote through the generic registry command handler', async () => {

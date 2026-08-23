@@ -119,6 +119,18 @@ describe('TelegramService', () => {
 		});
 	});
 
+	it('bounds the configured long-poll timeout before sending it to Telegram', async () => {
+		const client = new TestClient();
+		client.getUpdates.mockImplementation(options => waitForAbort(options?.signal));
+		const service = new TelegramService(storageRoot, new TestRuntime(client), new TestFetcher(), logService);
+
+		await service.start(botToken, async () => { }, undefined, { timeoutSeconds: 99 });
+		await waitUntil(() => client.getUpdates.mock.calls.length === 1);
+		await service.stop();
+
+		expect(client.getUpdates.mock.calls[0][0]?.timeoutSeconds).toBe(50);
+	});
+
 	it('uses retry_after and bounded exponential backoff without spawning another poller', async () => {
 		const client = new TestClient();
 		client.getUpdates
@@ -214,6 +226,35 @@ describe('TelegramService', () => {
 		await waitUntil(() => activeRuntime.lease.release.mock.calls.length === 1);
 
 		expect(activeRuntime.lease.release).toHaveBeenCalledOnce();
+	});
+
+	it('runs secure-state validation before polling and exposes only active-client response methods', async () => {
+		const client = new TestClient();
+		client.getUpdates.mockImplementation(options => waitForAbort(options?.signal));
+		const sentMessage: TelegramMessage = { message_id: 1, date: 1, chat: { id: 202, type: 'private' }, text: 'paired' };
+		const sendMessage = vi.spyOn(client, 'sendMessage').mockResolvedValue(sentMessage);
+		const answerCallbackQuery = vi.spyOn(client, 'answerCallbackQuery').mockResolvedValue(true);
+		const runtime = new TestRuntime(client);
+		const service = new TelegramService(storageRoot, runtime, new TestFetcher(), logService);
+		const validated = vi.fn(async () => {
+			expect(client.getUpdates).not.toHaveBeenCalled();
+		});
+
+		await service.start(botToken, async () => { }, validated);
+		await service.sendMessage(202, 'paired');
+		await service.answerCallbackQuery('callback-1', 'Done');
+		expect(validated).toHaveBeenCalledWith(bot);
+		expect(sendMessage).toHaveBeenCalledWith(202, 'paired');
+		expect(answerCallbackQuery).toHaveBeenCalledWith('callback-1', { text: 'Done' });
+		await service.stop();
+		await expect(service.sendMessage(202, 'stopped')).rejects.toMatchObject({ kind: 'api' });
+
+		const failingClient = new TestClient();
+		const failingRuntime = new TestRuntime(failingClient);
+		const failingService = new TelegramService(storageRoot, failingRuntime, new TestFetcher(), logService);
+		await expect(failingService.start(botToken, async () => { }, async () => { throw new Error('secure storage unavailable'); })).rejects.toThrow('secure storage unavailable');
+		expect(failingClient.getUpdates).not.toHaveBeenCalled();
+		expect(failingRuntime.lease.release).toHaveBeenCalledOnce();
 	});
 });
 

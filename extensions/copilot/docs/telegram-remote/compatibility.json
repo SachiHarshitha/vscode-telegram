@@ -81,13 +81,16 @@
     "chatSessionCustomizationProvider"
   ],
   "telegramRemote": {
-    "implementationPhase": 2,
-    "patchRevision": 3,
+    "implementationPhase": 3,
+    "patchRevision": 4,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
     "networkContributionRegistered": true,
     "networkActiveByDefault": false,
+    "secureStateRegistered": true,
+    "authorizationRegistered": true,
+    "callbackRegistryRegistered": true,
     "uiContributionRegistered": false
   },
   "baselineValidation": {
@@ -267,10 +270,62 @@
       "environmentNote": "The isolated runtime used --disable-workspace-trust and trace logging. No bot token was injected, so the Phase 2 contribution remained dormant by design."
     },
     "realBotSmoke": {
-      "status": "not-run",
-      "reason": "TELEGRAM_BOT_TOKEN was not provided to this session.",
+      "status": "passed-user-reported",
+      "reportedAt": "2026-08-23",
       "command": ".\\script\\telegram-remote\\test-phase2.ps1 -RealBot",
       "environmentTemplate": ".env.sample"
+    }
+  },
+  "phase3Validation": {
+    "capturedAt": "2026-08-23",
+    "sourceCommit": "e9561f6de21732c48e28377e03e8dea9c7a92f16",
+    "officialApiContract": "https://core.telegram.org/bots/api",
+    "phase3Runner": {
+      "command": ".\\script\\telegram-remote\\test-phase3.ps1",
+      "status": "passed",
+      "testFilesPassed": 8,
+      "testsPassed": 44
+    },
+    "telegramRemoteAggregate": {
+      "command": "npx vitest --run --pool=forks src/extension/telegramRemote",
+      "status": "passed",
+      "testFilesPassed": 13,
+      "testsPassed": 64
+    },
+    "coverage": [
+      "SecretStorage-only raw bot token and token-bound non-secret pairing metadata",
+      "private-chat numeric identity authorization with username changes and token rotation",
+      "single-use expiring cryptographic pairing challenge and per-identity attempt throttling",
+      "opaque identity/session/request/tool/action-bound callback nonces with expiry and replay protection",
+      "authorization-before-dispatch and fail-closed persistence handling",
+      "synchronous callback invalidation on disable, revoke, restart and disposal",
+      "redacted Bot API and secure-storage errors"
+    ],
+    "extensionTypecheck": {
+      "command": "npm run typecheck",
+      "status": "passed"
+    },
+    "extensionLint": {
+      "command": "targeted eslint for changed TypeScript files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "sourceBuild": {
+      "command": "npm run compile (root, including extensions/copilot)",
+      "node": "v24.18.0",
+      "status": "passed",
+      "errors": 0
+    },
+    "runtimeSmoke": {
+      "node": "v24.18.0",
+      "status": "passed",
+      "workspaceTrusted": true,
+      "extensionActivated": true,
+      "controllerMarkerObserved": "[TelegramRemote] vscode-telegram/telegram-remote; patch=4; host=controller; phase=3; remote-control-registry=ready; telegram-transport=ready; telegram-security=ready; telegram-network=disabled-awaiting-consent",
+      "networkContributionRegistered": true,
+      "networkActive": false,
+      "telegramNetworkLogMatches": 0,
+      "environmentNote": "The isolated source launch used --disable-workspace-trust and trace logging. The seeded profile had no GitHub session, which did not affect contribution composition or the dormant-network assertion."
     }
   }
 }

@@ -214,7 +214,7 @@ V1 relies on stable Bot API primitives:
 - bot identity validation (`getMe`),
 - optional file APIs later.
 
-Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. The registered contribution remains network-dormant until Phase 3 provides consented secret storage and pairing.
+Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. Phase 3 adds SecretStorage, private-chat pairing and authorization, but the registered contribution remains network-dormant until Phase 3b records explicit consent and invokes its lifecycle entry points.
 
 Reference: https://core.telegram.org/bots/api
 

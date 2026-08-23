@@ -47,6 +47,8 @@ import { MissionControlTransport } from '../../telegramRemote/vscode-node/missio
 import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../telegramRemote/vscode-node/remotePromptDispatcher';
 import { IRemoteControlRegistry } from '../../telegramRemote/common/remoteControlTypes';
 import { TelegramRemoteContribution } from '../../telegramRemote/vscode-node/telegramRemoteContribution';
+import { TelegramSetupWizard } from '../../telegramRemote/vscode-node/telegramSetupWizard';
+import { TelegramStatusBar } from '../../telegramRemote/vscode-node/telegramStatusBar';
 import { CopilotCLIFolderMruService } from '../copilotcli/vscode-node/copilotCLIFolderMru';
 import { ICopilotCLISessionTracker } from '../copilotcli/vscode-node/copilotCLISessionTracker';
 import { CustomSessionTitleService } from '../copilotcli/vscode-node/customSessionTitleServiceImpl';
@@ -218,8 +220,10 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			return;
 		}
 
-		this._register(instantiationService.createInstance(TelegramRemoteContribution));
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=2; remote-control-registry=ready; telegram-transport=ready; telegram-network=disabled-awaiting-secure-token`);
+		const telegramContribution = this._register(instantiationService.createInstance(TelegramRemoteContribution));
+		this._register(instantiationService.createInstance(TelegramSetupWizard, telegramContribution));
+		this._register(instantiationService.createInstance(TelegramStatusBar, telegramContribution));
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=3b; remote-control-registry=ready; telegram-transport=ready; telegram-security=ready; telegram-consent=ready; telegram-ui=ready; telegram-network=consent-gated`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

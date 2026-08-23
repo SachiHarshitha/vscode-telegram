@@ -33,6 +33,7 @@ class TestSession implements IRemoteControlSession {
 
 class TestTransport extends Disposable implements IRemoteControlTransport {
 	readonly label: string;
+	readonly themeIcon = 'radio-tower';
 	readonly events: IRemoteControlSessionEvent[] = [];
 
 	constructor(readonly id: string) {
@@ -108,6 +109,27 @@ describe('RemoteControlRegistry', () => {
 		expect(first.events.map(item => item.id)).toEqual(['one', 'two']);
 		expect(second.events.map(item => item.id)).toEqual(['one', 'two']);
 		store.dispose();
+	});
+
+	it('publishes logical attachment changes and detaches a transport synchronously', () => {
+		const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
+		const transport = new TestTransport('telegram');
+		registry.registerTransport(transport);
+		const changes: string[] = [];
+		registry.onDidChangeAttachments(sessionId => changes.push(sessionId));
+		const attachment = registry.attachTransport('session-1', transport.id);
+
+		expect(registry.getAttachments('session-1')).toEqual([
+			{ transportId: 'telegram', label: 'telegram', themeIcon: 'radio-tower' },
+		]);
+		expect(registry.getAttachedSessionIds('telegram')).toEqual(['session-1']);
+
+		registry.detachTransport('telegram');
+		expect({ attachments: registry.getAttachments('session-1'), changes }).toEqual({
+			attachments: [],
+			changes: ['session-1', 'session-1'],
+		});
+		attachment.dispose();
 	});
 
 	it('takes the first valid permission response and cancels losing transports', async () => {

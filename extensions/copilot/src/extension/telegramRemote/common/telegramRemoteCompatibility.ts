@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 export const TELEGRAM_REMOTE_BUILD_MARKER = 'vscode-telegram/telegram-remote';
-export const TELEGRAM_REMOTE_PATCH_REVISION = 3;
+export const TELEGRAM_REMOTE_PATCH_REVISION = 5;
 
 export interface TelegramRemoteHostEnvironment {
 	readonly sessionController: boolean;
@@ -29,8 +29,7 @@ export type TelegramRemoteHostCompatibility = TelegramRemoteSupportedHost | Tele
 /**
  * Resolves whether this extension host is allowed to register Telegram Remote contributions.
  * Product V1 is deliberately restricted to the controller-based Copilot CLI implementation in
- * an ordinary workspace. The Phase 2 transport contribution is dormant until Phase 3 supplies
- * consented secret storage and an authorized update handler.
+ * an ordinary workspace. The Phase 3b setup surface gates transport startup on versioned consent.
  */
 export function resolveTelegramRemoteHostCompatibility(environment: TelegramRemoteHostEnvironment): TelegramRemoteHostCompatibility {
 	if (!environment.sessionController) {

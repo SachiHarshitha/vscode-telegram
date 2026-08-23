@@ -94,10 +94,18 @@ export interface IRemoteCommandContext {
 
 export type RemoteCommandHandler = (context: IRemoteCommandContext) => Promise<void>;
 
+/** Transport-neutral metadata rendered by native remote-control indicators. */
+export interface IRemoteAttachmentInfo {
+	readonly transportId: string;
+	readonly label: string;
+	readonly themeIcon: string;
+}
+
 /** Adapter implemented by Mission Control now and Telegram in later phases. */
 export interface IRemoteControlTransport extends IDisposable {
 	readonly id: string;
 	readonly label: string;
+	readonly themeIcon: string;
 	publish(sessionId: string, event: IRemoteControlSessionEvent): void | Promise<void>;
 	requestPermission?(sessionId: string, request: IRemotePermissionRequest, token: CancellationToken): Promise<RemotePermissionResult | undefined>;
 	requestUserInput?(sessionId: string, request: IRemoteUserInputRequest, token: CancellationToken): Promise<IRemoteUserInputResponse | undefined>;
@@ -105,13 +113,17 @@ export interface IRemoteControlTransport extends IDisposable {
 
 export interface IRemoteControlRegistry {
 	readonly _serviceBrand: undefined;
+	readonly onDidChangeAttachments: Event<string>;
 
 	bindSession(session: IRemoteControlSession): IDisposable;
 	getSession(sessionId: string): IRemoteControlSession | undefined;
 
 	registerTransport(transport: IRemoteControlTransport): IDisposable;
 	attachTransport(sessionId: string, transportId: string): IDisposable;
+	detachTransport(transportId: string): void;
 	isTransportAttached(sessionId: string, transportId?: string): boolean;
+	getAttachments(sessionId: string): readonly IRemoteAttachmentInfo[];
+	getAttachedSessionIds(transportId: string): readonly string[];
 	getAttachedTransportLabels(sessionId: string): readonly string[];
 
 	registerCommandHandler(command: string, handler: RemoteCommandHandler): IDisposable;

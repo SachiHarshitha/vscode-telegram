@@ -11,6 +11,7 @@ export interface TelegramUser {
 	readonly id: number;
 	readonly is_bot: boolean;
 	readonly first_name: string;
+	readonly last_name?: string;
 	readonly username?: string;
 	readonly language_code?: string;
 }
@@ -117,6 +118,7 @@ export function parseTelegramUser(value: unknown, requireBot = false): TelegramU
 		id: asSafeInteger(record.id, 'Telegram user id'),
 		is_bot: asBoolean(record.is_bot, 'Telegram user is_bot'),
 		first_name: asString(record.first_name, 'Telegram user first_name'),
+		last_name: asOptionalString(record.last_name, 'Telegram user last_name'),
 		username: asOptionalString(record.username, 'Telegram user username'),
 		language_code: asOptionalString(record.language_code, 'Telegram user language_code'),
 	};
@@ -124,6 +126,13 @@ export function parseTelegramUser(value: unknown, requireBot = false): TelegramU
 		throw new TelegramBotApiError('invalid-response', 'Telegram getMe returned a non-bot user.');
 	}
 	return user;
+}
+
+/** Rejects malformed bot tokens without ever including the token in an error. */
+export function validateTelegramBotToken(botToken: string): void {
+	if (!/^\d+:[A-Za-z0-9_-]+$/.test(botToken) || botToken.length > 256) {
+		throw new TelegramBotApiError('authentication', 'The Telegram bot token is invalid.');
+	}
 }
 
 export function parseTelegramMessage(value: unknown): TelegramMessage {
@@ -139,10 +148,15 @@ export function parseTelegramMessage(value: unknown): TelegramMessage {
 
 export function parseTelegramUpdate(value: unknown): TelegramUpdate {
 	const record = asRecord(value, 'Telegram update');
+	const message = record.message === undefined ? undefined : parseTelegramMessage(record.message);
+	const callbackQuery = record.callback_query === undefined ? undefined : parseTelegramCallbackQuery(record.callback_query);
+	if (message && callbackQuery) {
+		throw new TelegramBotApiError('invalid-response', 'Telegram update contains multiple payload types.');
+	}
 	return {
 		update_id: asSafeInteger(record.update_id, 'Telegram update id'),
-		message: record.message === undefined ? undefined : parseTelegramMessage(record.message),
-		callback_query: record.callback_query === undefined ? undefined : parseTelegramCallbackQuery(record.callback_query),
+		message,
+		callback_query: callbackQuery,
 	};
 }
 

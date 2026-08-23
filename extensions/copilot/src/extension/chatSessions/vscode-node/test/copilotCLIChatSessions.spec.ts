@@ -39,6 +39,7 @@ import { CopilotCLIChatSessionContentProvider, CopilotCLIChatSessionParticipant,
 import { PullRequestDetectionService } from '../pullRequestDetectionService';
 import { ISessionOptionGroupBuilder } from '../sessionOptionGroupBuilder';
 import { ISessionRequestLifecycle } from '../sessionRequestLifecycle';
+import { RemoteControlRegistry } from '../../../telegramRemote/node/remoteControlRegistry';
 vi.mock('../copilotCLIShim.ps1', () => ({ default: '# mock powershell script' }));
 
 beforeAll(() => {
@@ -204,6 +205,7 @@ function createProvider() {
 		override getBranchOptionItemsForRepository = vi.fn(async () => []);
 		override getRepositoryOptionItems = vi.fn(() => []);
 	}();
+	const remoteControlRegistry = new RemoteControlRegistry(logService);
 	const provider = new CopilotCLIChatSessionContentProvider(
 		sessionService,
 		worktreeService,
@@ -219,6 +221,7 @@ function createProvider() {
 		metadataStore,
 		new NullWorkspaceService(),
 		worktreeService,
+		remoteControlRegistry,
 	);
 
 	return {
@@ -228,6 +231,7 @@ function createProvider() {
 		worktreeService,
 		gitService,
 		octoKitService,
+		remoteControlRegistry,
 	};
 }
 
@@ -513,6 +517,34 @@ describe('CopilotCLIChatSessionContentProvider (additional)', () => {
 
 		const item = await provider.toChatSessionItem(sessionItem);
 		expect(item.label).toBe('Test Session');
+	});
+
+	it('renders transport-neutral remote attachment metadata', async () => {
+		const { provider, remoteControlRegistry } = createProvider();
+		remoteControlRegistry.registerTransport({
+			id: 'test-remote',
+			label: 'Test Remote',
+			themeIcon: 'radio-tower',
+			publish: () => { },
+			dispose: () => { },
+		});
+		remoteControlRegistry.attachTransport('session-1', 'test-remote');
+		const sessionItem = {
+			id: 'session-1',
+			label: 'Test Session',
+			status: undefined,
+			workingDirectory: undefined,
+		} as unknown as ICopilotCLISessionItem;
+
+		const item = await provider.toChatSessionItem(sessionItem);
+
+		expect({
+			description: (item.description as vscode.MarkdownString).value,
+			tooltip: (item.tooltip as vscode.MarkdownString).value,
+		}).toEqual({
+			description: '$(radio-tower) Test Remote',
+			tooltip: 'Remotely controllable from: Test Remote. Use the transport controls to disable remote access.',
+		});
 	});
 
 	it('only includes cached changes when explicitly requested', async () => {

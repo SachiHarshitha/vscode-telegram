@@ -65,6 +65,11 @@ describe('TelegramBotClient', () => {
 		expect(requests).toEqual([]);
 	});
 
+	it('does not expose the token when the client is serialized for diagnostics', () => {
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+		expect(JSON.stringify(client)).not.toContain(botToken);
+	});
+
 	it('validates getMe and handles an empty short poll', async () => {
 		responses.push(
 			ok({ id: 42, is_bot: true, first_name: 'Remote Bot', username: 'remote_bot' }),
@@ -156,7 +161,7 @@ describe('TelegramBotClient', () => {
 	] as const)('maps HTTP $status without exposing the token', async ({ status, errorCode, expectedKind }) => {
 		responses.push({
 			status,
-			body: JSON.stringify({ ok: false, error_code: errorCode, description: 'Request rejected.', parameters: { retry_after: 3 } }),
+			body: JSON.stringify({ ok: false, error_code: errorCode, description: `Request rejected for ${botToken}.`, parameters: { retry_after: 3 } }),
 		});
 		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
 
@@ -176,10 +181,12 @@ describe('TelegramBotClient', () => {
 		responses.push(
 			{ status: 200, body: '{not-json' },
 			ok([{ update_id: 'wrong' }]),
+			ok([{ update_id: 13, message: telegramMessage('message'), callback_query: { id: 'callback-13', from: { id: 100, is_bot: false, first_name: 'Tester' }, message: telegramMessage('callback'), data: 'opaque' } }]),
 		);
 		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
 
 		await expect(client.getMe()).rejects.toMatchObject({ kind: 'invalid-response' });
+		await expect(client.getUpdates({ timeoutSeconds: 0 })).rejects.toMatchObject({ kind: 'invalid-response' });
 		await expect(client.getUpdates({ timeoutSeconds: 0 })).rejects.toMatchObject({ kind: 'invalid-response' });
 	});
 

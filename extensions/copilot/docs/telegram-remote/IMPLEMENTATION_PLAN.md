@@ -11,7 +11,7 @@ This plan was revalidated against the repository at:
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Phases 0, 1 and 2 implemented and validated; the Telegram transport is registered but remains dormant until Phase 3 supplies consented secret storage and pairing |
+| Implementation status | Phases 0, 1, 2 and 3 implemented and validated; secure state, pairing and callback authorization are ready, while networking remains dormant until the Phase 3b consent/setup surface invokes them |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -41,7 +41,8 @@ baseline/controller lock
   -> session bridge + remote-control registry
   -> Mission Control migration
   -> Telegram polling
-  -> pairing + consent/local kill switch
+  -> pairing + authorization + secret state
+  -> consent/native visibility/local kill switch
   -> select/prompt/steer/abort end to end
   -> event projection
   -> permissions/questions/plan approval
@@ -214,7 +215,7 @@ The Mission Control adapter is in `vscode-node`, not `node`, because it invokes 
 
 ## 5. Phase 2 — Telegram Bot API transport
 
-**Status:** Implemented and validated on 2026-08-23. The controller host registers a dormant Telegram transport. It performs no production network activity until the Phase 3 consent, secret-storage and authorization flow explicitly starts it.
+**Status:** Implemented and validated on 2026-08-23. The controller host registers a dormant Telegram transport. It performs no production network activity until the Phase 3b consent/setup flow explicitly invokes the Phase 3 lifecycle entry points.
 
 ### Implementation record
 
@@ -223,7 +224,7 @@ The Mission Control adapter is in `vscode-node`, not `node`, because it invokes 
 - `TelegramService` owns one abortable long poll, ordered update handling, in-process deduplication, durable per-token offsets, `retry_after` handling and bounded exponential backoff.
 - `telegramPollerLease.ts` uses an atomic `wx` lease file keyed by a truncated SHA-256 token fingerprint. The file contains only the fingerprint, PID, random nonce and timestamps; stale recovery requires both expiry and a dead owner process.
 - Offset advancement occurs only after the update handler succeeds and the new offset has been persisted. A failed handler is retried without confirming the update.
-- `TelegramRemoteContribution` registers the transport only in the supported controller host. The contribution is intentionally dormant, because Phase 2 has no secure token or paired identity yet.
+- `TelegramRemoteContribution` registers the transport only in the supported controller host. Registration remains network-dormant; Phase 3 added explicit lifecycle entry points, and Phase 3b will be their first production caller after consent.
 - All new Telegram TypeScript files live under `src/extension/telegramRemote` with downstream copyright ownership.
 
 ### Validation record
@@ -288,12 +289,50 @@ The `.env` file is ignored by Git. The script accepts only the three variables i
 
 ## 6. Phase 3 — pairing, authorization and secret state
 
+**Status:** Implemented and validated on 2026-08-23. The controller contribution now owns secure bot-token state, private-chat pairing, numeric identity authorization and opaque callback correlation. It still cannot auto-start: Phase 3b must collect the versioned consent and explicitly call the lifecycle entry points.
+
+### Implementation record
+
+- `TelegramAuthorization` stores the validated bot token only in VS Code `SecretStorage`. Device-local `globalState` contains only a versioned token fingerprint, random pairing ID, numeric user/chat IDs, bounded display metadata and the pairing timestamp.
+- Pairing uses a 128-bit cryptographically random base64url challenge. It is token-bound, single-use, expires after five minutes by default and rate-limits failed attempts per numeric user/chat identity in a bounded window.
+- The pre-authorization router recognizes only `/pair` messages. Eligibility requires a non-bot sender and a positive numeric user ID in a private chat with a positive numeric chat ID; groups, channels, bots and incomplete updates fail closed.
+- Every non-pairing update passes through token-fingerprint and numeric user/chat authorization before the contribution can call an authorized-update handler. Session discovery is not reachable from this phase and will be added behind that handler in Phase 4.
+- `TelegramCallbackRegistry` emits only a short opaque random nonce in `callback_data`. Server-side state binds pairing ID, user ID, chat ID, session ID, request ID, optional tool-call ID, typed action and expiry. Consumption is one-shot; mismatch does not consume the legitimate callback.
+- Disable blocks incoming dispatch synchronously before aborting the poll. Disable, revoke, token rotation, failed/restarted connection and disposal invalidate pairing challenges and pending callbacks; revoke additionally removes the paired identity, while forget removes both pairing and secret token.
+- Bot API response descriptions are not propagated into local errors, preventing remote response text from echoing credentials into logs. Token-bearing storage failures are converted to generic security-state errors.
+- Production activation remains intentionally absent from Phase 3. The public `startPairing()` and `resumeStoredConnection()` methods are explicit integration points for the consent-gated Phase 3b setup contribution.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 3 PowerShell runner | Passed: 8 files, 44 tests via `script/telegram-remote/test-phase3.ps1`; includes Phase 2 transport regressions and the compatibility marker |
+| Telegram Remote aggregate | Passed: 13 files and 64 tests |
+| Pairing and authorization | Passed: valid, expired, replayed, token-mismatched, throttled, wrong-user, wrong-chat, group, bot, missing-identity, username-change, token-rotation, revoke and malformed-persistence cases |
+| Callback security | Passed: opaque Bot API-sized data, expiry, replay, unknown nonce, identity/session/request/tool/action binding, request/session/global invalidation and bounded eviction |
+| Secret/redaction boundary | Passed: SecretStorage-only raw token, no raw token in global-state serialization or local errors, generic logs, token-fingerprinted lease/state filenames |
+| Contribution lifecycle | Passed: dormant registration, validate-before-store/start, authorization-before-dispatch, persistence failure, synchronous disable, revoke and callback invalidation |
+| TypeScript / lint / extension bundle | Passed: extension typecheck, targeted ESLint with zero warnings and extension compile |
+| Source-workbench smoke | Passed: patch 4 / Phase 3 security-ready marker observed with trust disabled and trace logging; Telegram networking remained inactive pending Phase 3b consent |
+
 ### Files
 
 ```text
 extensions/copilot/src/extension/telegramRemote/node/telegramPairingService.ts  (new)
 extensions/copilot/src/extension/telegramRemote/node/telegramAuthorization.ts   (new)
 extensions/copilot/src/extension/telegramRemote/node/telegramCallbackRegistry.ts (new)
+extensions/copilot/src/extension/telegramRemote/common/telegramTypes.ts          (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramBotClient.ts        (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts          (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts        (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts (modify)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts        (diagnostic marker)
+extensions/copilot/src/extension/telegramRemote/node/test/telegramAuthorization.spec.ts (new)
+extensions/copilot/src/extension/telegramRemote/node/test/telegramPairingService.spec.ts (new)
+extensions/copilot/src/extension/telegramRemote/node/test/telegramCallbackRegistry.spec.ts (new)
+extensions/copilot/src/extension/telegramRemote/node/test/testTelegramSecurityState.ts (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/test/telegramRemoteContribution.spec.ts (modify)
+extensions/copilot/script/telegram-remote/test-phase3.ps1                         (new)
 ```
 
 ### Implement
@@ -309,9 +348,9 @@ extensions/copilot/src/extension/telegramRemote/node/telegramCallbackRegistry.ts
 
 ### Exit criteria
 
-- Only the paired private chat can list metadata or issue actions.
+- Only the paired private chat can reach the authorized-update/callback boundary; Phase 4 metadata and actions must be routed exclusively behind it.
 - Expired/reused/wrong-user/wrong-chat challenges and callbacks fail closed.
-- Token redaction tests cover errors, logs, snapshots, status UI, and lease files.
+- Token redaction tests cover errors, logs, persisted-state serialization and lease files. Phase 3b must add the equivalent assertion for its new status/setup UI.
 
 ## 7. Phase 3b — consent, native visibility and kill switch
 

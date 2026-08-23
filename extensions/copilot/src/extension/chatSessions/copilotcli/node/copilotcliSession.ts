@@ -105,6 +105,10 @@ class CopilotCLIResponseStreamRouter {
 		return this._routedStream;
 	}
 
+	get hasAttachedStream(): boolean {
+		return this._stream !== undefined;
+	}
+
 	attach(stream: vscode.ChatResponseStream): IDisposable {
 		this._stream = stream;
 		return toDisposable(() => {
@@ -332,11 +336,11 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 	}
 
 	notifyRemoteAttachment(label: string): void {
-		if (this._remoteAttachmentNotifications.has(label)) {
+		if (!this._streamRouter.hasAttachedStream || this._remoteAttachmentNotifications.has(label)) {
 			return;
 		}
 		this._remoteAttachmentNotifications.add(label);
-		this._stream.warning(l10n.t('This session is also attached to {0}. Responses and approval requests may be visible there.', label));
+		this._stream.warning(l10n.t('This session is now remotely controllable from {0}. Permission prompts may be answered remotely.', label));
 	}
 
 	getCurrentMode(): string | undefined {

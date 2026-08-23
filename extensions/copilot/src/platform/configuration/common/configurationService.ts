@@ -645,6 +645,11 @@ export namespace ConfigKey {
 		export const CLISessionController = defineSetting<boolean>('chat.cli.sessionController.enabled', ConfigType.Simple, true);
 		export const CLIThinkingEffortEnabled = defineSetting<boolean>('chat.cli.thinkingEffort.enabled', ConfigType.Simple, true);
 		export const CLIRemoteEnabled = defineSetting<boolean>('chat.cli.remote.enabled', ConfigType.Simple, true);
+		export const CLITelegramEnabled = defineSetting<boolean>('chat.cli.telegram.enabled', ConfigType.Simple, false, vBoolean(), { userScopeOnly: true });
+		export const CLITelegramActivityDetail = defineSetting<'compact' | 'detailed' | 'debug'>('chat.cli.telegram.activityDetail', ConfigType.Simple, 'compact', vEnum('compact', 'detailed', 'debug'), { userScopeOnly: true });
+		export const CLITelegramPollTimeout = defineSetting<number>('chat.cli.telegram.pollTimeout', ConfigType.Simple, 25, vNumber(), { userScopeOnly: true });
+		export const CLITelegramNotificationsEnabled = defineSetting<boolean>('chat.cli.telegram.notifications.enabled', ConfigType.Simple, true, vBoolean(), { userScopeOnly: true });
+		export const CLITelegramStatusBarEnabled = defineSetting<boolean>('chat.cli.telegram.statusBar.enabled', ConfigType.Simple, true, vBoolean(), { userScopeOnly: true });
 		export const CLISessionControllerForSessionsApp = defineSetting<boolean>('chat.cli.sessionControllerForSessionsApp.enabled', ConfigType.Simple, false);
 		export const CLITerminalLinks = defineSetting<boolean>('chat.cli.terminalLinks.enabled', ConfigType.Simple, true);
 		export const CLISessionEventLoggingEnabled = defineSetting<boolean>('chat.cli.sessionEventLogging.enabled', ConfigType.Simple, false);
