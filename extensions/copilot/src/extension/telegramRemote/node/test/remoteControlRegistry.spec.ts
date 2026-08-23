@@ -122,7 +122,7 @@ describe('RemoteControlRegistry', () => {
 		const attachment = registry.attachTransport('session-1', transport.id);
 
 		expect(registry.getAttachments('session-1')).toEqual([
-			{ transportId: 'telegram', label: 'telegram', themeIcon: 'radio-tower' },
+			{ transportId: 'telegram', label: 'telegram', themeIcon: 'radio-tower', remotePermissionResponses: false },
 		]);
 		expect(registry.getAttachedSessionIds('telegram')).toEqual(['session-1']);
 

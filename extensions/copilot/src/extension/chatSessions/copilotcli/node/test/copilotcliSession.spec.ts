@@ -1040,17 +1040,18 @@ describe('CopilotCLISession', () => {
 		expect(abort).toHaveBeenCalledTimes(1);
 	});
 
-	it('notifies a remote attachment once per label', async () => {
+	it('notifies a remote attachment once per label with capability-accurate permission copy', async () => {
 		const session = await createSession();
 		const stream = new MockChatResponseStream();
 		session.attachStream(stream);
 
-		session.notifyRemoteAttachment('GitHub Mission Control');
-		session.notifyRemoteAttachment('GitHub Mission Control');
+		session.notifyRemoteAttachment('GitHub Mission Control', true);
+		session.notifyRemoteAttachment('GitHub Mission Control', true);
+		session.notifyRemoteAttachment('Telegram', false);
 
 		const output = stream.output.join('\n');
 		expect({ output, occurrences: output.match(/GitHub Mission Control/g)?.length }).toEqual({
-			output: 'This session is now remotely controllable from GitHub Mission Control. Permission prompts may be answered remotely.',
+			output: 'This session is now remotely controllable from GitHub Mission Control. Supported permission prompts may be answered remotely.\nThis session is now remotely controllable from Telegram. Permission prompts must be answered locally.',
 			occurrences: 1,
 		});
 	});

@@ -90,7 +90,9 @@ export async function acquireTelegramPollerLease(storageRoot: string, botToken: 
 
 		const existing = await readExistingLease(leasePath);
 		const ageMs = now() - existing.modifiedAt;
-		if (ageMs <= staleAfterMs || (existing.record?.processId !== undefined && isProcessAlive(existing.record.processId))) {
+		const ownerProcessId = existing.record?.processId;
+		const ownerIsAlive = ownerProcessId !== undefined && isProcessAlive(ownerProcessId);
+		if (ownerIsAlive || (ownerProcessId === undefined && ageMs <= staleAfterMs)) {
 			throw new TelegramPollerLeaseHeldError(existing.record?.processId);
 		}
 

@@ -50,12 +50,24 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		return this.service.editMessageText(chatId, messageId, text, options);
 	}
 
+	editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramSendMessageOptions['replyMarkup']): Promise<TelegramMessage | true> {
+		return this.service.editMessageReplyMarkup(chatId, messageId, replyMarkup);
+	}
+
 	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {
 		return this.service.answerCallbackQuery(callbackQueryId, options);
 	}
 
 	stop(): Promise<void> {
 		return this.service.stop();
+	}
+
+	preserveDeliveryClient(): void {
+		this.service.preserveDeliveryClient();
+	}
+
+	clearDeliveryClient(): void {
+		this.service.clearDeliveryClient();
 	}
 
 	setEventPublisher(publisher: Pick<IRemoteControlTransport, 'publish'>): IDisposable {

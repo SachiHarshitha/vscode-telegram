@@ -8,7 +8,7 @@ import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle'
 import { IRemoteControlRegistry } from '../common/remoteControlTypes';
 import { TelegramPairedIdentity } from './telegramAuthorization';
 
-const selectedSessionStateKey = 'vscode-telegram.telegram-remote.selected-sessions.v1';
+const selectedSessionStateKey = 'vscode-telegram.telegram-remote.selected-sessions.v2';
 const maximumStoredSelections = 8;
 const maximumIdentifierLength = 512;
 
@@ -18,11 +18,12 @@ interface StoredTelegramSessionSelection {
 	readonly chatId: number;
 	readonly consentScopeFingerprint: string;
 	readonly sessionId: string;
+	readonly sessionScopeFingerprint: string;
 	readonly selectedAt: number;
 }
 
 interface StoredTelegramSessionSelections {
-	readonly version: 1;
+	readonly version: 2;
 	readonly selections: readonly StoredTelegramSessionSelection[];
 }
 
@@ -52,8 +53,13 @@ export class TelegramSessionState extends Disposable {
 		return selection && this.matchesIdentityAndScope(selection, identity) ? selection.sessionId : undefined;
 	}
 
+	getSelectedSessionScopeFingerprint(identity: TelegramPairedIdentity): string | undefined {
+		const selection = this.selections.get(identity.pairingId);
+		return selection && this.matchesIdentityAndScope(selection, identity) ? selection.sessionScopeFingerprint : undefined;
+	}
+
 	/** Restores only the current paired identity and attaches it after metadata validation succeeds. */
-	async restore(identity: TelegramPairedIdentity, validateSession: (sessionId: string) => Promise<boolean>): Promise<string | undefined> {
+	async restore(identity: TelegramPairedIdentity, validateSession: (sessionId: string, sessionScopeFingerprint: string) => Promise<boolean>): Promise<string | undefined> {
 		const selection = this.selections.get(identity.pairingId);
 		const stalePairingIds = [...this.selections.keys()].filter(pairingId => pairingId !== identity.pairingId);
 		if (!selection || !this.matchesIdentityAndScope(selection, identity)) {
@@ -64,7 +70,7 @@ export class TelegramSessionState extends Disposable {
 			return undefined;
 		}
 
-		if (!await validateSession(selection.sessionId)) {
+		if (!await validateSession(selection.sessionId, selection.sessionScopeFingerprint)) {
 			await this.deselect(identity);
 			return undefined;
 		}
@@ -76,8 +82,8 @@ export class TelegramSessionState extends Disposable {
 		return selection.sessionId;
 	}
 
-	async select(identity: TelegramPairedIdentity, sessionId: string): Promise<void> {
-		validateIdentityAndSession(identity, sessionId);
+	async select(identity: TelegramPairedIdentity, sessionId: string, sessionScopeFingerprint: string): Promise<void> {
+		validateIdentityAndSession(identity, sessionId, sessionScopeFingerprint);
 		const next = new Map(this.selections);
 		next.set(identity.pairingId, {
 			pairingId: identity.pairingId,
@@ -85,6 +91,7 @@ export class TelegramSessionState extends Disposable {
 			chatId: identity.chatId,
 			consentScopeFingerprint: this.consentScopeFingerprint,
 			sessionId,
+			sessionScopeFingerprint,
 			selectedAt: Date.now(),
 		});
 		for (const pairingId of next.keys()) {
@@ -134,12 +141,20 @@ export class TelegramSessionState extends Disposable {
 		return true;
 	}
 
-	/** Detaches runtime controls without forgetting the durable selection. */
-	suspend(): void {
+	/** Hides runtime controls while optionally retaining terminal-event delivery for one local turn. */
+	suspend(preserveEventDelivery = false): void {
+		if (preserveEventDelivery && this.attachments.size > 0) {
+			this.registry.suspendTransport('telegram');
+			return;
+		}
 		for (const attachment of this.attachments.values()) {
 			attachment.dispose();
 		}
 		this.attachments.clear();
+	}
+
+	finishSuspendedDelivery(): void {
+		this.suspend(false);
 	}
 
 	private attach(pairingId: string, sessionId: string): void {
@@ -155,7 +170,7 @@ export class TelegramSessionState extends Disposable {
 	private async replaceSelections(next: Map<string, StoredTelegramSessionSelection>): Promise<void> {
 		const value: StoredTelegramSessionSelections | undefined = next.size === 0
 			? undefined
-			: { version: 1, selections: [...next.values()] };
+			: { version: 2, selections: [...next.values()] };
 		try {
 			await this.extensionContext.globalState.update(selectedSessionStateKey, value);
 		} catch {
@@ -180,7 +195,7 @@ function parseStoredSelections(value: unknown): Map<string, StoredTelegramSessio
 		return result;
 	}
 	const record = value as Partial<StoredTelegramSessionSelections>;
-	if (record.version !== 1 || !Array.isArray(record.selections) || record.selections.length > maximumStoredSelections) {
+	if (record.version !== 2 || !Array.isArray(record.selections) || record.selections.length > maximumStoredSelections) {
 		return result;
 	}
 	for (const selection of record.selections) {
@@ -199,7 +214,7 @@ function isStoredSelection(value: unknown): value is StoredTelegramSessionSelect
 	const record = value as Partial<StoredTelegramSessionSelection>;
 	return isBoundedString(record.pairingId) && isPositiveSafeInteger(record.userId) && isPositiveSafeInteger(record.chatId)
 		&& isConsentScopeFingerprint(record.consentScopeFingerprint)
-		&& isBoundedString(record.sessionId) && typeof record.selectedAt === 'number'
+		&& isBoundedString(record.sessionId) && isConsentScopeFingerprint(record.sessionScopeFingerprint) && typeof record.selectedAt === 'number'
 		&& Number.isSafeInteger(record.selectedAt) && record.selectedAt >= 0;
 }
 
@@ -207,8 +222,9 @@ function matchesIdentity(selection: StoredTelegramSessionSelection, identity: Te
 	return selection.pairingId === identity.pairingId && selection.userId === identity.userId && selection.chatId === identity.chatId;
 }
 
-function validateIdentityAndSession(identity: TelegramPairedIdentity, sessionId: string): void {
-	if (!isBoundedString(identity.pairingId) || !isPositiveSafeInteger(identity.userId) || !isPositiveSafeInteger(identity.chatId) || !isBoundedString(sessionId)) {
+function validateIdentityAndSession(identity: TelegramPairedIdentity, sessionId: string, sessionScopeFingerprint: string): void {
+	if (!isBoundedString(identity.pairingId) || !isPositiveSafeInteger(identity.userId) || !isPositiveSafeInteger(identity.chatId)
+		|| !isBoundedString(sessionId) || !isConsentScopeFingerprint(sessionScopeFingerprint)) {
 		throw new TelegramSessionStateError();
 	}
 }

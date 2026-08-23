@@ -2446,6 +2446,30 @@
         "category": "%github.copilot.command.cli.telegram.category%"
       },
       {
+        "command": "github.copilot.cli.telegram.enable",
+        "title": "%github.copilot.command.cli.telegram.enable%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "!config.github.copilot.chat.cli.telegram.enabled"
+      },
+      {
+        "command": "github.copilot.cli.telegram.authorizeWorkspace",
+        "title": "%github.copilot.command.cli.telegram.authorizeWorkspace%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "github.copilot.cli.telegram.needsConsent"
+      },
+      {
+        "command": "github.copilot.cli.telegram.keepDisabled",
+        "title": "%github.copilot.command.cli.telegram.keepDisabled%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "github.copilot.cli.telegram.needsConsent"
+      },
+      {
+        "command": "github.copilot.cli.telegram.reconnect",
+        "title": "%github.copilot.command.cli.telegram.reconnect%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled && github.copilot.cli.telegram.reconnectable"
+      },
+      {
         "command": "github.copilot.cli.telegram.testConnection",
         "title": "%github.copilot.command.cli.telegram.testConnection%",
         "category": "%github.copilot.command.cli.telegram.category%",
@@ -2455,19 +2479,25 @@
         "command": "github.copilot.cli.telegram.startPairing",
         "title": "%github.copilot.command.cli.telegram.startPairing%",
         "category": "%github.copilot.command.cli.telegram.category%",
-        "enablement": "config.github.copilot.chat.cli.telegram.enabled"
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled && github.copilot.cli.telegram.connected"
       },
       {
         "command": "github.copilot.cli.telegram.revokePairing",
         "title": "%github.copilot.command.cli.telegram.revokePairing%",
         "category": "%github.copilot.command.cli.telegram.category%",
-        "enablement": "config.github.copilot.chat.cli.telegram.enabled"
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled && github.copilot.cli.telegram.paired"
       },
       {
         "command": "github.copilot.cli.telegram.disable",
         "title": "%github.copilot.command.cli.telegram.disable%",
         "category": "%github.copilot.command.cli.telegram.category%",
         "enablement": "config.github.copilot.chat.cli.telegram.enabled"
+      },
+      {
+        "command": "github.copilot.cli.telegram.forgetConfiguration",
+        "title": "%github.copilot.command.cli.telegram.forgetConfiguration%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "github.copilot.cli.telegram.configured"
       },
       {
         "command": "github.copilot.cli.telegram.showStatus",
@@ -2482,7 +2512,8 @@
       {
         "command": "github.copilot.cli.telegram.statusBarMenu",
         "title": "%github.copilot.command.cli.telegram.statusBarMenu%",
-        "category": "%github.copilot.command.cli.telegram.category%"
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled || github.copilot.cli.telegram.configured"
       },
       {
         "command": "github.copilot.cli.sessions.delete",
@@ -5766,6 +5797,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "github.copilot.cli.telegram.keepDisabled",
+          "when": "false"
+        },
         {
           "command": "github.copilot.cli.openInCopilotCLI",
           "when": "false"

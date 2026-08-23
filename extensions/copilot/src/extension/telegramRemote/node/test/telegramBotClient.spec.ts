@@ -177,6 +177,23 @@ describe('TelegramBotClient', () => {
 		});
 	});
 
+	it('classifies an unchanged edit without retaining the Bot API description', async () => {
+		responses.push({
+			status: 400,
+			body: JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: message is not modified' }),
+		});
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+
+		const error = await client.editMessageText(202, 1, 'unchanged').then(() => undefined, value => value);
+		expect(error).toMatchObject({
+			kind: 'api',
+			httpStatus: 400,
+			errorCode: 400,
+			apiFailureReason: 'message-not-modified',
+			message: 'Telegram Bot API rejected the request.',
+		});
+	});
+
 	it('rejects malformed JSON and malformed update shapes', async () => {
 		responses.push(
 			{ status: 200, body: '{not-json' },

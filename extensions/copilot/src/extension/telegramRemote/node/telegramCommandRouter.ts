@@ -9,9 +9,11 @@ import { ILogService } from '../../../platform/log/common/logService';
 import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
+import { basename } from '../../../util/vs/base/common/resources';
 import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
 import type { IRemoteControlRegistry, RemoteRequestOrigin } from '../common/remoteControlTypes';
-import type { TelegramAnswerCallbackQueryOptions, TelegramInlineKeyboardMarkup, TelegramMessage, TelegramSendMessageOptions, TelegramUpdate } from '../common/telegramTypes';
+import type { TelegramAuthorizedSessionScope, TelegramSessionScopePolicy } from '../common/telegramSessionScope';
+import { TelegramBotApiError, type TelegramAnswerCallbackQueryOptions, type TelegramEditMessageTextOptions, type TelegramInlineKeyboardMarkup, type TelegramMessage, type TelegramSendMessageOptions, type TelegramUpdate } from '../common/telegramTypes';
 import type { TelegramPairedIdentity } from './telegramAuthorization';
 import type { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration } from './telegramCallbackRegistry';
 import { TelegramSessionState } from './telegramSessionState';
@@ -19,10 +21,12 @@ import { TelegramSessionState } from './telegramSessionState';
 const maximumSessionButtons = 30;
 const maximumButtonLabelLength = 64;
 const maximumPromptLength = 32_000;
+const emptyInlineKeyboard: TelegramInlineKeyboardMarkup = { inline_keyboard: [] };
 
 export interface TelegramCommandEnvironment {
 	readonly workstationLabel: string;
 	readonly workspaceLabel: string;
+	readonly remotePermissionResponses?: boolean;
 }
 
 export interface TelegramPromptDispatchResult {
@@ -33,6 +37,21 @@ export interface TelegramPromptDispatchResult {
 
 export interface TelegramPromptDispatcher {
 	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin): TelegramPromptDispatchResult;
+}
+
+export interface TelegramRequestActivity {
+	readonly onDidReachTerminal: Event<TelegramRequestTerminalEvent>;
+	beginRequest(identity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, replyMarkup: TelegramInlineKeyboardMarkup): Promise<{ readonly generation: number; readonly messageId: number } | undefined>;
+	completeRequest(identity: TelegramPairedIdentity, sessionId: string, requestId: string, outcome: 'completed' | 'failed' | 'cancelled' | 'superseded'): Promise<void>;
+	isStopControl(sessionId: string, requestId: string, generation: number, messageId: number): boolean;
+	closeRemoteConnection(): string | undefined;
+}
+
+export interface TelegramRequestTerminalEvent {
+	readonly identity: TelegramPairedIdentity;
+	readonly sessionId: string;
+	readonly requestId: string;
+	readonly outcome: 'completed' | 'failed' | 'cancelled';
 }
 
 export interface TelegramCommandHost {
@@ -48,12 +67,28 @@ export interface TelegramCommandHost {
 	invalidateRequestCallbacks(sessionId: string, requestId: string): void;
 	invalidateAllCallbacks(): void;
 	sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage>;
+	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true>;
+	editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage | true>;
 	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void>;
 }
 
 interface ActiveDispatch {
 	readonly sessionId: string;
 	readonly requestId: string;
+	readonly activityGeneration?: number;
+}
+
+interface AuthorizedSession {
+	readonly item: ICopilotCLISessionItem;
+	readonly scope: TelegramAuthorizedSessionScope;
+}
+
+interface TrackedStatusMessage {
+	readonly chatId: number;
+	readonly messageId: number;
+	lastRenderedText: string;
+	hasReplyMarkup: boolean;
+	replyMarkupSignature: string;
 }
 
 /** Routes only already-authorized Telegram updates into metadata and narrow remote-control seams. */
@@ -61,6 +96,7 @@ export class TelegramCommandRouter extends Disposable {
 	private readonly activePickerRequestIds = new Map<string, string>();
 	private readonly selectionRevisionIds = new Map<string, string>();
 	private readonly activeDispatches = new Map<string, ActiveDispatch>();
+	private readonly statusMessages = new Map<string, TrackedStatusMessage>();
 	private currentIdentity: TelegramPairedIdentity | undefined;
 
 	constructor(
@@ -70,6 +106,8 @@ export class TelegramCommandRouter extends Disposable {
 		private readonly registry: IRemoteControlRegistry,
 		private readonly promptDispatcher: TelegramPromptDispatcher,
 		private readonly environment: TelegramCommandEnvironment,
+		private readonly sessionScopePolicy: TelegramSessionScopePolicy,
+		private readonly activity: TelegramRequestActivity,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
@@ -77,6 +115,7 @@ export class TelegramCommandRouter extends Disposable {
 		this._register(host.onDidAuthorizeConnection(identity => this.runBackground('restore selected session', this.authorizeConnection(identity))));
 		this._register(host.onDidBlockRemoteAccess(() => this.blockRemoteRouting()));
 		this._register(host.onDidChangePairedIdentity(identity => this.handleIdentityChange(identity)));
+		this._register(activity.onDidReachTerminal(event => this.handleActivityTerminal(event)));
 		this._register(sessionService.onDidDeleteSession(sessionId => this.runBackground('detach deleted session', this.handleDeletedSession(sessionId))));
 		if (host.isAcceptingUpdates && host.pairedIdentity) {
 			this.runBackground('restore selected session', this.authorizeConnection(host.pairedIdentity));
@@ -130,18 +169,20 @@ export class TelegramCommandRouter extends Disposable {
 		}
 
 		const pickerRequestId = this.activePickerRequestIds.get(identity.pairingId);
-		if (pickerRequestId) {
+		const callbackMessageId = callback.message?.message_id;
+		const statusMessage = this.statusMessages.get(identity.pairingId);
+		if (pickerRequestId && callbackMessageId !== undefined && statusMessage?.messageId === callbackMessageId && statusMessage.chatId === identity.chatId) {
 			const selection = this.host.consumeCallback(update, { requestId: pickerRequestId, action: 'session.select' });
 			if (selection) {
-				await this.selectSession(identity, selection.sessionId);
-				await this.safeAnswer(callback.id, { text: l10n.t('Session selected.') });
+				const selected = await this.selectSession(identity, selection.sessionId);
+				await this.safeAnswer(callback.id, { text: selected ? l10n.t('Session selected.') : l10n.t('That session is outside the authorized workspace.'), showAlert: !selected });
 				return;
 			}
 		}
 
 		const selectedSessionId = this.sessionState.getSelectedSessionId(identity);
 		const selectionRevisionId = this.selectionRevisionIds.get(identity.pairingId);
-		if (selectedSessionId && selectionRevisionId) {
+		if (selectedSessionId && selectionRevisionId && callbackMessageId !== undefined && statusMessage?.messageId === callbackMessageId && statusMessage.chatId === identity.chatId) {
 			const deselect = this.host.consumeCallback(update, {
 				sessionId: selectedSessionId,
 				requestId: selectionRevisionId,
@@ -155,7 +196,8 @@ export class TelegramCommandRouter extends Disposable {
 		}
 
 		const active = this.activeDispatches.get(identity.pairingId);
-		if (active && selectedSessionId === active.sessionId) {
+		if (active && selectedSessionId === active.sessionId && active.activityGeneration !== undefined && callbackMessageId !== undefined
+			&& this.activity.isStopControl(active.sessionId, active.requestId, active.activityGeneration, callbackMessageId)) {
 			const stop = this.host.consumeCallback(update, {
 				sessionId: active.sessionId,
 				requestId: active.requestId,
@@ -176,11 +218,16 @@ export class TelegramCommandRouter extends Disposable {
 		const lines = [
 			l10n.t('Telegram Remote'),
 			l10n.t('Workstation: {0}', this.environment.workstationLabel),
-			l10n.t('Workspace: {0}', this.environment.workspaceLabel),
 			selected
-				? l10n.t('Session: {0}', formatSessionName(selected))
+				? l10n.t('Authorized workspace: {0}', selected.scope.workingDirectoryLabel)
+				: l10n.t('Authorized workspace scope: {0}', this.environment.workspaceLabel),
+			selected
+				? l10n.t('Session: {0}', selected.item.label)
 				: l10n.t('Session: none selected'),
 			'',
+			this.environment.remotePermissionResponses
+				? l10n.t('Permissions: supported prompts may be answered remotely')
+				: l10n.t('Permissions: approval is required locally in this build'),
 			l10n.t('Commands: /sessions, /status, /deselect, /stop'),
 		];
 		let replyMarkup: TelegramInlineKeyboardMarkup | undefined;
@@ -188,20 +235,22 @@ export class TelegramCommandRouter extends Disposable {
 			const revisionId = this.selectionRevisionIds.get(identity.pairingId) ?? this.rotateSelectionRevision(identity);
 			const deselect = this.host.registerCallback({
 				identity,
-				sessionId: selected.id,
+				sessionId: selected.item.id,
 				requestId: revisionId,
 				action: 'session.deselect',
 			});
 			replyMarkup = { inline_keyboard: [[{ text: l10n.t('Deselect session'), callback_data: deselect.callbackData }]] };
 		}
-		await this.safeSend(identity.chatId, lines.join('\n'), { replyMarkup });
+		await this.sendOrEditStatus(identity, lines.join('\n'), { replyMarkup });
 	}
 
 	private async sendSessionPicker(identity: TelegramPairedIdentity): Promise<void> {
 		const sessions = [...await this.sessionService.getAllSessions(CancellationToken.None)]
-			.sort((left, right) => left.label.localeCompare(right.label));
+			.map(item => ({ item, scope: this.sessionScopePolicy.authorizeSession(item) }))
+			.filter((candidate): candidate is AuthorizedSession => !!candidate.scope)
+			.sort((left, right) => left.item.label.localeCompare(right.item.label));
 		if (sessions.length === 0) {
-			await this.safeSend(identity.chatId, l10n.t('No Copilot sessions are available in this VS Code window.'));
+			await this.sendOrEditStatus(identity, l10n.t('No Copilot sessions are available in the authorized workspace.'));
 			return;
 		}
 
@@ -209,9 +258,9 @@ export class TelegramCommandRouter extends Disposable {
 		this.activePickerRequestIds.set(identity.pairingId, requestId);
 		const selectedSessionId = this.sessionState.getSelectedSessionId(identity);
 		const rows = sessions.slice(0, maximumSessionButtons).map(session => {
-			const callback = this.host.registerCallback({ identity, sessionId: session.id, requestId, action: 'session.select' });
-			const prefix = session.id === selectedSessionId ? '✓ ' : '';
-			return [{ text: truncate(`${prefix}${formatSessionName(session)}`, maximumButtonLabelLength), callback_data: callback.callbackData }];
+			const callback = this.host.registerCallback({ identity, sessionId: session.item.id, requestId, action: 'session.select' });
+			const prefix = session.item.id === selectedSessionId ? '✓ ' : '';
+			return [{ text: truncate(`${prefix}${formatSessionButton(session.item)}`, maximumButtonLabelLength), callback_data: callback.callbackData }];
 		});
 		const omitted = sessions.length - rows.length;
 		const text = [
@@ -220,30 +269,34 @@ export class TelegramCommandRouter extends Disposable {
 			l10n.t('Workspace: {0}', this.environment.workspaceLabel),
 			omitted > 0 ? l10n.t('{0} additional sessions are not shown.', omitted) : undefined,
 		].filter((line): line is string => !!line).join('\n');
-		await this.safeSend(identity.chatId, text, { replyMarkup: { inline_keyboard: rows } });
+		await this.sendOrEditStatus(identity, text, { replyMarkup: { inline_keyboard: rows } });
 	}
 
-	private async selectSession(identity: TelegramPairedIdentity, sessionId: string): Promise<void> {
+	private async selectSession(identity: TelegramPairedIdentity, sessionId: string): Promise<boolean> {
 		const item = await this.sessionService.getSessionItem(sessionId, CancellationToken.None);
-		if (!item) {
-			await this.safeSend(identity.chatId, l10n.t('That Copilot session was deleted or closed. Run /sessions to refresh the list.'));
-			return;
+		const scope = item && this.sessionScopePolicy.authorizeSession(item);
+		if (!item || !scope) {
+			await this.sendOrEditStatus(identity, l10n.t('That Copilot session is unavailable in the authorized workspace. Run /sessions to refresh the list.'));
+			return false;
 		}
+		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
-		await this.sessionState.select(identity, item.id);
+		await this.sessionState.select(identity, item.id, scope.fingerprint);
 		this.rotateSelectionRevision(identity);
 		await this.sendStatus(identity);
+		return true;
 	}
 
 	private async deselect(identity: TelegramPairedIdentity): Promise<void> {
 		const selectedSessionId = this.sessionState.getSelectedSessionId(identity);
+		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		const removed = await this.sessionState.deselect(identity);
 		if (selectedSessionId) {
 			this.host.invalidateSessionCallbacks(selectedSessionId);
 		}
-		await this.safeSend(identity.chatId, removed
-			? l10n.t('The Copilot session is no longer remotely attached.')
+		await this.sendOrEditStatus(identity, removed
+			? l10n.t('The Copilot session is no longer remotely attached. Use /sessions to select another session.')
 			: l10n.t('No Copilot session is selected. Use /sessions to select one.'));
 	}
 
@@ -261,63 +314,68 @@ export class TelegramCommandRouter extends Disposable {
 		const previous = this.activeDispatches.get(identity.pairingId);
 		if (previous) {
 			this.host.invalidateRequestCallbacks(previous.sessionId, previous.requestId);
+			await this.activity.completeRequest(identity, previous.sessionId, previous.requestId, 'superseded');
 		}
-		const result = this.promptDispatcher.dispatch(selected.id, prompt, this.registry.createTelegramOrigin(String(update.update_id)));
-		const active: ActiveDispatch = { sessionId: selected.id, requestId: result.correlationId };
-		this.activeDispatches.set(identity.pairingId, active);
+		const result = this.promptDispatcher.dispatch(selected.item.id, prompt, this.registry.createTelegramOrigin(String(update.update_id)));
 		const stop = this.host.registerCallback({
 			identity,
-			sessionId: selected.id,
+			sessionId: selected.item.id,
 			requestId: result.correlationId,
 			action: 'session.stop',
 		});
-		await this.safeSend(identity.chatId, l10n.t('Prompt accepted for {0}. New text will steer the active turn.', formatSessionName(selected)), {
-			replyMarkup: { inline_keyboard: [[{ text: l10n.t('Stop'), callback_data: stop.callbackData }]] },
+		const activity = await this.activity.beginRequest(identity, selected.item, result.correlationId, {
+			inline_keyboard: [[{ text: l10n.t('Stop'), callback_data: stop.callbackData }]],
 		});
-		void result.completion.then(
-			() => this.completeDispatch(identity, active),
-			() => {
-				if (this.completeDispatch(identity, active)) {
-					void this.safeSend(identity.chatId, l10n.t('The native Copilot request could not be completed. Use /status before retrying.'));
-				}
-			},
-		);
+		const active: ActiveDispatch = {
+			sessionId: selected.item.id,
+			requestId: result.correlationId,
+			activityGeneration: activity?.generation,
+		};
+		this.activeDispatches.set(identity.pairingId, active);
+		void result.completion.catch(() => this.finishDispatch(identity, active, 'failed'));
 	}
 
 	private async stopActiveDispatch(identity: TelegramPairedIdentity): Promise<boolean> {
 		const active = this.activeDispatches.get(identity.pairingId);
-		const selectedSessionId = this.sessionState.getSelectedSessionId(identity);
-		if (!active || selectedSessionId !== active.sessionId) {
+		const selected = await this.getValidSelectedSession(identity);
+		if (!active || !selected || selected.item.id !== active.sessionId) {
 			await this.safeSend(identity.chatId, l10n.t('There is no active Telegram-started task to stop.'));
 			return false;
 		}
 		this.activeDispatches.delete(identity.pairingId);
 		this.host.invalidateRequestCallbacks(active.sessionId, active.requestId);
 		const stopped = await this.registry.abort(active.sessionId);
-		await this.safeSend(identity.chatId, stopped
-			? l10n.t('The active Copilot task was stopped.')
-			: l10n.t('There is no live Copilot task to stop. The session was not reopened.'));
+		await this.activity.completeRequest(identity, active.sessionId, active.requestId, 'cancelled');
+		if (!stopped) {
+			await this.safeSend(identity.chatId, l10n.t('There is no live Copilot task to stop. The session was not reopened.'));
+		}
 		return stopped;
 	}
 
-	private async getValidSelectedSession(identity: TelegramPairedIdentity): Promise<ICopilotCLISessionItem | undefined> {
+	private async getValidSelectedSession(identity: TelegramPairedIdentity): Promise<AuthorizedSession | undefined> {
 		const sessionId = this.sessionState.getSelectedSessionId(identity);
 		if (!sessionId) {
 			return undefined;
 		}
 		const item = await this.sessionService.getSessionItem(sessionId, CancellationToken.None);
-		if (item) {
-			return item;
+		const scope = item && this.sessionScopePolicy.authorizeSession(item);
+		if (item && scope && this.sessionState.getSelectedSessionScopeFingerprint(identity) === scope.fingerprint) {
+			return { item, scope };
 		}
+		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		await this.sessionState.deselect(identity);
-		await this.safeSend(identity.chatId, l10n.t('The selected Copilot session was deleted or closed. Use /sessions to select another session.'));
+		await this.safeSend(identity.chatId, l10n.t('The selected Copilot session is no longer available in the authorized workspace. Use /sessions to select another session.'));
 		return undefined;
 	}
 
 	private async authorizeConnection(identity: TelegramPairedIdentity): Promise<void> {
 		this.currentIdentity = identity;
-		const sessionId = await this.sessionState.restore(identity, async candidate => !!await this.sessionService.getSessionItem(candidate, CancellationToken.None));
+		const sessionId = await this.sessionState.restore(identity, async (candidate, storedScopeFingerprint) => {
+			const item = await this.sessionService.getSessionItem(candidate, CancellationToken.None);
+			const scope = item && this.sessionScopePolicy.authorizeSession(item);
+			return !!scope && scope.fingerprint === storedScopeFingerprint;
+		});
 		if (sessionId) {
 			this.rotateSelectionRevision(identity);
 		}
@@ -339,15 +397,31 @@ export class TelegramCommandRouter extends Disposable {
 		if (!await this.sessionState.clearSession(sessionId) || !identity || !wasSelected || !this.host.isAcceptingUpdates) {
 			return;
 		}
+		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		await this.safeSend(identity.chatId, l10n.t('The remotely selected Copilot session was deleted. Use /sessions to select another session.'));
 	}
 
 	private blockRemoteRouting(): void {
+		const drainingSessionId = this.activity.closeRemoteConnection();
 		this.activePickerRequestIds.clear();
 		this.selectionRevisionIds.clear();
-		this.activeDispatches.clear();
-		this.sessionState.suspend();
+		for (const [pairingId, active] of this.activeDispatches) {
+			if (active.sessionId !== drainingSessionId) {
+				this.activeDispatches.delete(pairingId);
+			}
+		}
+		this.statusMessages.clear();
+		this.sessionState.suspend(!!drainingSessionId);
+	}
+
+	private handleActivityTerminal(event: TelegramRequestTerminalEvent): void {
+		const active = this.activeDispatches.get(event.identity.pairingId);
+		if (!active || active.sessionId !== event.sessionId || active.requestId !== event.requestId) {
+			return;
+		}
+		this.activeDispatches.delete(event.identity.pairingId);
+		this.host.invalidateRequestCallbacks(active.sessionId, active.requestId);
 	}
 
 	private invalidateRoutingState(identity: TelegramPairedIdentity): void {
@@ -372,11 +446,54 @@ export class TelegramCommandRouter extends Disposable {
 		return true;
 	}
 
-	private async safeSend(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<void> {
+	private async finishDispatch(identity: TelegramPairedIdentity, active: ActiveDispatch, outcome: 'completed' | 'failed'): Promise<void> {
+		if (!this.completeDispatch(identity, active)) {
+			return;
+		}
+		await this.activity.completeRequest(identity, active.sessionId, active.requestId, outcome);
+	}
+
+	private async supersedeActiveDispatch(identity: TelegramPairedIdentity): Promise<void> {
+		const active = this.activeDispatches.get(identity.pairingId);
+		if (active) {
+			await this.activity.completeRequest(identity, active.sessionId, active.requestId, 'superseded');
+		}
+	}
+
+	private async sendOrEditStatus(identity: TelegramPairedIdentity, text: string, options?: TelegramEditMessageTextOptions): Promise<void> {
+		const tracked = this.statusMessages.get(identity.pairingId);
+		const hasReplyMarkup = containsInlineControls(options?.replyMarkup);
+		const replyMarkupSignature = serializeReplyMarkup(options?.replyMarkup);
+		if (tracked?.chatId === identity.chatId && tracked.hasReplyMarkup) {
+			await this.safeRemoveReplyMarkup(identity.chatId, tracked.messageId);
+		}
+		this.statusMessages.delete(identity.pairingId);
+		const message = await this.safeSend(identity.chatId, text, options);
+		if (message) {
+			this.statusMessages.set(identity.pairingId, {
+				chatId: identity.chatId,
+				messageId: message.message_id,
+				lastRenderedText: text,
+				hasReplyMarkup,
+				replyMarkupSignature,
+			});
+		}
+	}
+
+	private async safeSend(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage | undefined> {
 		try {
-			await this.host.sendMessage(chatId, text, options);
+			return await this.host.sendMessage(chatId, text, options);
 		} catch {
 			this.logService.warn('[TelegramRemote] Failed to send a Telegram command response.');
+			return undefined;
+		}
+	}
+
+	private async safeRemoveReplyMarkup(chatId: number, messageId: number): Promise<void> {
+		try {
+			await this.host.editMessageReplyMarkup(chatId, messageId, emptyInlineKeyboard);
+		} catch (error) {
+			this.logService.warn(`[TelegramRemote] status-controls-remove=failed ${formatTelegramApiFailure(error)}`);
 		}
 	}
 
@@ -407,11 +524,27 @@ function parseCommand(text: string): 'start' | 'status' | 'sessions' | 'deselect
 		: 'unknown';
 }
 
-function formatSessionName(session: ICopilotCLISessionItem): string {
-	const workspace = session.workingDirectory?.fsPath;
-	return workspace ? `${session.label} — ${workspace}` : session.label;
+function formatSessionButton(session: ICopilotCLISessionItem): string {
+	const repository = session.workingDirectory ? basename(session.workingDirectory) : undefined;
+	return repository && repository.toLocaleLowerCase() !== session.label.toLocaleLowerCase()
+		? `${session.label} — ${repository}`
+		: session.label;
 }
 
 function truncate(value: string, maximumLength: number): string {
 	return value.length <= maximumLength ? value : `${value.slice(0, Math.max(0, maximumLength - 1))}…`;
+}
+
+function containsInlineControls(replyMarkup: TelegramInlineKeyboardMarkup | undefined): boolean {
+	return !!replyMarkup?.inline_keyboard.some(row => row.length > 0);
+}
+
+function serializeReplyMarkup(replyMarkup: TelegramInlineKeyboardMarkup | undefined): string {
+	return containsInlineControls(replyMarkup) ? JSON.stringify(replyMarkup) : '';
+}
+
+function formatTelegramApiFailure(error: unknown): string {
+	return error instanceof TelegramBotApiError
+		? `kind=${error.kind} http=${error.httpStatus ?? 'none'} errorCode=${error.errorCode ?? 'none'}`
+		: 'kind=unknown http=none errorCode=none';
 }

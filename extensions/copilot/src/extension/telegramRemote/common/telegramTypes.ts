@@ -68,12 +68,12 @@ export interface TelegramGetUpdatesOptions {
 export interface TelegramSendMessageOptions {
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
 	readonly disableNotification?: boolean;
-	readonly parseMode?: 'MarkdownV2';
+	readonly parseMode?: 'MarkdownV2' | 'HTML';
 }
 
 export interface TelegramEditMessageTextOptions {
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
-	readonly parseMode?: 'MarkdownV2';
+	readonly parseMode?: 'MarkdownV2' | 'HTML';
 }
 
 export interface TelegramAnswerCallbackQueryOptions {
@@ -100,6 +100,7 @@ export type TelegramPollingStatus =
 
 export type TelegramBotApiErrorKind = 'aborted' | 'authentication' | 'rate-limit' | 'server' | 'network' | 'invalid-response' | 'api';
 export type TelegramPollingFailureKind = TelegramBotApiErrorKind | 'handler' | 'lease' | 'storage';
+export type TelegramBotApiFailureReason = 'message-not-modified';
 
 export class TelegramBotApiError extends Error {
 	constructor(
@@ -108,6 +109,7 @@ export class TelegramBotApiError extends Error {
 		readonly httpStatus?: number,
 		readonly errorCode?: number,
 		readonly retryAfterSeconds?: number,
+		readonly apiFailureReason?: TelegramBotApiFailureReason,
 	) {
 		super(message);
 		this.name = 'TelegramBotApiError';

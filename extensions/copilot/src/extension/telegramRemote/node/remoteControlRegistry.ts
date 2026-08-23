@@ -29,6 +29,7 @@ const maxSeenEventIds = 10_000;
 interface ILogicalAttachment {
 	readonly transportId: string;
 	refCount: number;
+	suspended: boolean;
 	replaying: boolean;
 	readonly replayBuffer: IRemoteControlSessionEvent[];
 	readonly seenIds: Set<string>;
@@ -133,10 +134,15 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		let attachment = attachments.get(transportId);
 		if (attachment) {
 			attachment.refCount++;
+			if (attachment.suspended) {
+				attachment.suspended = false;
+				this.attachmentEmitter.fire(sessionId);
+			}
 		} else {
 			attachment = {
 				transportId,
 				refCount: 1,
+				suspended: false,
 				replaying: false,
 				replayBuffer: [],
 				seenIds: new Set(),
@@ -149,7 +155,8 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 			const binding = this.bindingsBySessionId.get(sessionId);
 			if (binding) {
 				this.replayAttachment(sessionId, binding, attachment);
-				binding.session.notifyRemoteAttachment(this.transports.get(transportId)!.label);
+				const transport = this.transports.get(transportId)!;
+				binding.session.notifyRemoteAttachment(transport.label, !!transport.requestPermission);
 			}
 		}
 
@@ -174,6 +181,18 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		});
 	}
 
+	/** Hides a transport from routing and UI while retaining event delivery for an in-flight turn. */
+	suspendTransport(transportId: string): void {
+		for (const [sessionId, attachments] of this.attachmentsBySessionId) {
+			const attachment = attachments.get(transportId);
+			if (!attachment || attachment.suspended) {
+				continue;
+			}
+			attachment.suspended = true;
+			this.attachmentEmitter.fire(sessionId);
+		}
+	}
+
 	detachTransport(transportId: string): void {
 		for (const [sessionId, attachments] of this.attachmentsBySessionId) {
 			if (!attachments.delete(transportId)) {
@@ -188,19 +207,28 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 
 	isTransportAttached(sessionId: string, transportId?: string): boolean {
 		const attachments = this.attachmentsBySessionId.get(sessionId);
-		return transportId ? attachments?.has(transportId) === true : !!attachments?.size;
+		return transportId
+			? attachments?.get(transportId)?.suspended === false
+			: [...(attachments?.values() ?? [])].some(attachment => !attachment.suspended);
 	}
 
 	getAttachments(sessionId: string): readonly IRemoteAttachmentInfo[] {
-		return [...(this.attachmentsBySessionId.get(sessionId)?.keys() ?? [])]
+		return [...(this.attachmentsBySessionId.get(sessionId)?.values() ?? [])]
+			.filter(attachment => !attachment.suspended)
+			.map(attachment => attachment.transportId)
 			.map(transportId => this.transports.get(transportId))
 			.filter((transport): transport is IRemoteControlTransport => !!transport)
-			.map(transport => ({ transportId: transport.id, label: transport.label, themeIcon: transport.themeIcon }));
+			.map(transport => ({
+				transportId: transport.id,
+				label: transport.label,
+				themeIcon: transport.themeIcon,
+				remotePermissionResponses: !!transport.requestPermission,
+			}));
 	}
 
 	getAttachedSessionIds(transportId: string): readonly string[] {
 		return [...this.attachmentsBySessionId.entries()]
-			.filter(([, attachments]) => attachments.has(transportId))
+			.filter(([, attachments]) => attachments.get(transportId)?.suspended === false)
 			.map(([sessionId]) => sessionId);
 	}
 
@@ -365,7 +393,9 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		getRequest: (transport: IRemoteControlTransport) => ((token: CancellationToken) => Promise<T | undefined>) | undefined,
 		token: CancellationToken,
 	): Promise<T | undefined> {
-		const requests = [...(this.attachmentsBySessionId.get(sessionId)?.keys() ?? [])]
+		const requests = [...(this.attachmentsBySessionId.get(sessionId)?.values() ?? [])]
+			.filter(attachment => !attachment.suspended)
+			.map(attachment => attachment.transportId)
 			.map(id => this.transports.get(id))
 			.filter((transport): transport is IRemoteControlTransport => !!transport)
 			.map(transport => ({ transport, request: getRequest(transport) }))

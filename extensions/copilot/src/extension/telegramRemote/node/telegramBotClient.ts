@@ -204,7 +204,10 @@ function toApiError(httpStatus: number, envelope: TelegramApiEnvelope): Telegram
 				: 'Telegram Bot API rejected the request.';
 	// Bot API descriptions are remote-controlled text and may echo request data. Keep only the
 	// structured status fields and a local message so credentials cannot reach errors or logs.
-	return new TelegramBotApiError(kind, defaultMessage, httpStatus, errorCode, retryAfterSeconds);
+	const apiFailureReason = kind === 'api' && envelope.description?.toLocaleLowerCase().includes('message is not modified')
+		? 'message-not-modified'
+		: undefined;
+	return new TelegramBotApiError(kind, defaultMessage, httpStatus, errorCode, retryAfterSeconds, apiFailureReason);
 }
 
 function withoutUndefinedValues(value: Readonly<Record<string, unknown>>): Record<string, unknown> {

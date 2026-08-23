@@ -361,8 +361,8 @@ extensions/copilot/script/telegram-remote/test-phase3.ps1                       
 - Five fail-closed user settings and localized commands cover enablement, activity detail, polling timeout, notifications and status-bar visibility. A true setting alone never starts networking.
 - `TelegramConsent` persists a versioned token-and-machine/workspace-scope fingerprint. Setup writes pending consent before validation and commits it only after private-chat pairing is durable; restart restore requires the exact current token and scope.
 - The native setup wizard presents the full modal risk disclosure with cancel as the default, accepts the bot token only in a password-masked input, validates it with `getMe`, and completes a single-use private-chat pairing challenge before enabling the setting.
-- A stable status item exposes status, log, unpair and local Disable controls. Attached sessions override the optional status-bar visibility setting so remote control can never become locally invisible.
-- Controller session-list entries render transport-neutral attachment icons/labels, and a live chat stream receives one warning that permission prompts may be answered remotely.
+- The original stable status item exposed status, log, unpair and local Disable controls. Phase 5.1 adds state-aware Enable/Reconnect/Forget recovery while retaining the no-hidden-attached-session invariant.
+- Controller session-list entries render transport-neutral attachment icons/labels. The original generic in-chat warning overclaimed permission handling; Phase 5.1 makes this copy capability-driven and local-only for Telegram.
 - Disable synchronously blocks dispatch, invalidates callbacks, detaches every Telegram session and cancels setup before waiting for poll/lease cleanup. The local block remains effective when cleanup fails offline.
 - Telegram Bot API polling timeout is bounded to 1–50 seconds and defaults to 25 seconds.
 
@@ -415,16 +415,16 @@ extensions/copilot/script/telegram-remote/test-phase3b.ps1                      
 
 ## 8. Phase 4 — session selection, prompt, steering and abort
 
-**Status:** Implemented and validated on 2026-08-23. Authorized Telegram updates can now select an existing controller session and drive its native request path; activity/event projection remains intentionally deferred to Phase 5.
+**Status:** Implemented and validated on 2026-08-23, with the workspace-authorization gap documented below corrected by Phase 4.1.
 
 ### Implementation record
 
 - `TelegramCommandRouter` is registered only behind `TelegramRemoteContribution`'s numeric private-chat authorization boundary. It supports `/start`, `/status`, `/sessions`, `/deselect`, `/stop`, ordinary text and opaque inline callbacks.
 - Session listing uses only `getAllSessions()` and selection/prompt validation uses only `getSessionItem()`. Telegram code never calls `getSession()`, creates a wrapper, casts to `CopilotCLISession` or accesses the SDK session.
-- `TelegramSessionState` persists a bounded, versioned selection containing only numeric IDs, pairing ID, session ID, timestamp and the current consent-scope fingerprint. A selection from another workspace scope fails closed.
+- The original `TelegramSessionState` persisted a bounded selection against the current consent fingerprint, but did not bind or validate the selected session's `workingDirectory`. The earlier cross-workspace claim was incorrect; Phase 4.1 reproduces and corrects this gap.
 - Selecting a session creates the Telegram registry attachment; deselect, pairing revoke, disable and upstream deletion detach it. Restart restoration first revalidates metadata.
 - Ordinary text creates a registry-trusted Telegram origin and dispatches through `RemotePromptDispatcher`. The native command always receives `queue: 'steering'`; the workbench and `CopilotCLISession` retain idle/busy and SDK `mode: 'immediate'` decisions.
-- Accepted input receives an immediate plain-text acknowledgement with an opaque, request-bound Stop button. A failed acknowledgement is contained after dispatch so the Bot API update is not retried into a duplicate native prompt.
+- The original Phase 4 UI sent a separate acknowledgement with Stop. Phase 5.1 supersedes it with one request activity card while preserving the no-retry-after-dispatch safety property.
 - Stop requires the current pairing, selected session and active dispatch correlation, consumes once and calls `IRemoteControlRegistry.abort()`. The registry reports false when no live wrapper is already bound, so Telegram never opens or mutates a session merely to abort it.
 - Session picker generations, selection revisions and dispatch correlations reject stale callbacks. Session deletion invalidates callbacks, clears durable selection, detaches the indicator and sends an explicit authorized-chat notice.
 
@@ -433,7 +433,7 @@ extensions/copilot/script/telegram-remote/test-phase3b.ps1                      
 | Check | Result |
 | --- | --- |
 | Phase 4 PowerShell runner | Passed: 19 files, 204 tests via `script/telegram-remote/test-phase4.ps1` |
-| Selection isolation | Passed: metadata-only list/validation, opaque picker callbacks, workspace-scope binding, restart restore, deselect, revoke/disable suspension and deletion cleanup |
+| Selection isolation | Metadata-only behavior passed, but validation later found that the session working directory was not compared with the consented roots. Treat the old workspace-scope result as superseded by Phase 4.1. |
 | Prompt and steering path | Passed: registry-created Telegram provenance, correlation marker, native command, forced steering queue, synchronous/deferred cleanup and no direct SDK fallback |
 | Stop and idempotency | Passed: request/session/identity binding, one-shot/stale Stop rejection, no-live-wrapper result and accepted-prompt containment when acknowledgement fails |
 | TypeScript / lint / extension bundle | Passed: extension typecheck, targeted ESLint with zero warnings and extension compile |
@@ -472,17 +472,39 @@ extensions/copilot/script/telegram-remote/test-phase4.ps1                       
 - Stop aborts once; stale Stop cannot target a later/different session.
 - There is no direct SDK send, concrete-session cast, or remote `getSession()` call.
 
+## 8.1 Phase 4.1 — session-aware workspace authorization correction
+
+**Status:** Implemented and validated on 2026-08-23; the authorization-state and recovery semantics were corrected by Phase 5.2.
+
+### Implementation record
+
+- The reproduced failure was security-significant: an empty VS Code window could enumerate and select a controller session whose `workingDirectory` belonged to another repository because consent described the window while `getAllSessions()` was unfiltered.
+- This patch chooses the explicitly permitted safer temporary policy instead of adding invasive cross-workspace approval UI: Telegram can see or control only sessions with a valid file-URI working directory equal to or below a root of the currently consented window. Cross-workspace local approval remains unimplemented.
+- `CurrentWorkspaceTelegramSessionScopePolicy` uses VS Code URI resource identity (`extUriBiasedIgnorePathCase.isEqualOrParent`), handling Windows case, multi-root workspaces, URI authorities and sibling paths without string-prefix comparison.
+- Scope is revalidated before metadata listing, callback selection, v2 persisted-selection restoration, status, prompt, steering, Stop, event intake/flush and final-answer delivery. Empty windows, missing/invalid working directories, foreign roots and changed scope fail closed.
+- Consent schema v2 fingerprints the normalized current roots. Selection schema v2 binds that consent scope to the normalized authorized session URI; v1 state fails closed.
+- Status and activity output use the selected session's authorized working directory, not an unrelated window label.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Exact reported reproduction | Passed: empty window plus a foreign repository session yields no Telegram session metadata and cannot be selected |
+| URI identity | Passed: Windows case-insensitivity, nested/current roots, multi-root, sibling rejection and authority mismatch |
+| Boundary revalidation | Passed: callback/dispatch changes, restart restoration, Stop and activity/final publication reject stale scope |
+| Persistence migration | Passed: stale/v1 selections and consent changes fail closed; valid v2 metadata restores only after authorized connection |
+
 ## 9. Phase 5 — event projection and Telegram activity UI
 
-**Status:** Implemented and validated on 2026-08-23. The selected authorized chat now receives a bounded, editable activity card projected from the existing wrapper-lifetime registry feed; permission and question events remain registry workflows for Phase 6.
+**Status:** Implemented and validated on 2026-08-23, then superseded by the Phase 5.1 disclosure/rendering/consolidation pass below. Permission and question events remain Phase 6 work.
 
 ### Implementation record
 
 - `remoteAgentEvent.ts` is the single typed projection boundary. It validates and bounds the exact `@github/copilot` 1.0.73 shapes used here, preserves event ID/timestamp/parent/agent metadata, distinguishes replay delivery from live delivery, and drops malformed, unknown and interactive request events.
 - Revalidation corrected two stale planning assumptions: the pinned SDK exposes real `tool.execution_progress` and `tool.execution_partial_result` events, and its terminal turn event is `assistant.turn_end`, not `assistant.turn_complete`. The replay allowlist now uses those verified names through the shared projector contract.
 - The registry marks persisted replay delivery explicitly, buffers/deduplicates replay/live overlap, keeps its attachment seen-ID and normalization windows bounded at 10,000 IDs, and uses wrapper-unique synthetic ID prefixes. Logical attachment state continues across wrapper recreation.
-- `TelegramEventRenderer` covers assistant intent/text/exposed readable reasoning, tool start/progress/partial/complete, subagent lifecycle, session lifecycle/errors/usage and abort. Agent-scoped assistant streams are not mixed into the root response, and permission/user-input events are not rendered as generic cards.
-- Activity output uses MarkdownV2 with complete dynamic-text escaping, conservative credential redaction, a maximum of eight recent actions, 12,000 response characters, 2,000 reasoning characters and four Bot API messages of at most 4,096 characters each.
+- The original renderer covered assistant, tool, subagent, lifecycle, usage and abort events, but its compact output could include excessive raw detail and exposed reasoning. Phase 5.1 replaces those display rules.
+- The original activity output used escaped MarkdownV2 and could spread one request across several messages. Phase 5.1 replaces it with strict Telegram-safe HTML, one activity card and separate final-answer chunks.
 - `TelegramActivityCoalescer` validates the current paired identity and selected session again at publish and flush time, compacts replay without per-event sends, caps edits to one flush per second, flushes final live output at the earliest permitted time, and cancels pending output on session switch, deselection, disable, revoke or identity change.
 - `TelegramService`, `TelegramTransport` and `TelegramRemoteContribution` now expose the already-implemented Bot API edit primitive through narrow typed methods. The transport delegates registry publication only to the composition-owned coalescer.
 
@@ -490,7 +512,7 @@ extensions/copilot/script/telegram-remote/test-phase4.ps1                       
 
 | Check | Result |
 | --- | --- |
-| Phase 5 PowerShell runner | Passed: 22 files, 211 tests via `script/telegram-remote/test-phase5.ps1` |
+| Phase 5 PowerShell runner | Current regression result after Phase 5.1: 22 files, 222 tests via `script/telegram-remote/test-phase5.ps1 -SkipTypecheck` |
 | Projection contract | Passed: exact persisted/live variants, replay metadata, malformed/missing field rejection, interactive-event exclusion and pinned progress/turn names |
 | Renderer snapshots | Passed: all supported variants, missing optionals, MarkdownV2 escaping, credential redaction, truncation and four-chunk Bot API bounds |
 | Coalescer behavior | Passed: high-frequency delta collapse, one-second edit cap, bounded action/output memory, final flush, session switch cleanup, local block cancellation and sanitized API failures |
@@ -529,6 +551,88 @@ extensions/copilot/script/telegram-remote/test-phase5.ps1                       
 - Replay/live overlap and wrapper recreation publish each supported event once.
 - High-frequency output produces bounded memory and bounded Bot API edits.
 - Renderer snapshot tests cover Markdown escaping, truncation, missing fields, and all supported event variants.
+
+## 9.1 Phase 5.1 — activity disclosure, Telegram formatting and lifecycle recovery
+
+**Status:** Implemented and validated on 2026-08-23.
+
+### Implementation record
+
+- `github.copilot.chat.cli.telegram.activityDetail` is now live. Compact is semantic-only and excludes successful raw tool output, diffs, stdout/stderr, file content and reasoning. Detailed adds one bounded current-tool summary in Telegram's expandable blockquote. Debug is an explicit local opt-in with labels, redaction and hard bounds.
+- Tool start/progress/complete events correlate by `toolCallId`, retaining a bounded verified-name map so completion events can reuse the start event's tool name.
+- Persisted replay seeds bounded internal state only. A new Telegram prompt creates a fresh request generation; historical tool output and answers are not emitted as current work.
+- One tracked picker/status message is edited on selection. One activity message is created immediately with its request-bound Stop button, edited at most once per second, and stripped of reply markup on completion, failure, cancellation, supersession or stale scope. The final answer is sent separately exactly once.
+- Final assistant Markdown is parsed through the repository's existing `markdown-it` dependency and converted to a strict Telegram-safe HTML subset. Raw HTML is escaped, images are neutralized, unsafe URL schemes are removed, and balanced chunks stay within 4,096 characters.
+- Permission claims are capability-driven across setup, status bar, `/status` and the native in-chat warning. Telegram registers no responder in this build, so permission prompts are accurately described as local-only.
+- Lifecycle recovery now has explicit **Enable Remote Access**, **Reconnect**, and **Forget Configuration** commands. A configured disabled instance keeps a muted `Telegram: Off` item when status visibility is enabled. Exact-scope token/consent/token-bound pairing state reconnects without token entry; Phase 5.2 separates changed-workspace consent from missing token/pairing recovery.
+- Enable/Setup/Reconnect share one generation-bound operation. Disable still blocks dispatch and invalidates callbacks synchronously before cleanup, cancels the generation, and cannot be undone by a late startup completion. Contribution-level resume deduplication preserves the singleton poller invariant.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 5.1 PowerShell runner | Passed: 25 files, 232 tests via `script/telegram-remote/test-phase5.1.ps1` |
+| Disclosure/detail/replay | Passed: capability copy, compact exclusions, tool correlation, detailed/debug bounds/redaction and old-turn isolation |
+| Consolidated UI/final answer | Passed: picker editing, one activity card, Stop lifecycle, separate exactly-once final answer and safe HTML/chunk boundaries |
+| Lifecycle recovery | Passed: disable → enable, disable → reload → enable, recoverable reconnect, stale consent/replaced token/missing pairing, concurrent commands and one startup/poller path |
+| TypeScript / lint / extension bundle | Passed: main extension `tsc`, targeted ESLint with zero warnings and `npm run compile` |
+| Isolated source-workbench smoke | Passed with workspace trust disabled: patch 9 / Phase 5.1 marker observed, Enable registered and visible in the Command Palette while disabled, and no Telegram API polling observed |
+
+### Files
+
+```text
+extensions/copilot/src/extension/telegramRemote/common/telegramSessionScope.ts             (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramSessionScope.ts        (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramMarkdown.ts                    (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramSessionState.ts                (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramCommandRouter.ts               (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramEventRenderer.ts               (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramActivityCoalescer.ts            (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts   (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramSetupWizard.ts           (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramStatusBar.ts             (modify)
+extensions/copilot/script/telegram-remote/test-phase5.1.ps1                                  (new)
+```
+
+## 9.2 Phase 5.2 — authorization-state separation and recovery correction
+
+**Status:** Implemented and validated on 2026-08-24.
+
+### Implementation record
+
+- Stored readiness is now one of `missing-token`, `missing-pairing`, `needs-workspace-consent`, or `ready`. A changed workspace presents only the local disclosure, persists the new exact-scope consent, and reconnects with the existing SecretStorage token and token-bound paired identity. It never creates a pairing challenge.
+- Runtime admission is separately modeled as `disabled`, `needs-consent`, `pairing-only`, or `authorized`. Pairing-only accepts only the exact pending `/pair` command; status, session, callback, and prompt updates are ignored until token, identity, and current workspace consent all validate.
+- Recovery cancellation preserves credentials and paired identity. Initial-setup rollback removes only configuration staged by that incomplete first setup and is fingerprint-guarded. Only the explicit **Forget Configuration** command removes saved configuration.
+- Workspace authorization has a distinct amber status-bar state and a constrained menu: **Authorize Current Workspace**, **Keep Disabled**, **Forget Configuration**, and **Open Log**.
+- Tracked Telegram status messages retain message ID, last text, and control signature. Identical renders skip the Bot API call, controls are removed with an explicit empty keyboard, and Telegram's sanitized `message-not-modified` classification is accepted without sending a replacement message.
+- Disable and unexpected connection loss still stop new dispatch synchronously. If a correlated local turn is active, its registry attachment becomes routing-invisible but remains event-delivery-only; Stop is removed, the activity reports that the task may continue locally, and only the correlated SDK terminal event marks completion and sends the final answer. The Bot API delivery client is retained only for that drain-only interval.
+- Lifecycle logging records credential-free state transitions and structured status-edit outcomes. Setup, Enable, Reconnect, and Disable remain generation-bound and preserve the single-poller lease invariant.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 5.1 aggregate runner | Passed after the correction: 25 files, 241 tests via `script/telegram-remote/test-phase5.1.ps1` |
+| Workspace recovery | Passed: workspace A commands block in B; local authorization reuses the token and paired identity with no token prompt or pairing dialog |
+| Pairing-only admission | Passed: `/status`, `/sessions`, callbacks, and prompts are ignored; only the matching `/pair` transitions to authorized |
+| Configuration preservation | Passed: pairing expiry, Disable/reload/Enable, retryable failure, replaced token, and missing-pairing paths preserve or replace only their intended state |
+| Status/activity lifecycle | Passed: duplicate status skips edits; explicit empty keyboards remove controls; an SDK terminal event drives the final activity and answer after remote shutdown |
+| TypeScript | Passed: main extension `tsc --noEmit --project tsconfig.json` |
+
+### Files
+
+```text
+extensions/copilot/src/extension/telegramRemote/common/telegramTypes.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramAuthorization.ts              (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramConsent.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramSessionState.ts               (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramCommandRouter.ts              (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramActivityCoalescer.ts           (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts  (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramSetupWizard.ts         (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramStatusBar.ts           (modify)
+```
 
 ## 10. Phase 6 — permissions, questions and plan-exit responses
 

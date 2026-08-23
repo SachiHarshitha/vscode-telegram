@@ -137,14 +137,29 @@ The Telegram layer stores only remote UI routing state such as:
 
 ```ts
 interface TelegramRemoteSelection {
-    telegramUserId: string;
-    sessionId?: string;
-    lastStatusMessageId?: number;
-    activityDetail: 'compact' | 'detailed' | 'debug';
+    pairingId: string;
+    telegramUserId: number;
+    chatId: number;
+    sessionId: string;
+    sessionScopeFingerprint: string;
+    selectedAt: number;
 }
 ```
 
 It MUST NOT maintain an independent copy of the conversation as the source of truth.
+
+### 5.1 Current-workspace authorization boundary
+
+Consent to the current VS Code window is not authorization for every session returned by `getAllSessions()`. Before Telegram receives session metadata or performs selection, status, prompt, steering, stop, restoration, event publication, or final-answer publication, the session's `workingDirectory` is authorized by `CurrentWorkspaceTelegramSessionScopePolicy`.
+
+The current conservative policy permits a session only when all of the following are true:
+
+- the current window has at least one consented workspace root,
+- the session has a valid file-URI working directory,
+- VS Code resource identity reports that directory equal to or below one of those roots,
+- the pairing and consent scope are still current.
+
+URI identity uses `extUriBiasedIgnorePathCase.isEqualOrParent`; string-prefix path checks are forbidden because they mishandle sibling paths, casing and URI authorities. Empty windows, missing working directories, foreign authorities, sibling repositories, and changed roots fail closed. The durable selection schema is versioned and stores a fingerprint that combines the consent scope with the normalized session URI, so older or cross-scope selections cannot restore silently.
 
 ## 6. Active session bridge
 
@@ -233,7 +248,7 @@ TelegramTransport
 
 This internal command is high-risk as an external extension contract, but it is a **required integration path inside the current fork** because it preserves native rendering and supplies the tool-invocation token. Feature-detect it, test it on every upstream rebase and fail visibly if it changes; do not fall back to direct SDK `send()` in V1.
 
-The command implementation awaits the session's `responseCompletePromise`, so its returned promise may remain pending for the entire agent turn. Telegram MUST dispatch it fire-and-forget, attach rejection handling, acknowledge the Telegram update immediately and let SDK/registry events report progress/completion. Failure cleanup must clear only the matching pending request context; it must not erase a newer request for the same session.
+The command implementation awaits the session's `responseCompletePromise`, so its returned promise may remain pending for the entire agent turn. Telegram dispatches it fire-and-forget, creates the request's single editable activity card immediately, and lets SDK/registry events report progress/completion. Failure cleanup clears only the matching pending request context; it must not erase a newer request for the same session.
 
 ## 8. Event projection
 
@@ -263,9 +278,11 @@ type RemoteAgentEvent =
 
 Telegram rendering then becomes a pure adapter over these events.
 
+Phase 5.1 separates activity from answer rendering. Each current request owns at most one editable HTML activity card with its request-bound Stop button. Compact mode shows semantic state only; detailed mode adds the current tool summary in an expandable blockquote; debug mode may add bounded, redacted diagnostic labels and explicitly exposed reasoning. Successful raw tool output, raw diffs, progress payloads and reasoning are absent from compact/detailed activity. The assistant answer is accumulated internally and sent once as separate, independently valid Telegram-safe HTML chunks when the turn ends. Unsupported Markdown constructs degrade to escaped plain text, raw HTML is escaped, unsafe link schemes are removed, and every chunk is balanced and no longer than 4,096 characters.
+
 ### Existing-session replay
 
-When a remote transport attaches to an existing session, the session bridge uses `sdkSession.getEvents()` as the replay source without exposing the SDK session to the transport. Replay only the explicitly supported persisted event types (initially user/assistant messages, assistant turn lifecycle and tool start/complete); do not assume ephemeral deltas are retained.
+When a remote transport attaches to an existing session, the session bridge uses `sdkSession.getEvents()` as the replay source without exposing the SDK session to the transport. Replay only explicitly supported persisted event types; do not assume ephemeral deltas are retained. Telegram uses replay to seed correlation and bounded internal state only. It never sends replay as new current activity or as a new final answer, and a newly dispatched request starts with clean request-local state.
 
 To avoid a replay/live-subscription gap, install the live listener into a temporary buffer, snapshot and replay persisted events in order, suppress duplicate event IDs, flush unseen buffered live events, then switch to direct live publication.
 
@@ -307,9 +324,9 @@ The generalization is the first implementation milestone, not a later cleanup. E
 
 The first registry test uses Mission Control plus an in-memory second transport. Telegram work starts only after Mission Control behavior remains semantically unchanged and each SDK event is published exactly once.
 
-## 10. Permissions and interactive requests
+## 10. Permissions and interactive requests (Phase 6 target)
 
-The upstream session currently supports local UI responses and Mission Control responses. Telegram should follow the same semantics.
+The upstream session currently supports local UI responses and Mission Control responses. Telegram does **not** register a permission or user-input responder in the current build, so those prompts must be answered locally. Phase 6 may add Telegram responses using the following semantics.
 
 Conceptually:
 
@@ -441,7 +458,7 @@ See [SETUP_RELEASE_AND_LICENSING.md](./SETUP_RELEASE_AND_LICENSING.md). Hosted C
 
 ## 16. VS Code UI surfaces
 
-Remote control is invisible in the current native UI: Mission Control only prints a one-time markdown banner into the chat stream when `/remote` runs. A session can therefore be remotely steerable with nothing on screen to say so. That is unacceptable for a transport that can approve shell commands, so the local UI must make remote attachment continuously visible and locally revocable.
+Remote control was invisible in the original native UI: Mission Control only printed a one-time markdown banner into the chat stream when `/remote` ran. A session could therefore be remotely steerable with nothing on screen to say so. The implemented local UI makes remote attachment continuously visible and locally revocable; its wording is derived from the attached transport's actual permission-response capability.
 
 ### 16.1 Design constraint
 
@@ -452,6 +469,7 @@ interface IRemoteAttachmentInfo {
     readonly transportId: string;
     readonly label: string;     // localized, e.g. "Telegram"
     readonly themeIcon: string; // codicon id, e.g. 'radio-tower'
+    readonly remotePermissionResponses: boolean;
 }
 
 // on IRemoteControlRegistry
@@ -490,20 +508,38 @@ A single window-level item, following the precedent of `copilot.networkStatus` i
 
 | State | Text | Background |
 | --- | --- | --- |
-| disabled | hidden | — |
+| never configured / disabled | hidden | — |
+| previously configured / disabled | `$(circle-slash) Telegram: Off` | none |
+| current workspace consent required | `$(shield) Telegram: Workspace authorization required` | `statusBarItem.warningBackground` |
 | connecting/retrying | `$(sync~spin) Telegram` | none |
 | connected, no session attached | `$(radio-tower) Telegram` | none |
 | session attached | `$(radio-tower) Telegram: <session title>` | `statusBarItem.warningBackground` |
 | unauthorized/error | `$(alert) Telegram` | `statusBarItem.errorBackground` |
 
-Clicking opens a QuickPick: *Show status* / *Open log* / *Unpair user* / **Disable remote access**. The kill switch must never be more than one click away, and this item is the only always-visible affordance, so it owns that role.
+The QuickPick is state-aware:
+
+- disabled: **Enable Remote Access** only;
+- current workspace consent required: **Authorize Current Workspace**, **Keep Disabled**, *Forget Configuration*, and *Open Log*;
+- recoverable failure or unexpected stop: **Reconnect**, *Show Status*, *Open Log*, **Disable Remote Access**, and *Forget Configuration* when applicable;
+- authentication/configuration failure: *Set Up Again* instead of Reconnect;
+- connected: *Show Status*, *Unpair User* only when paired (otherwise *Pair User*), *Open Log*, and **Disable Remote Access**.
+
+The kill switch remains one click away whenever access is enabled. A configured disabled instance stays discoverable through the muted Off item when the visibility setting is on; `Telegram Remote: Enable Remote Access` remains in the Command Palette even when that item is hidden.
+
+### 16.3.1 Lifecycle ownership and recovery
+
+Setup, Enable and Reconnect share one generation-bound connection operation. Concurrent invocations reuse that operation rather than starting another poller. Disable increments the generation and blocks incoming dispatch/callback registration synchronously, then hides the attachment from routing/UI and awaits poller cleanup. A late validation/start result cannot re-enable the cancelled generation. If a local turn is still active, the hidden attachment remains event-delivery-only until its correlated terminal event; this does not permit commands or permission responses.
+
+Readiness is distinct from connection state: `missing-token` performs complete setup, `missing-pairing` reuses the stored token and starts pairing, `needs-workspace-consent` shows only the local consent dialog and reuses both token and paired identity, and `ready` reconnects directly. Runtime admission is separately `disabled`, `needs-consent`, `pairing-only`, or `authorized`. Pairing-only admits only the matching challenge command. `onDidAuthorizeConnection` fires only after bot validation, token-bound identity, and current exact-scope consent all pass, so persisted session restoration still revalidates session scope. Recovery cancellation preserves configuration; only explicit *Forget Configuration* removes token, consent, pairing, and the durable marker.
 
 ### 16.4 In-chat notice
 
-When a transport attaches while a request stream is live, emit one notice through the existing routed stream:
+When a transport attaches while a request stream is live, emit one capability-accurate notice through the existing routed stream:
 
 ```ts
-stream.warning(l10n.t('This session is now remotely controllable from {0}. Permission prompts may be answered remotely.', label));
+stream.warning(remotePermissionResponses
+    ? l10n.t('This session is now remotely controllable from {0}. Supported permission prompts may be answered remotely.', label)
+    : l10n.t('This session is now remotely controllable from {0}. Permission prompts must be answered locally.', label));
 ```
 
 `stream.warning()` already exists on `CopilotCLIResponseStreamRouter` and no-ops safely when no UI stream is attached, so this needs no null-guarding and no new plumbing. Do **not** use `addUserAssistantMessage()` for notices — it emits a synthetic `assistant.message` into the SDK session and would pollute both the transcript and the model's context. Attach/detach events go to the extension log for the audit trail instead.
@@ -513,7 +549,7 @@ stream.warning(l10n.t('This session is now remotely controllable from {0}. Permi
 V1 uses commands and settings only. No webview, no custom editor — the setup surface is small and a webview would add proposed-API-independent maintenance cost for no benefit.
 
 - `Telegram Remote: Set Up` — a `QuickPick`/`InputBox` wizard: consent (16.6) → bot token (`password: true`) → validate via `getMe` → show pairing challenge → wait for `/pair` → confirm.
-- Settings under `github.copilot.telegram.*` registered with `defineSetting()` in `platform/configuration/common/configurationService.ts` plus matching `contributes.configuration` entries. The bot token is **never** a setting; it lives in `IVSCodeExtensionContext.secrets`.
+- Settings under `github.copilot.chat.cli.telegram.*` registered with `defineSetting()` in `platform/configuration/common/configurationService.ts` plus matching `contributes.configuration` entries. The bot token is **never** a setting; it lives in `IVSCodeExtensionContext.secrets`.
 - Every command is `enablement`-gated so the palette does not advertise pairing actions when the feature is disabled.
 
 ### 16.6 Consent gate

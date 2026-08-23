@@ -6,8 +6,8 @@
 import { createHash } from 'node:crypto';
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 
-export const TELEGRAM_CONSENT_VERSION = 1;
-const consentStateKey = 'vscode-telegram.telegram-remote.consent.v1';
+export const TELEGRAM_CONSENT_VERSION = 2;
+const consentStateKey = 'vscode-telegram.telegram-remote.consent.v2';
 
 interface StoredTelegramConsent {
 	readonly version: typeof TELEGRAM_CONSENT_VERSION;
@@ -74,6 +74,14 @@ export class TelegramConsent {
 		} catch {
 			throw new TelegramConsentStateError('delete');
 		}
+	}
+
+	/** Removes an incomplete acknowledgement without deleting an already-active record. */
+	async revokePending(): Promise<void> {
+		if (!this.hasPendingConsent) {
+			return;
+		}
+		await this.revoke();
 	}
 
 	private async store(consent: StoredTelegramConsent): Promise<void> {

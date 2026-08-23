@@ -9,138 +9,143 @@ import { mock } from '../../../../util/common/test/simpleMock';
 import { Emitter, Event } from '../../../../util/vs/base/common/event';
 import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../../chatSessions/copilotcli/node/copilotcliSessionService';
 import type { IRemoteControlTransport } from '../../common/remoteControlTypes';
-import type { TelegramAnswerCallbackQueryOptions, TelegramMessage, TelegramSendMessageOptions, TelegramUpdate } from '../../common/telegramTypes';
+import type { TelegramSessionScopePolicy } from '../../common/telegramSessionScope';
+import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramInlineKeyboardMarkup, TelegramMessage, TelegramSendMessageOptions, TelegramUpdate } from '../../common/telegramTypes';
 import { RemoteControlRegistry } from '../remoteControlRegistry';
 import type { TelegramPairedIdentity } from '../telegramAuthorization';
 import { TelegramCallbackRegistry, type TelegramCallbackConstraints, type TelegramCallbackInput } from '../telegramCallbackRegistry';
-import { TelegramCommandRouter, type TelegramCommandHost, type TelegramPromptDispatcher } from '../telegramCommandRouter';
+import { TelegramCommandRouter, type TelegramCommandHost, type TelegramPromptDispatcher, type TelegramRequestActivity, type TelegramRequestTerminalEvent } from '../telegramCommandRouter';
 import { TelegramSessionState } from '../telegramSessionState';
 import { TestTelegramExtensionContext, telegramCallbackUpdate, telegramMessageUpdate } from './testTelegramSecurityState';
 
-const identity: TelegramPairedIdentity = {
-	pairingId: 'pairing-1',
-	userId: 101,
-	chatId: 202,
-	firstName: 'First',
-	pairedAt: 1,
-};
+const identity: TelegramPairedIdentity = { pairingId: 'pairing-1', userId: 101, chatId: 202, firstName: 'First', pairedAt: 1 };
+const sessionScopeFingerprint = '1234567890abcdef12345678';
 const firstSession = { id: 'session-1', label: 'First session', timing: undefined, workingDirectory: undefined } satisfies ICopilotCLISessionItem;
 const secondSession = { id: 'session-2', label: 'Second session', timing: undefined, workingDirectory: undefined } satisfies ICopilotCLISessionItem;
 
 describe('TelegramCommandRouter', () => {
 	beforeEach(() => vi.restoreAllMocks());
 
-	it('lists metadata-only sessions and validates an opaque inline selection', async () => {
-		const test = createRouter([firstSession, secondSession]);
+	it('lists only authorized metadata and edits the picker into selected-session status', async () => {
+		const foreign = { ...secondSession, label: 'Secret foreign session' };
+		const test = createRouter([firstSession, foreign], new Set([firstSession.id]));
 		await test.host.deliver(telegramMessageUpdate(1, '/sessions'));
 
-		expect(test.sessionService.getAllSessions).toHaveBeenCalledOnce();
-		expect(test.sessionService.getSession).not.toHaveBeenCalled();
-		const picker = lastMessageOptions(test.host).replyMarkup!;
+		const picker = lastSendOptions(test.host).replyMarkup!;
+		expect({ rows: picker.inline_keyboard.length, text: lastSentText(test.host) }).toEqual({ rows: 1, text: expect.not.stringContaining('Secret foreign session') });
 		const callbackData = picker.inline_keyboard[0][0].callback_data!;
 		expect(callbackData).toMatch(/^tr1:/);
 		expect(callbackData).not.toContain(firstSession.id);
 
-		await test.host.deliver(telegramCallbackUpdate(2, callbackData));
-		expect(test.sessionService.getSessionItem).toHaveBeenCalledWith(firstSession.id, expect.anything());
+		await test.host.deliver(callbackUpdate(2, callbackData, 1));
 		expect(test.state.getSelectedSessionId(identity)).toBe(firstSession.id);
 		expect(test.registry.getAttachedSessionIds('telegram')).toEqual([firstSession.id]);
-		expect(test.host.answerCallbackQuery).toHaveBeenCalledWith('callback-2', expect.objectContaining({ text: 'Session selected.' }));
+		expect(test.host.sendMessage).toHaveBeenCalledOnce();
+		expect(test.host.editMessageText).toHaveBeenCalledWith(identity.chatId, 1, expect.stringContaining('First session'), expect.anything());
+		expect(lastEditedText(test.host)).toContain('Authorized workspace: C:\\workspace');
 	});
 
-	it('rejects stale selection controls and deleted selection targets', async () => {
-		const test = createRouter([firstSession]);
+	it('fails closed when an empty window has no authorized sessions', async () => {
+		const test = createRouter([firstSession], new Set());
 		await test.host.deliver(telegramMessageUpdate(1, '/sessions'));
-		const firstCallback = lastMessageOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
-		await test.host.deliver(telegramMessageUpdate(2, '/sessions'));
 
-		await test.host.deliver(telegramCallbackUpdate(3, firstCallback));
-		expect(test.state.getSelectedSessionId(identity)).toBeUndefined();
-		expect(test.host.answerCallbackQuery).toHaveBeenLastCalledWith('callback-3', expect.objectContaining({ text: expect.stringContaining('stale') }));
-
-		const currentCallback = lastPickerCallback(test.host);
-		test.sessionService.getSessionItem.mockResolvedValue(undefined);
-		await test.host.deliver(telegramCallbackUpdate(4, currentCallback));
-		expect(lastMessageText(test.host)).toContain('deleted or closed');
-		expect(test.registry.getAttachedSessionIds('telegram')).toEqual([]);
+		expect(lastSentText(test.host)).toBe('No Copilot sessions are available in the authorized workspace.');
+		expect(JSON.stringify(test.host.sendMessage.mock.calls)).not.toContain(firstSession.label);
 	});
 
-	it('dispatches normal text through the correlated Telegram origin and immediately returns a Stop control', async () => {
+	it('skips an identical status edit instead of issuing a duplicate Bot API request', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+
+		await test.host.deliver(telegramMessageUpdate(1, '/status'));
+		await test.host.deliver(telegramMessageUpdate(2, '/status'));
+
+		expect(test.host.sendMessage).toHaveBeenCalledOnce();
+		expect(test.host.editMessageText).not.toHaveBeenCalled();
+		expect(test.logService.info).toHaveBeenCalledWith('[TelegramRemote] status-edit=skipped reason=unchanged');
+	});
+
+	it('revalidates authorization at callback time without leaking the revoked session', async () => {
+		const authorizedIds = new Set([firstSession.id]);
+		const test = createRouter([firstSession], authorizedIds);
+		await test.host.deliver(telegramMessageUpdate(1, '/sessions'));
+		const callbackData = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
+		authorizedIds.clear();
+
+		await test.host.deliver(callbackUpdate(2, callbackData, 1));
+		expect(test.state.getSelectedSessionId(identity)).toBeUndefined();
+		expect(lastEditedText(test.host)).toContain('unavailable in the authorized workspace');
+		expect(test.host.answerCallbackQuery).toHaveBeenCalledWith('callback-2', expect.objectContaining({ showAlert: true }));
+	});
+
+	it('revalidates a persisted selection before dispatch, steering, and Stop', async () => {
+		const authorizedIds = new Set([firstSession.id]);
+		const test = createRouter([firstSession], authorizedIds, new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		authorizedIds.clear();
+
+		await test.host.deliver(telegramMessageUpdate(7, 'Do not dispatch outside scope'));
+		expect(test.dispatcher.dispatch).not.toHaveBeenCalled();
+		expect(test.state.getSelectedSessionId(identity)).toBeUndefined();
+	});
+
+	it('dispatches through the native origin and places Stop on the single activity card', async () => {
 		let finish!: () => void;
 		const completion = new Promise<void>(resolve => finish = resolve);
-		const test = createRouter([firstSession], completion);
-		await test.state.select(identity, firstSession.id);
+		const test = createRouter([firstSession], new Set([firstSession.id]), completion);
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
 
 		await test.host.deliver(telegramMessageUpdate(42, 'Please inspect the failing test'));
-
-		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Please inspect the failing test', expect.objectContaining({
-			kind: 'telegram',
-			transportId: 'telegram',
-			updateId: '42',
-		}));
-		expect(lastMessageText(test.host)).toContain('Prompt accepted');
-		expect(lastMessageOptions(test.host).replyMarkup?.inline_keyboard[0][0].text).toBe('Stop');
+		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Please inspect the failing test', expect.objectContaining({ kind: 'telegram', updateId: '42' }));
+		expect(lastSentText(test.host)).toContain('Prompt accepted');
+		expect(lastSendOptions(test.host).replyMarkup?.inline_keyboard[0][0].text).toBe('Stop');
 		expect(test.sessionService.getSession).not.toHaveBeenCalled();
 		finish();
 		await completion;
+		expect(test.activity.completeRequest).not.toHaveBeenCalledWith(identity, firstSession.id, 'request-1', 'completed');
+		test.activity.reachTerminal({ identity, sessionId: firstSession.id, requestId: 'request-1', outcome: 'completed' });
 	});
 
-	it('makes Stop one-shot and never opens a wrapper when no live control exists', async () => {
-		const test = createRouter([firstSession], new Promise<void>(() => { }));
-		await test.state.select(identity, firstSession.id);
-		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValueOnce(false);
-		await test.host.deliver(telegramMessageUpdate(1, 'Run a long task'));
-		const stopCallback = lastMessageOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
-
-		await test.host.deliver(telegramCallbackUpdate(2, stopCallback));
-		expect(abort).toHaveBeenCalledOnce();
-		expect(lastMessageText(test.host)).toContain('not reopened');
-		expect(test.sessionService.getSession).not.toHaveBeenCalled();
-
-		await test.host.deliver(telegramCallbackUpdate(3, stopCallback));
-		expect(abort).toHaveBeenCalledOnce();
-		expect(test.host.answerCallbackQuery).toHaveBeenLastCalledWith('callback-3', expect.objectContaining({ text: expect.stringContaining('stale') }));
-	});
-
-	it('aborts the currently bound wrapper once and rejects an older Stop after a newer dispatch', async () => {
-		const test = createRouter([firstSession], new Promise<void>(() => { }));
-		await test.state.select(identity, firstSession.id);
+	it('binds Stop to the current activity message and rejects stale generations', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
 		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
 
 		await test.host.deliver(telegramMessageUpdate(1, 'First prompt'));
-		const oldStop = lastMessageOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
+		const oldStop = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
+		const oldMessageId = test.host.sendMessage.mock.results[0].value ? 1 : 1;
 		test.dispatcher.dispatch.mockReturnValueOnce({ accepted: true, correlationId: 'request-2', completion: new Promise<void>(() => { }) });
 		await test.host.deliver(telegramMessageUpdate(2, 'Steer with this'));
-		const currentStop = lastMessageOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
+		const currentStop = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
+		const currentMessageId = test.host.sendMessage.mock.calls.length;
 
-		await test.host.deliver(telegramCallbackUpdate(3, oldStop));
+		await test.host.deliver(callbackUpdate(3, oldStop, oldMessageId));
 		expect(abort).not.toHaveBeenCalled();
-		await test.host.deliver(telegramCallbackUpdate(4, currentStop));
+		await test.host.deliver(callbackUpdate(4, currentStop, currentMessageId));
 		expect(abort).toHaveBeenCalledOnce();
-		expect(lastMessageText(test.host)).toContain('was stopped');
+		expect(test.activity.completeRequest).toHaveBeenLastCalledWith(identity, firstSession.id, 'request-2', 'cancelled');
 	});
 
-	it('detaches and reports a selected session deletion without acquiring a wrapper', async () => {
-		const test = createRouter([firstSession]);
-		await test.state.select(identity, firstSession.id);
-		test.host.authorize(identity);
-		await vi.waitFor(() => expect(test.registry.getAttachedSessionIds('telegram')).toEqual([firstSession.id]));
-
-		test.sessionService.fireDelete(firstSession.id);
-		await vi.waitFor(() => expect(test.state.getSelectedSessionId(identity)).toBeUndefined());
-		expect(test.registry.getAttachedSessionIds('telegram')).toEqual([]);
-		expect(lastMessageText(test.host)).toContain('was deleted');
-		expect(test.sessionService.getSession).not.toHaveBeenCalled();
-	});
-
-	it('contains routing errors and does not retry an accepted prompt when its acknowledgement fails', async () => {
-		const test = createRouter([firstSession], new Promise<void>(() => { }));
-		await test.state.select(identity, firstSession.id);
-		test.host.sendMessage.mockRejectedValueOnce(new Error('offline'));
+	it('does not retry an accepted native prompt when activity-card creation fails', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.activity.beginRequest.mockRejectedValueOnce(new Error('offline with secret content'));
 
 		await expect(test.host.deliver(telegramMessageUpdate(7, 'One dispatch only'))).resolves.toBeUndefined();
 		expect(test.dispatcher.dispatch).toHaveBeenCalledOnce();
-		expect(test.logService.warn).toHaveBeenCalledWith('[TelegramRemote] Failed to send a Telegram command response.');
+		expect(test.logService.error).toHaveBeenCalledWith('[TelegramRemote] Authorized update routing failed; details were suppressed.');
+		expect(JSON.stringify(test.logService.error.mock.calls)).not.toContain('secret content');
+	});
+
+	it('restores only a selection whose stored working-directory fingerprint is still current', async () => {
+		const authorizedIds = new Set([firstSession.id]);
+		const test = createRouter([firstSession], authorizedIds);
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.state.suspend();
+		authorizedIds.clear();
+
+		test.host.authorize(identity);
+		await vi.waitFor(() => expect(test.state.getSelectedSessionId(identity)).toBeUndefined());
+		expect(test.registry.getAttachedSessionIds('telegram')).toEqual([]);
 	});
 });
 
@@ -162,6 +167,8 @@ class TestCommandHost implements TelegramCommandHost {
 		chat: { id: chatId, type: 'private' },
 		text,
 	}));
+	readonly editMessageText = vi.fn(async (_chatId: number, _messageId: number, _text: string, _options?: TelegramEditMessageTextOptions): Promise<true> => true);
+	readonly editMessageReplyMarkup = vi.fn(async (_chatId: number, _messageId: number, _replyMarkup?: TelegramInlineKeyboardMarkup): Promise<true> => true);
 	readonly answerCallbackQuery = vi.fn(async (_callbackQueryId: string, _options?: TelegramAnswerCallbackQueryOptions) => { });
 
 	registerAuthorizedUpdateHandler(handler: (accepted: { readonly update: TelegramUpdate; readonly identity: TelegramPairedIdentity }) => Promise<void>) {
@@ -169,14 +176,10 @@ class TestCommandHost implements TelegramCommandHost {
 		return { dispose: () => { if (this.handler === handler) { this.handler = undefined; } } };
 	}
 
-	registerCallback(input: TelegramCallbackInput) {
-		return this.callbacks.register(input);
-	}
-
+	registerCallback(input: TelegramCallbackInput) { return this.callbacks.register(input); }
 	consumeCallback(update: TelegramUpdate, constraints: TelegramCallbackConstraints = {}) {
 		return update.callback_query?.data ? this.callbacks.consume(update.callback_query.data, identity, constraints) : undefined;
 	}
-
 	invalidateSessionCallbacks(sessionId: string): void { this.callbacks.invalidateSession(sessionId); }
 	invalidateRequestCallbacks(sessionId: string, requestId: string): void { this.callbacks.invalidateRequest(sessionId, requestId); }
 	invalidateAllCallbacks(): void { this.callbacks.invalidateAll(); }
@@ -195,21 +198,46 @@ class TestCommandHost implements TelegramCommandHost {
 }
 
 class TestSessionService extends mock<ICopilotCLISessionService>() {
-	private readonly deleteEmitter = new Emitter<string>();
-	override readonly onDidDeleteSession = this.deleteEmitter.event;
+	override readonly onDidDeleteSession = Event.None;
 	override readonly onDidChangeSessions = Event.None;
 	override readonly onDidChangeSession = Event.None;
 	override readonly onDidCreateSession = Event.None;
 	override readonly getAllSessions = vi.fn<() => Promise<readonly ICopilotCLISessionItem[]>>();
 	override readonly getSessionItem = vi.fn<(sessionId: string) => Promise<ICopilotCLISessionItem | undefined>>();
 	override readonly getSession = vi.fn();
+}
 
-	fireDelete(sessionId: string): void {
-		this.deleteEmitter.fire(sessionId);
+class TestRequestActivity implements TelegramRequestActivity {
+	private generation = 0;
+	private active: { readonly sessionId: string; readonly requestId: string; readonly generation: number; readonly messageId: number } | undefined;
+	private readonly terminalEmitter = new Emitter<TelegramRequestTerminalEvent>();
+	readonly onDidReachTerminal = this.terminalEmitter.event;
+
+	constructor(private readonly host: TestCommandHost) { }
+
+	readonly beginRequest = vi.fn(async (pairedIdentity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, replyMarkup: TelegramInlineKeyboardMarkup) => {
+		const message = await this.host.sendMessage(pairedIdentity.chatId, `Prompt accepted for ${session.label}`, { replyMarkup, parseMode: 'HTML' });
+		this.active = { sessionId: session.id, requestId, generation: ++this.generation, messageId: message.message_id };
+		return { generation: this.active.generation, messageId: message.message_id };
+	});
+	readonly completeRequest = vi.fn(async (_identity: TelegramPairedIdentity, sessionId: string, requestId: string, _outcome: 'completed' | 'failed' | 'cancelled' | 'superseded') => {
+		if (this.active?.sessionId === sessionId && this.active.requestId === requestId) {
+			this.active = undefined;
+		}
+	});
+	closeRemoteConnection(): string | undefined {
+		return this.active?.sessionId;
+	}
+	reachTerminal(event: TelegramRequestTerminalEvent): void {
+		this.active = undefined;
+		this.terminalEmitter.fire(event);
+	}
+	isStopControl(sessionId: string, requestId: string, generation: number, messageId: number): boolean {
+		return this.active?.sessionId === sessionId && this.active.requestId === requestId && this.active.generation === generation && this.active.messageId === messageId;
 	}
 }
 
-function createRouter(sessions: readonly ICopilotCLISessionItem[], completion = Promise.resolve()) {
+function createRouter(sessions: readonly ICopilotCLISessionItem[], authorizedIds: Set<string>, completion = Promise.resolve()) {
 	const context = new TestTelegramExtensionContext('C:\\telegram-router-test');
 	const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
 	registry.registerTransport({ id: 'telegram', label: 'Telegram', themeIcon: 'radio-tower', publish: () => { }, dispose: () => { } } satisfies IRemoteControlTransport);
@@ -218,34 +246,31 @@ function createRouter(sessions: readonly ICopilotCLISessionItem[], completion = 
 	const sessionService = new TestSessionService();
 	sessionService.getAllSessions.mockResolvedValue(sessions);
 	sessionService.getSessionItem.mockImplementation(async sessionId => sessions.find(session => session.id === sessionId));
-	const dispatcher = {
-		dispatch: vi.fn(() => ({ accepted: true as const, correlationId: 'request-1', completion })),
-	} satisfies TelegramPromptDispatcher;
-	const logService = new class extends mock<ILogService>() {
-		override warn = vi.fn();
-		override error = vi.fn();
+	const dispatcher = { dispatch: vi.fn(() => ({ accepted: true as const, correlationId: 'request-1', completion })) } satisfies TelegramPromptDispatcher;
+	const scopePolicy: TelegramSessionScopePolicy = {
+		authorizeSession: session => authorizedIds.has(session.id)
+			? { fingerprint: sessionScopeFingerprint, workingDirectoryLabel: 'C:\\workspace' }
+			: undefined,
 	};
+	const activity = new TestRequestActivity(host);
+	const logService = new class extends mock<ILogService>() { override warn = vi.fn(); override error = vi.fn(); override info = vi.fn(); };
 	const router = new TelegramCommandRouter(host, state, sessionService, registry, dispatcher, {
-		workstationLabel: 'workstation-1',
-		workspaceLabel: 'C:\\workspace',
-	}, logService);
-	return { router, host, state, registry, sessionService, dispatcher, logService };
+		workstationLabel: 'workstation-1', workspaceLabel: 'C:\\workspace', remotePermissionResponses: false,
+	}, scopePolicy, activity, logService);
+	return { router, host, state, registry, sessionService, dispatcher, activity, logService };
 }
 
-function lastMessageText(host: TestCommandHost): string {
-	return host.sendMessage.mock.calls.at(-1)?.[1] ?? '';
+function callbackUpdate(updateId: number, callbackData: string, messageId: number): TelegramUpdate {
+	const update = telegramCallbackUpdate(updateId, callbackData);
+	return {
+		...update,
+		callback_query: update.callback_query ? {
+			...update.callback_query,
+			message: update.callback_query.message ? { ...update.callback_query.message, message_id: messageId } : undefined,
+		} : undefined,
+	};
 }
 
-function lastMessageOptions(host: TestCommandHost): TelegramSendMessageOptions {
-	return host.sendMessage.mock.calls.at(-1)?.[2] ?? {};
-}
-
-function lastPickerCallback(host: TestCommandHost): string {
-	for (let index = host.sendMessage.mock.calls.length - 1; index >= 0; index--) {
-		const callbackData = host.sendMessage.mock.calls[index][2]?.replyMarkup?.inline_keyboard[0]?.[0]?.callback_data;
-		if (callbackData) {
-			return callbackData;
-		}
-	}
-	throw new Error('No picker callback was sent.');
-}
+function lastSentText(host: TestCommandHost): string { return host.sendMessage.mock.calls.at(-1)?.[1] ?? ''; }
+function lastEditedText(host: TestCommandHost): string { return host.editMessageText.mock.calls.at(-1)?.[2] ?? ''; }
+function lastSendOptions(host: TestCommandHost): TelegramSendMessageOptions { return host.sendMessage.mock.calls.at(-1)?.[2] ?? {}; }

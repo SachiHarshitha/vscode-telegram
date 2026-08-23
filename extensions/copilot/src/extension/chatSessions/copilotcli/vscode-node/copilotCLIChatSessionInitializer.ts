@@ -130,8 +130,8 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 
 		disposables.add(session);
 		disposables.add(session.object.attachStream(stream));
-		for (const label of this.remoteControlRegistry.getAttachedTransportLabels(session.object.sessionId)) {
-			session.object.notifyRemoteAttachment(label);
+		for (const attachment of this.remoteControlRegistry.getAttachments(session.object.sessionId)) {
+			session.object.notifyRemoteAttachment(attachment.label, attachment.remotePermissionResponses);
 		}
 		session.object.setPermissionLevel(request.permissionLevel);
 

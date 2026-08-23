@@ -9,6 +9,8 @@ Legend:
 - **Telegram** — implemented in the new remote transport layer.
 - **Glue** — small downstream integration between the two.
 
+The **Target** column records current implementation status, not only the eventual product target.
+
 ## Core features
 
 | Feature | Priority | Ownership | Target | Notes |
@@ -18,31 +20,31 @@ Legend:
 | Telegram account pairing | P0 | Telegram | Required | Short-lived pairing code + numeric Telegram user ID |
 | Paired-user allowlist | P0 | Telegram | Required | Fail closed for all other users |
 | Connection health/status | P0 | Telegram | Required | Connected, retrying, unauthorized, disabled |
-| Transport-neutral remote-control registry | P0 | Glue | Required before Telegram | Replaces Mission Control-only event/permission/question branches |
+| Transport-neutral remote-control registry | P0 | Glue | Implemented | Preserves Mission Control and hosts Telegram attachment/event/control seams |
 | Mission Control compatibility | P0 | Upstream + Glue | Required | Command/control semantics unchanged; duplicate event export removed |
 | Typed remote request origin | P0 | Glue | Required | Permission/mode never inferred from transport-supplied source strings |
-| Exactly-once remote event publication | P0 | Glue | Required | Collapse overlapping MC listeners; deduplicate by upstream event ID |
-| Existing-session event replay | P0 | Upstream + Glue | Required | Filter `sdkSession.getEvents()` through bridge; buffer/deduplicate live overlap |
-| Session list | P0 | Upstream + Glue | Required | Reuse `ICopilotCLISessionService.getAllSessions()` |
+| Exactly-once remote event publication | P0 | Glue | Implemented | Collapse overlapping MC listeners; deduplicate by upstream event ID |
+| Existing-session event replay | P0 | Upstream + Glue | Implemented | Replay seeds internal state only and is never presented as new current work |
+| Session list | P0 | Upstream + Glue | Implemented | Reuse `getAllSessions()`, then authorize each session working directory against the current consented window roots |
 | Session metadata | P0 | Upstream + Glue | Required | Title, ID, working directory, status |
 | Select active remote session | P0 | Telegram | Required | Telegram-side routing state only |
-| Create session | P0 | Upstream + Glue | Required where supported | Reuse session service |
-| Resume session | P0 | Upstream + Glue | Required | Reuse persistent Copilot session |
-| Send prompt | P0 | Upstream + Glue | Required | Fire-and-forget native command with immediate ack and correlated failure cleanup; no direct SDK send |
-| Mid-turn steering | P0 | Upstream + Glue | Required | Same native request path; upstream busy handling uses SDK `mode: immediate` |
+| Create session | P0 | Upstream + Glue | Planned | Current Telegram UI selects existing sessions only |
+| Resume session | P0 | Upstream + Glue | Implemented for existing session metadata | Reuse persistent Copilot session; never acquire a wrapper only to list/select |
+| Send prompt | P0 | Upstream + Glue | Implemented | Fire-and-forget native command; create the editable activity card immediately; no direct SDK send |
+| Mid-turn steering | P0 | Upstream + Glue | Implemented | Same native request path; upstream busy handling uses SDK `mode: immediate` |
 | Queue follow-up prompt | P1 | Upstream + Glue | Planned | SDK enqueue/default behavior |
 | Abort active work | P0 | Upstream + Glue | Required | Registry safe-control binding; not exposed on `ICopilotCLISession` today |
 | Live assistant output | P0 | Upstream + Telegram | Required | Session-lifetime registry hook; coalesce deltas into Telegram edits |
 | Agent intent/status | P0 | Upstream + Telegram | Required when exposed | Render current activity |
 | Tool start/progress/complete | P0 | Upstream + Telegram | Required | Compact event renderer |
-| Permission request | P0 | Upstream + Glue | Required | Structured Telegram approval buttons |
-| Permission approve/deny | P0 | Upstream + Glue | Required | Registry returns approve-once/deny to owning session; no raw SDK access |
-| Agent user-question request | P0 | Upstream + Glue | Required | Telegram choices/freeform reply |
+| Permission request | P0 | Upstream + Glue | Planned (Phase 6) | Current Telegram capability is false; prompts must be answered locally |
+| Permission approve/deny | P0 | Upstream + Glue | Planned (Phase 6) | Registry design permits approve-once/deny only; current Telegram transport registers no responder |
+| Agent user-question request | P0 | Upstream + Glue | Planned (Phase 6) | Telegram choices/freeform reply |
 | Plan approval/exit-plan response | P1 | Upstream + Glue | Planned | Reuse SDK/session plan interaction |
-| Subagent activity | P1 | Upstream + Telegram | Planned | Render start/complete/failure |
+| Subagent activity | P1 | Upstream + Telegram | Implemented | Compact semantic start/complete/failure summaries |
 | Session errors | P0 | Upstream + Telegram | Required | Visible remote failure state |
-| Context/token usage | P1 | Upstream + Telegram | Planned | Display only when provided by runtime |
-| Session title updates | P1 | Upstream + Telegram | Planned | Follow upstream `session.title_changed` |
+| Context/token usage | P1 | Upstream + Telegram | Implemented | Bounded summary only when provided by runtime |
+| Session title updates | P1 | Upstream + Telegram | Implemented | Follow upstream `session.title_changed` |
 
 ## Model and mode features
 
@@ -68,13 +70,13 @@ Legend:
 | Inline model picker | P1 | Planned | Dynamic list |
 | Inline mode picker | P1 | Planned | Dynamic list |
 | Stop button | P0 | Required | Guard against stale callback/session mismatch |
-| Permission buttons | P0 | Required | Approve once / deny initially |
-| User question buttons | P0 | Required | Choice buttons + freeform route |
-| Editable live activity message | P0 | Required | Reduce chat flooding |
-| Compact activity mode | P0 | Required | Default |
-| Detailed activity mode | P1 | Planned | More tool/reasoning detail |
-| Debug activity mode | P2 | Optional | Raw-ish event diagnostics, redacted as needed |
-| Slash command shortcuts | P1 | Planned | `/sessions`, `/model`, `/stop`, `/status`, etc. |
+| Permission buttons | P0 | Planned (Phase 6) | Current permissions remain local |
+| User question buttons | P0 | Planned (Phase 6) | Choice buttons + freeform route |
+| Editable live activity message | P0 | Implemented | One activity message per current request; at most one edit per second |
+| Compact activity mode | P0 | Implemented | Semantic default; no raw successful tool output, diffs or reasoning |
+| Detailed activity mode | P1 | Implemented | Adds only the current tool summary in an expandable blockquote |
+| Debug activity mode | P2 | Implemented, opt-in | Bounded redacted diagnostic labels and SDK-exposed reasoning; not hidden chain-of-thought |
+| Slash command shortcuts | P1 | Partially implemented | `/sessions`, `/deselect`, `/stop`, `/status`, `/start`; model commands remain planned |
 | Images/files from Telegram | P1 | Planned | Controlled download + SDK attachment path |
 | Notifications on completion | P1 | Planned | Completion/failure/approval-needed |
 | Telegram Mini App | P2 | Optional | Rich dashboard only if bot UI becomes limiting |
@@ -89,6 +91,8 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | Live indicator refresh | P0 | Glue | Required | Existing `refreshSession({reason:'update'})` driven by `onDidChangeAttachments` |
 | Status bar item | P0 | Telegram | Required | Connecting/connected/attached/error; warning background while attached |
 | One-click kill switch | P0 | Telegram | Required | QuickPick from the status bar item |
+| Discoverable disabled state | P0 | Telegram | Implemented | Muted `Telegram: Off` item after prior configuration, subject to status visibility setting |
+| Capability/state-aware controls | P0 | Telegram | Implemented | Enable while disabled; Reconnect only for recoverable failure/stopped state; no inapplicable Unpair/Disable |
 | In-chat attach notice | P0 | Glue | Required | `stream.warning()` on the existing routed stream; no-ops when no UI stream |
 | Modal consent gate | P0 | Telegram | Required | Blocks first enable; cancel is default |
 | Setup wizard | P0 | Telegram | Required | QuickPick/InputBox; token entry masked |
@@ -125,6 +129,10 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | Bot connection test | P0 | Required | Validate token via Bot API |
 | Pairing wizard | P0 | Required | Local code -> Telegram confirmation |
 | Disable remote access | P0 | Required | Immediate local kill switch |
+| Enable stored configuration | P0 | Implemented | Exact-scope SecretStorage token + consent + token-bound pairing; no token re-entry |
+| Reconnect after failure | P0 | Implemented | Retryable failures/stopped lifecycle only; authentication failures route to setup |
+| Forget configuration | P0 | Implemented | Stops access, removes token/consent/pairing, and clears configured marker |
+| Concurrent lifecycle safety | P0 | Implemented | Generation-bound setup/enable/reconnect plus synchronous disable and resume deduplication |
 | Diagnostics/log view | P1 | Planned | Connection, pairing, session bridge, event renderer |
 | Upstream version display | P1 | Planned | Show source commit and patch version |
 | Automated update/rebase CI | P1 | Planned | Detect conflicts against upstream |
@@ -143,7 +151,8 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | Remote disable/kill switch | P0 | Required |
 | Modal consent before first enable | P0 | Required; cancel is the default action |
 | Persistent local indicator while attached | P0 | Session list + status bar |
-| Remote permission escalation prevention | P0 | Approve-once/deny only; no remote autoApprove/autopilot |
+| Current-workspace session authorization | P0 | Implemented; URI-identity containment against current consented roots, fail closed for empty/missing/foreign working directories |
+| Remote permission escalation prevention | P0 | Implemented today by local-only permission handling; future Telegram response is approve-once/deny only |
 | Non-E2E confidentiality disclosure | P0 | Required before enabling bot transport |
 | Singleton poller lease | P0 | One `getUpdates` consumer per bot token; competing consumer fails visibly |
 | Rate limiting | P1 | Planned |

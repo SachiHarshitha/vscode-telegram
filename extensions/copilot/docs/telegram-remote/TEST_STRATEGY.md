@@ -74,9 +74,12 @@ Snapshot/test rendering for:
 
 - assistant text,
 - tool start/complete,
-- long command output,
-- Markdown special characters,
-- reasoning present/absent,
+- compact semantic tool summaries with raw output/diff/reasoning absent,
+- detailed current-tool output in a bounded expandable blockquote,
+- debug-only bounded/redacted diagnostic reasoning,
+- final-answer Telegram-safe HTML for emphasis, links, lists, code, blockquotes, tables, Unicode and emoji,
+- raw HTML escaping and unsafe-link neutralization,
+- independently valid 4,096-character chunk boundaries,
 - subagent state,
 - errors,
 - context usage,
@@ -87,10 +90,46 @@ Snapshot/test rendering for:
 Cover:
 
 - many deltas collapse into bounded edits,
-- final event flushes pending content,
+- final answer is delivered separately and exactly once,
 - rate limit respected,
-- old events drop from compact history,
-- session switch clears previous activity state.
+- replay seeds internal state without appearing as new current work,
+- new prompt generation clears old visible activity state,
+- session switch clears previous activity state,
+- Stop markup is removed on complete, failure, cancel, supersession and invalid scope,
+- Disable during a correlated turn removes Stop, reports drain-only local continuation, and waits for the SDK terminal event before final completion/answer delivery,
+- identical status text/control state skips the edit, control removal sends an explicit empty keyboard, and `message-not-modified` does not create a replacement message,
+- Bot API failures do not leak credentials or raw content.
+
+### Session scope policy
+
+Cover:
+
+- empty-window/no-workspace rejection even when `getAllSessions()` returns a foreign session,
+- metadata filtering before session titles or paths reach Telegram,
+- missing/invalid working-directory rejection,
+- current root, multi-root and nested-directory authorization,
+- Windows case-insensitive identity, sibling-path rejection and URI-authority mismatch,
+- callback-time and dispatch-time root/working-directory changes,
+- v1/stale persisted selection rejection and valid v2 restoration,
+- prompt, steering, Stop, activity flush and final-answer revalidation.
+
+The current Phase 4.1 policy intentionally does not implement cross-workspace local approval. Tests assert the safer temporary behavior: only sessions inside the current consented window roots are visible; every other scope requires reopening/consenting in the appropriate window.
+
+### Enable/reconnect lifecycle
+
+Cover:
+
+- disable → enable reuses the exact-scope SecretStorage token without an input prompt,
+- disable → extension reload → enable preserves only the non-secret configured marker and revalidates token/consent/pairing,
+- retryable failure → Reconnect reuses stored state,
+- authentication/API failure offers setup rather than blind reconnect,
+- a changed workspace enters `needs-workspace-consent`, blocks old commands, and reuses the stored token/paired identity after local consent without a token prompt or pairing challenge,
+- missing token enters complete setup; missing pairing reuses the saved token but requires pairing; token replacement invalidates token-bound pairing,
+- pairing-only admission ignores `/status`, `/sessions`, callbacks, and prompts until the exact challenge succeeds,
+- pairing timeout/cancellation preserves saved recovery configuration,
+- concurrent Enable/Setup/Reconnect share one operation/start,
+- concurrent Disable blocks dispatch immediately and a late startup completion cannot revive the cancelled generation,
+- existing cross-process singleton lease tests still reject a second host.
 
 ### Optional V2 standalone `argv.json` updater
 
@@ -198,7 +237,9 @@ Critical cases:
 - repeated attach/detach leaves no reference or listener leak,
 - disposed sessions receive no later remote action.
 
-## 6. Permission integration tests
+## 6. Permission integration tests (Phase 6 target)
+
+Current Phase 5.1 tests instead assert that Telegram advertises no permission-response capability and that setup, status bar, `/status`, and the native in-chat warning say permission prompts must be answered locally. The race suite below becomes required when Phase 6 registers a Telegram responder.
 
 Simulate:
 
@@ -323,6 +364,7 @@ Specific upstream behavior to protect:
 - normal session model selection still works,
 - worktree/checkpoint behavior unchanged,
 - Telegram disabled means no Telegram network activity.
+- transport attachment warnings reflect the actual registered permission-response capability.
 
 Run the Mission Control suite once with only its transport registered and once with an in-memory second transport registered to catch hidden single-transport assumptions.
 
@@ -347,11 +389,12 @@ Required before V1:
 - pairing code expires,
 - pairing code cannot be reused,
 - callback replay rejected,
-- cross-session permission callback rejected,
+- cross-session permission callback rejected when Phase 6 is implemented,
 - cross-user callback rejected,
 - duplicate updates do not duplicate actions,
 - bot token absent from logs/errors/snapshots,
-- Telegram Markdown escaping prevents unintended markup/control,
+- Telegram HTML sanitization prevents unintended markup/control and unsafe links,
+- empty-window, missing-working-directory, sibling/foreign-workspace and stale-scope selection fail closed without metadata leakage,
 - high-rate input does not create unbounded queues,
 - Stop action cannot target a different session through stale state,
 - remote inputs cannot enable `autoApprove`/`autopilot`,
@@ -362,6 +405,12 @@ Required before V1:
 ## 13. Manual smoke test script
 
 Run for candidate bundled-fork builds:
+
+```powershell
+.\extensions\copilot\script\telegram-remote\launch-dev.ps1
+```
+
+This default profile is intentionally persistent so iterative runs reuse GitHub/Copilot sign-in, Telegram SecretStorage and settings. For the release-gate clean-profile run, pass a new empty directory with `-ProfilePath`. Close the previous development instance before rebuilding/relaunching so the new extension bundle is loaded.
 
 1. Install/run a clean matching bundled-fork build.
 2. Verify the built-in Copilot extension has every proposal declared by its manifest without adding a Telegram extension ID or editing `argv.json`.
@@ -374,14 +423,32 @@ Run for candidate bundled-fork builds:
 9. Verify the remote message appears in native VS Code chat.
 10. Start a longer task.
 11. While running, steer: `Do not modify files yet; only diagnose.`
-12. Trigger an operation that requires permission.
-13. Approve/deny remotely and verify no persistent permission increase.
-14. Trigger/answer an agent question if available.
-15. Verify live tool/activity updates.
-16. Press Stop during another long task.
-17. Return to VS Code and verify the same session/history/state is intact.
-18. Enable/smoke-test Mission Control and confirm it still works.
-19. Disable Telegram locally and verify remote commands no longer act.
+12. Trigger an operation that requires permission; verify Telegram claims no approval capability and the prompt must be answered locally.
+13. Verify compact activity contains semantic actions but no raw diff, stdout/stderr, file contents or reasoning.
+14. Switch the local `activityDetail` setting to `detailed`; verify only the current bounded detail appears in a collapsed expandable quote. Test `debug` only with synthetic non-secret content and return to `compact` afterward.
+15. Select another session and confirm the existing picker/status message is edited rather than duplicated; button labels remain concise while status shows the full authorized path.
+16. Start a long task, verify one activity card owns Stop, press Stop, and verify its buttons disappear.
+17. Verify the final assistant answer arrives separately with working links/lists/code/Unicode and only once.
+18. Open an empty VS Code window using a separate profile and verify foreign session titles/paths are not listed. Repeat with a sibling repository and one authorized multi-root folder.
+19. Return to VS Code and verify the same session/history/state is intact.
+20. Enable/smoke-test Mission Control and confirm it still works.
+21. Disable Telegram locally and verify remote commands no longer act, attached state clears immediately, and the status item becomes muted `Telegram: Off` with Enable but no Unpair/Disable action.
+22. Enable again and verify the same exact-scope configuration reconnects without asking for the bot token; confirm the authorized selection restores only after connection/scope validation.
+23. Restart the extension-development window while disabled, enable again, and repeat the no-token-prompt check.
+24. Simulate a retryable network failure, use Reconnect, and confirm only one poller resumes. If the saved token/consent/pairing is intentionally invalidated, confirm Enable routes to setup instead.
+
+Do not mark this real-bot checklist passed until a human performs it. Never print or inspect the persistent profile's bot token or GitHub/Copilot credentials.
+
+## 13.1 Phase 5.1 automated runner
+
+From `extensions/copilot`:
+
+```powershell
+.\script\telegram-remote\test-phase5.ps1 -SkipTypecheck
+.\script\telegram-remote\test-phase5.1.ps1
+```
+
+The Phase 5.1 runner currently covers 25 files / 241 tests using fake tokens and in-memory Bot API hosts only. It includes the Phase 5.2 lifecycle corrections, does not read `.env`, and does not contact Telegram.
 
 ## 14. Release compatibility report
 

@@ -76,6 +76,8 @@ export class TelegramService extends Disposable {
 	private generation = 0;
 	private startingController: IAbortController | undefined;
 	private activeRun: TelegramPollingRun | undefined;
+	private deliveryClient: ITelegramBotClient | undefined;
+	private preserveDeliveryClientAfterStop = false;
 
 	constructor(
 		private readonly storageRoot: string,
@@ -93,6 +95,7 @@ export class TelegramService extends Disposable {
 
 	async start(botToken: string, handleUpdate: TelegramUpdateHandler, handleValidated?: TelegramValidatedHandler, options?: TelegramPollingOptions): Promise<TelegramUser> {
 		await this.stop();
+		this.clearDeliveryClient();
 		const generation = ++this.generation;
 		const controller = this.fetcherService.makeAbortController();
 		this.startingController = controller;
@@ -117,6 +120,7 @@ export class TelegramService extends Disposable {
 				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
 			}
 
+			this.deliveryClient = client;
 			const run: TelegramPollingRun = {
 				generation,
 				client,
@@ -146,7 +150,7 @@ export class TelegramService extends Disposable {
 	}
 
 	async sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
-		const client = this.activeRun?.client;
+		const client = this.activeRun?.client ?? this.deliveryClient;
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
@@ -154,19 +158,39 @@ export class TelegramService extends Disposable {
 	}
 
 	async editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
-		const client = this.activeRun?.client;
+		const client = this.activeRun?.client ?? this.deliveryClient;
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
 		return client.editMessageText(chatId, messageId, text, options);
 	}
 
+	async editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramSendMessageOptions['replyMarkup']): Promise<TelegramMessage | true> {
+		const client = this.activeRun?.client ?? this.deliveryClient;
+		if (!client) {
+			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
+		}
+		return client.editMessageReplyMarkup(chatId, messageId, replyMarkup);
+	}
+
 	async answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {
-		const client = this.activeRun?.client;
+		const client = this.activeRun?.client ?? this.deliveryClient;
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
 		await client.answerCallbackQuery(callbackQueryId, options);
+	}
+
+	/** Keeps outbound delivery available while an already-started local turn reaches its terminal event. */
+	preserveDeliveryClient(): void {
+		this.deliveryClient = this.activeRun?.client ?? this.deliveryClient;
+		this.preserveDeliveryClientAfterStop = this.deliveryClient !== undefined;
+	}
+
+	/** Releases the outbound-only client retained to finish a locally continuing activity. */
+	clearDeliveryClient(): void {
+		this.deliveryClient = undefined;
+		this.preserveDeliveryClientAfterStop = false;
 	}
 
 	async stop(): Promise<void> {
@@ -181,6 +205,9 @@ export class TelegramService extends Disposable {
 		}
 		if (this.status.state !== 'stopped') {
 			this.setStatus({ state: 'stopped' });
+		}
+		if (!this.preserveDeliveryClientAfterStop) {
+			this.deliveryClient = undefined;
 		}
 	}
 

@@ -154,6 +154,46 @@ Do not make the core flow depend on undocumented internal relaunch services.
 
 ## 6. Telegram setup
 
+### Persistent Code OSS development launcher
+
+The current bundled-fork implementation can be exercised as a real extension-development instance. From the repository root, run:
+
+```powershell
+.\extensions\copilot\script\telegram-remote\launch-dev.ps1
+```
+
+The launcher prepares the source runtime, compiles Code OSS and the Copilot extension, and opens the repository with `extensions/copilot` as the extension development path. The manifest's `onStartupFinished` event activates the extension; V1 does not need a separate Telegram extension ID or an `argv.json` edit.
+
+By default, reusable state is isolated under `%LOCALAPPDATA%\vscode-telegram\dev-profile`:
+
+```text
+user-data/   settings, account/session metadata, workspace trust, global storage and encrypted SecretStorage
+extensions/  extensions installed only for this development environment
+```
+
+Sign into GitHub/Copilot and complete Telegram setup in the opened Code OSS window once. Later launches with the same profile reuse that configuration. Credentials are never passed to or stored in the script. SecretStorage values remain tied to the current Windows user/machine and should not be copied as a portable credential bundle.
+
+Useful options:
+
+```powershell
+# Reuse the compiled output for a faster launch.
+.\extensions\copilot\script\telegram-remote\launch-dev.ps1 -SkipBuild
+
+# Open another test repository while retaining the same login/configuration.
+.\extensions\copilot\script\telegram-remote\launch-dev.ps1 -WorkspacePath C:\path\to\test-repository
+
+# Use a separate clean or disposable profile.
+.\extensions\copilot\script\telegram-remote\launch-dev.ps1 -ProfilePath C:\path\to\clean-profile
+```
+
+Close any Code OSS development window using this profile before relaunching after a rebuild. If it remains open, Code OSS may route the new window to the existing application process and keep the previously loaded extension host. Do not add `--use-inmemory-secretstorage`; that test-only option deliberately prevents credential persistence.
+
+If the normal browser callback cannot return to the unpackaged source build, enable `github-authentication.preferDeviceCodeFlow` in this development profile and retry GitHub sign-in.
+
+On Windows, normal extension testing does not require every optional Code OSS native integration to be available. The launcher initializes only missing `telemetry.machineId`, `telemetry.sqmId` and `telemetry.devDeviceId` values in its isolated profile, matching the source-workbench test launcher. This prevents a missing telemetry-identity module from becoming a fatal first-run lookup and does not copy or create credentials. Other unavailable optional integrations can still write nonfatal warnings to the development logs.
+
+For a full-native runtime check, pass `-RequireNativeRuntime`. That mode verifies and rebuilds the startup-critical native modules. If it reports missing Spectre libraries, use Visual Studio Installer to add the VS 2022 x64/x86 Spectre-mitigated MSVC, ATL and MFC components listed in the official [VS Code source prerequisites](https://github.com/microsoft/vscode/wiki/How-to-Contribute#prerequisites), restart PowerShell and rerun the launcher.
+
 Recommended sequence:
 
 1. Verify the bundled fork's Copilot/session-controller integration is active.
@@ -169,6 +209,36 @@ Recommended sequence:
 11. Show connection/session status.
 
 No Tailscale or inbound firewall configuration is required for the default long-polling mode.
+
+Current Phase 4.1/5.1 behavior is deliberately conservative:
+
+- only sessions whose valid file-URI working directory is inside a root of the currently consented window are shown or controllable;
+- an empty window, missing working directory or foreign/sibling workspace fails closed; cross-workspace local approval is not implemented yet;
+- permission prompts must be answered locally in this build;
+- `github.copilot.chat.cli.telegram.activityDetail` defaults to `compact`; `detailed` and especially `debug` are local opt-ins that send additional bounded, redacted content through Telegram;
+- each request uses one editable activity card with Stop, followed by a separate formatted final answer.
+
+Lifecycle controls:
+
+- **Disable Remote Access** blocks dispatch synchronously and stops polling but retains the protected token, consent, pairing and non-secret configured marker;
+- **Enable Remote Access** reconnects without token entry only when that stored state matches the exact current machine/workspace scope;
+- **Reconnect** appears for retryable connection failures or an unexpectedly stopped enabled lifecycle;
+- authentication/configuration failures use **Set Up Again**;
+- **Forget Configuration** disables access and removes token, consent, pairing and the configured marker;
+- a previously configured disabled instance shows muted `Telegram: Off` when the status-bar visibility setting is enabled, while the Enable command always remains available in the Command Palette.
+
+Changing the bot token, paired identity, consent schema, workspace roots or selected session working directory invalidates the prior selection. Reopen the intended repository in the development window and select its session again; never work around rejection by broadening a path setting.
+
+### Phase 5.1 deterministic regression test
+
+From the Copilot extension directory:
+
+```powershell
+cd extensions/copilot
+.\script\telegram-remote\test-phase5.1.ps1
+```
+
+This runner currently covers 25 files / 232 tests using only fake credentials and in-memory Telegram hosts. It does not read `.env` or contact the real Bot API. Real-bot verification remains a separate human checklist in [TEST_STRATEGY.md](./TEST_STRATEGY.md#13-manual-smoke-test-script).
 
 ### Phase 2 developer smoke test
 

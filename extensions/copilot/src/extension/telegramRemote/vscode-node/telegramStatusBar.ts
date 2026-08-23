@@ -9,8 +9,8 @@ import { ConfigKey, IConfigurationService } from '../../../platform/configuratio
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { IRemoteControlRegistry } from '../common/remoteControlTypes';
 import type { TelegramPollingStatus } from '../common/telegramTypes';
-import { TelegramRemoteContribution } from './telegramRemoteContribution';
-import { TelegramRemoteCommand } from './telegramSetupWizard';
+import { TelegramRemoteContribution, type TelegramRemoteAuthorizationState } from './telegramRemoteContribution';
+import { getTelegramRemoteCapabilities, TelegramRemoteCommand, TelegramSetupWizard } from './telegramSetupWizard';
 
 interface TelegramStatusBarPresentation {
 	readonly visible: boolean;
@@ -19,7 +19,7 @@ interface TelegramStatusBarPresentation {
 	readonly background?: 'warning' | 'error';
 }
 
-interface TelegramStatusQuickPickItem extends vscode.QuickPickItem {
+export interface TelegramStatusQuickPickItem extends vscode.QuickPickItem {
 	readonly command: string;
 }
 
@@ -29,6 +29,7 @@ export class TelegramStatusBar extends Disposable {
 
 	constructor(
 		private readonly contribution: TelegramRemoteContribution,
+		private readonly setupWizard: TelegramSetupWizard,
 		@IRemoteControlRegistry private readonly registry: IRemoteControlRegistry,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
@@ -37,7 +38,9 @@ export class TelegramStatusBar extends Disposable {
 		this.statusBarItem.name = l10n.t('Telegram Remote');
 		this.statusBarItem.command = TelegramRemoteCommand.StatusBarMenu;
 		this._register(this.contribution.transport.onDidChangeStatus(() => this.update()));
+		this._register(this.contribution.onDidChangeAuthorizationState(() => this.update()));
 		this._register(this.contribution.authorization.onDidChangePairedIdentity(() => this.update()));
+		this._register(this.setupWizard.onDidChangeConfigured(() => this.update()));
 		this._register(this.registry.onDidChangeAttachments(() => this.update()));
 		this._register(this.configurationService.onDidChangeConfiguration(event => {
 			if (event.affectsConfiguration(ConfigKey.Advanced.CLITelegramEnabled.fullyQualifiedId)
@@ -56,10 +59,13 @@ export class TelegramStatusBar extends Disposable {
 		const pairedUser = pairedIdentity ? pairedIdentity.username ? `@${pairedIdentity.username}` : pairedIdentity.firstName : undefined;
 		const presentation = getTelegramStatusBarPresentation({
 			enabled: this.configurationService.getConfig(ConfigKey.Advanced.CLITelegramEnabled),
+			configured: this.setupWizard.isConfigured,
 			statusBarEnabled: this.configurationService.getConfig(ConfigKey.Advanced.CLITelegramStatusBarEnabled),
 			status: this.contribution.currentStatus,
+			authorizationState: this.contribution.authorizationState,
 			pairedUser,
 			sessionTitles,
+			remotePermissionResponses: getTelegramRemoteCapabilities(this.contribution.transport).remotePermissionResponses,
 		});
 		if (!presentation.visible) {
 			this.statusBarItem.hide();
@@ -74,12 +80,13 @@ export class TelegramStatusBar extends Disposable {
 	}
 
 	private async showMenu(): Promise<void> {
-		const items: TelegramStatusQuickPickItem[] = [
-			{ label: l10n.t('$(info) Show Status'), command: TelegramRemoteCommand.ShowStatus },
-			{ label: l10n.t('$(output) Open Log'), command: TelegramRemoteCommand.ShowLog },
-			{ label: l10n.t('$(account) Unpair User'), command: TelegramRemoteCommand.RevokePairing },
-			{ label: l10n.t('$(debug-disconnect) Disable Remote Access'), description: l10n.t('Immediately block local remote dispatch and stop polling'), command: TelegramRemoteCommand.Disable },
-		];
+		const items = getTelegramStatusMenuItems({
+			enabled: this.configurationService.getConfig(ConfigKey.Advanced.CLITelegramEnabled),
+			configured: this.setupWizard.isConfigured,
+			status: this.contribution.currentStatus,
+			authorizationState: this.contribution.authorizationState,
+			paired: !!this.contribution.pairedIdentity,
+		});
 		const selected = await vscode.window.showQuickPick(items, {
 			title: l10n.t('Telegram Remote Controls'),
 			placeHolder: l10n.t('Choose an action'),
@@ -92,10 +99,13 @@ export class TelegramStatusBar extends Disposable {
 
 export function getTelegramStatusBarPresentation(input: {
 	readonly enabled: boolean;
+	readonly configured?: boolean;
 	readonly statusBarEnabled: boolean;
 	readonly status: TelegramPollingStatus;
+	readonly authorizationState?: TelegramRemoteAuthorizationState;
 	readonly pairedUser?: string;
 	readonly sessionTitles: readonly string[];
+	readonly remotePermissionResponses?: boolean;
 }): TelegramStatusBarPresentation {
 	if (input.sessionTitles.length > 0) {
 		const sessionLabel = input.sessionTitles.length === 1
@@ -105,13 +115,32 @@ export function getTelegramStatusBarPresentation(input: {
 			visible: true,
 			text: l10n.t('$(radio-tower) Telegram: {0}', sessionLabel),
 			tooltip: input.pairedUser
-				? l10n.t('Telegram user {0} can remotely control {1}. Permission prompts may be answered remotely. Select for controls.', input.pairedUser, sessionLabel)
-				: l10n.t('Telegram is attached to {0}. Permission prompts may be answered remotely. Select Disable Remote Access immediately.', sessionLabel),
+				? input.remotePermissionResponses
+					? l10n.t('Telegram user {0} can remotely control {1} and answer supported permission prompts. Select for controls.', input.pairedUser, sessionLabel)
+					: l10n.t('Telegram user {0} can send prompts, steer, and stop Telegram-started work in {1}. Permission prompts require local approval. Select for controls.', input.pairedUser, sessionLabel)
+				: l10n.t('Telegram is attached to {0}. Permission prompts require local approval. Select Disable Remote Access immediately.', sessionLabel),
 			background: 'warning',
 		};
 	}
-	if (!input.statusBarEnabled || (!input.enabled && input.status.state === 'stopped')) {
+	if (!input.statusBarEnabled) {
 		return { visible: false };
+	}
+	if (input.authorizationState === 'needs-consent') {
+		return {
+			visible: true,
+			text: l10n.t('$(shield) Telegram: Workspace authorization required'),
+			tooltip: l10n.t('The current workspace has not been authorized for Telegram Remote. Remote commands are blocked. Select for controls.'),
+			background: 'warning',
+		};
+	}
+	if (!input.enabled) {
+		return input.configured
+			? {
+				visible: true,
+				text: l10n.t('$(circle-slash) Telegram: Off'),
+				tooltip: l10n.t('Telegram Remote is disabled. Select to enable remote access using the saved configuration.'),
+			}
+			: { visible: false };
 	}
 	if (input.status.state === 'starting' || input.status.state === 'retrying') {
 		return {
@@ -151,4 +180,56 @@ export function getTelegramStatusBarPresentation(input: {
 		tooltip: l10n.t('Telegram Remote is stopped unexpectedly. Remote prompts are blocked. Select for controls.'),
 		background: 'error',
 	};
+}
+
+export function getTelegramStatusMenuItems(input: {
+	readonly enabled: boolean;
+	readonly configured: boolean;
+	readonly status: TelegramPollingStatus;
+	readonly paired: boolean;
+	readonly authorizationState?: TelegramRemoteAuthorizationState;
+}): readonly TelegramStatusQuickPickItem[] {
+	if (input.authorizationState === 'needs-consent') {
+		return [
+			{ label: l10n.t('$(shield) Authorize Current Workspace'), command: TelegramRemoteCommand.AuthorizeWorkspace },
+			{ label: l10n.t('$(circle-slash) Keep Disabled'), command: TelegramRemoteCommand.KeepDisabled },
+			...(input.configured ? [{ label: l10n.t('$(trash) Forget Configuration'), command: TelegramRemoteCommand.ForgetConfiguration }] : []),
+			{ label: l10n.t('$(output) Open Log'), command: TelegramRemoteCommand.ShowLog },
+		];
+	}
+	if (!input.enabled) {
+		return [{ label: l10n.t('$(debug-start) Enable Remote Access'), command: TelegramRemoteCommand.Enable }];
+	}
+
+	const showStatus: TelegramStatusQuickPickItem = { label: l10n.t('$(info) Show Status'), command: TelegramRemoteCommand.ShowStatus };
+	const showLog: TelegramStatusQuickPickItem = { label: l10n.t('$(output) Open Log'), command: TelegramRemoteCommand.ShowLog };
+	const disable: TelegramStatusQuickPickItem = {
+		label: l10n.t('$(debug-disconnect) Disable Remote Access'),
+		description: l10n.t('Immediately block local remote dispatch and stop polling'),
+		command: TelegramRemoteCommand.Disable,
+	};
+	const forget: TelegramStatusQuickPickItem = { label: l10n.t('$(trash) Forget Configuration'), command: TelegramRemoteCommand.ForgetConfiguration };
+	if (input.authorizationState === 'pairing-only') {
+		return [showStatus, showLog, disable];
+	}
+
+	if (input.status.state === 'failed' || input.status.state === 'stopped') {
+		const recovery = input.status.state === 'failed' && (input.status.reason === 'authentication' || input.status.reason === 'api')
+			? { label: l10n.t('$(gear) Set Up Again'), command: TelegramRemoteCommand.Setup }
+			: { label: l10n.t('$(refresh) Reconnect'), command: TelegramRemoteCommand.Reconnect };
+		return [recovery, showStatus, showLog, disable, ...(input.configured ? [forget] : [])];
+	}
+
+	if (input.status.state === 'connected') {
+		return [
+			showStatus,
+			input.paired
+				? { label: l10n.t('$(account) Unpair User'), command: TelegramRemoteCommand.RevokePairing }
+				: { label: l10n.t('$(account) Pair User'), command: TelegramRemoteCommand.StartPairing },
+			showLog,
+			disable,
+		];
+	}
+
+	return [showStatus, showLog, disable];
 }

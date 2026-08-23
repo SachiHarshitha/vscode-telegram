@@ -3,24 +3,29 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as l10n from '@vscode/l10n';
 import { ILogService } from '../../../platform/log/common/logService';
 import { CancellationToken } from '../../../util/vs/base/common/cancellation';
-import type { Event } from '../../../util/vs/base/common/event';
+import { Emitter, type Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
-import type { ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
+import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
 import { projectRemoteAgentEvent, type RemoteAgentEvent } from '../common/remoteAgentEvent';
 import type { IRemoteControlSessionEvent } from '../common/remoteControlTypes';
-import type { TelegramEditMessageTextOptions, TelegramMessage, TelegramSendMessageOptions } from '../common/telegramTypes';
+import type { TelegramAuthorizedSessionScope, TelegramSessionScopePolicy } from '../common/telegramSessionScope';
+import type { TelegramEditMessageTextOptions, TelegramInlineKeyboardMarkup, TelegramMessage, TelegramSendMessageOptions } from '../common/telegramTypes';
+import type { TelegramRequestActivity, TelegramRequestTerminalEvent } from './telegramCommandRouter';
 import type { TelegramPairedIdentity } from './telegramAuthorization';
 import { TelegramSessionState } from './telegramSessionState';
-import { renderTelegramActivity, renderTelegramEvent, type TelegramActivityAction } from './telegramEventRenderer';
+import { renderTelegramActivity, renderTelegramEvent, type TelegramActivityAction, type TelegramActivityDetail, type TelegramActivityTerminalOutcome } from './telegramEventRenderer';
+import { renderTelegramMarkdownAnswer } from './telegramMarkdown';
 
 const minimumEditIntervalMs = 1_000;
 const initialFlushDelayMs = 250;
-const maximumRecentActions = 8;
-const maximumResponseLength = 12_000;
-const maximumReasoningLength = 2_000;
-const supersededContinuation = '_Earlier streamed continuation was superseded\\._';
+const maximumRecentActions = 6;
+const maximumResponseLength = 32_000;
+const maximumReasoningLength = 600;
+const maximumCorrelatedTools = 32;
+const emptyInlineKeyboard: TelegramInlineKeyboardMarkup = { inline_keyboard: [] };
 
 export interface TelegramActivityHost {
 	readonly isAcceptingUpdates: boolean;
@@ -29,6 +34,9 @@ export interface TelegramActivityHost {
 	readonly onDidChangePairedIdentity: Event<TelegramPairedIdentity | undefined>;
 	sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage>;
 	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true>;
+	editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage | true>;
+	preserveDeliveryClient(): void;
+	clearDeliveryClient(): void;
 }
 
 export interface TelegramActivityScheduler {
@@ -38,22 +46,37 @@ export interface TelegramActivityScheduler {
 
 interface TelegramActivityEnvironment {
 	readonly workstationLabel: string;
-	readonly workspaceLabel: string;
+}
+
+interface AuthorizedActivitySession {
+	readonly identity: TelegramPairedIdentity;
+	readonly item: ICopilotCLISessionItem;
+	readonly scope: TelegramAuthorizedSessionScope;
 }
 
 interface ActivityState {
 	readonly generation: number;
+	readonly identity: TelegramPairedIdentity;
 	readonly pairingId: string;
+	readonly userId: number;
 	readonly chatId: number;
 	readonly sessionId: string;
+	readonly sessionScopeFingerprint: string;
 	readonly sessionLabel: string;
+	readonly workingDirectoryLabel: string;
 	readonly actions: TelegramActivityAction[];
-	readonly messageIds: number[];
-	readonly lastMessageTexts: string[];
+	readonly toolNames: Map<string, string>;
+	requestId?: string;
+	replyMarkup?: TelegramInlineKeyboardMarkup;
+	clearReplyMarkupOnNextEdit?: boolean;
+	messageId?: number;
+	lastMessageText?: string;
 	revision: number;
 	dirty: boolean;
 	complete: boolean;
-	sealed: boolean;
+	connectionClosed: boolean;
+	terminalOutcome?: TelegramActivityTerminalOutcome;
+	terminalNotified: boolean;
 	responseMessageId?: string;
 	response?: string;
 	reasoningId?: string;
@@ -62,10 +85,14 @@ interface ActivityState {
 	lastFlushAt: number;
 	flushDueAt?: number;
 	flushTimer?: IDisposable;
+	finalAttempted: boolean;
+	replayTurnId?: string;
 }
 
-/** Owns bounded Telegram activity state and rate-limited Bot API send/edit operations. */
-export class TelegramActivityCoalescer extends Disposable {
+/** Owns one bounded activity card, its Stop control, and exactly-once separate final-answer delivery. */
+export class TelegramActivityCoalescer extends Disposable implements TelegramRequestActivity {
+	private readonly terminalEmitter = this._register(new Emitter<TelegramRequestTerminalEvent>());
+	readonly onDidReachTerminal = this.terminalEmitter.event;
 	private readonly scheduler: TelegramActivityScheduler;
 	private activeState: ActivityState | undefined;
 	private generation = 0;
@@ -76,18 +103,92 @@ export class TelegramActivityCoalescer extends Disposable {
 		private readonly sessionState: TelegramSessionState,
 		private readonly sessionService: ICopilotCLISessionService,
 		private readonly environment: TelegramActivityEnvironment,
+		private readonly sessionScopePolicy: TelegramSessionScopePolicy,
+		private readonly getActivityDetail: () => TelegramActivityDetail,
 		scheduler: TelegramActivityScheduler | undefined,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
 		this.scheduler = scheduler ?? new DefaultTelegramActivityScheduler();
-		this._register(host.onDidBlockRemoteAccess(() => this.reset()));
-		this._register(host.onDidChangePairedIdentity(() => this.reset()));
+		this._register(host.onDidChangePairedIdentity(identity => {
+			if (!identity) {
+				this.dropActiveState(true);
+			}
+		}));
+	}
+
+	async beginRequest(identity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, replyMarkup: TelegramInlineKeyboardMarkup): Promise<{ readonly generation: number; readonly messageId: number } | undefined> {
+		const authorized = await this.getAuthorizedSession(session.id, identity, session);
+		if (!authorized) {
+			return undefined;
+		}
+		await this.removeStopControl(this.activeState);
+		this.reset();
+		const state = this.createState(authorized);
+		state.requestId = requestId;
+		state.replyMarkup = replyMarkup;
+		state.actions.push({ key: 'request', text: l10n.t('Prompt accepted — Copilot is starting') });
+		state.dirty = true;
+		state.revision++;
+		this.activeState = state;
+		await this.enqueueFlush(state);
+		return state.messageId === undefined ? undefined : { generation: state.generation, messageId: state.messageId };
+	}
+
+	async completeRequest(identity: TelegramPairedIdentity, sessionId: string, requestId: string, outcome: 'completed' | 'failed' | 'cancelled' | 'superseded'): Promise<void> {
+		const state = this.activeState;
+		if (!state || state.pairingId !== identity.pairingId || state.userId !== identity.userId || state.chatId !== identity.chatId
+			|| state.sessionId !== sessionId || state.requestId !== requestId) {
+			return;
+		}
+		upsertAction(state.actions, {
+			key: 'request',
+			text: outcome === 'completed' ? l10n.t('Request completed')
+				: outcome === 'failed' ? l10n.t('Request failed')
+					: outcome === 'cancelled' ? l10n.t('Request cancelled')
+						: l10n.t('Request superseded'),
+		});
+		state.complete = true;
+		state.terminalOutcome = outcome === 'superseded' ? undefined : outcome;
+		state.dirty = true;
+		state.revision++;
+		await this.removeStopControl(state);
+		this.scheduleFlush(state, true);
+	}
+
+	closeRemoteConnection(): string | undefined {
+		const state = this.activeState;
+		if (!state?.requestId || state.complete) {
+			this.dropActiveState(true);
+			this.host.clearDeliveryClient();
+			return undefined;
+		}
+		state.connectionClosed = true;
+		this.host.preserveDeliveryClient();
+		upsertAction(state.actions, { key: 'request', text: l10n.t('Remote connection closed; task may continue locally') });
+		if (state.replyMarkup) {
+			state.replyMarkup = undefined;
+			state.clearReplyMarkupOnNextEdit = true;
+		}
+		state.dirty = true;
+		state.revision++;
+		this.scheduleFlush(state, true);
+		return state.sessionId;
+	}
+
+	isStopControl(sessionId: string, requestId: string, generation: number, messageId: number): boolean {
+		const state = this.activeState;
+		return !!state && state.sessionId === sessionId && state.requestId === requestId && state.generation === generation
+			&& state.messageId === messageId && !!state.replyMarkup;
 	}
 
 	async publish(sessionId: string, rawEvent: IRemoteControlSessionEvent): Promise<void> {
-		const identity = this.getActiveIdentity(sessionId);
-		if (!identity) {
+		const drainingState = this.activeState?.connectionClosed && this.activeState.sessionId === sessionId ? this.activeState : undefined;
+		const authorized = drainingState ? await this.getDrainingSession(drainingState) : await this.getAuthorizedSession(sessionId);
+		if (!authorized) {
+			if (!drainingState) {
+				this.dropActiveState(true);
+			}
 			return;
 		}
 		const event = projectRemoteAgentEvent(rawEvent);
@@ -96,21 +197,33 @@ export class TelegramActivityCoalescer extends Disposable {
 		}
 
 		let state = this.activeState;
-		if (!state || state.sessionId !== sessionId || state.pairingId !== identity.pairingId || (state.sealed && startsNewActivity(event))) {
-			state = await this.createState(identity, sessionId);
-			if (!state) {
-				return;
-			}
+		if (!state || state.sessionId !== sessionId || state.pairingId !== authorized.identity.pairingId
+			|| state.sessionScopeFingerprint !== authorized.scope.fingerprint) {
+			await this.removeStopControl(state);
+			this.reset();
+			state = this.createState(authorized);
+			state.actions.push({ key: 'attachment', text: l10n.t('Existing session attached') });
+			this.activeState = state;
 		}
-		if (this.activeState !== state || !this.getActiveIdentity(sessionId)) {
+
+		if (event.source === 'replay') {
+			this.applyReplayState(state, event);
 			return;
 		}
 
-		const mutation = renderTelegramEvent(event);
+		const detail = this.getActivityDetail();
+		const correlatedToolName = getToolCallId(event) ? state.toolNames.get(getToolCallId(event)!) : undefined;
+		if (event.kind === 'tool.execution_start') {
+			rememberToolName(state.toolNames, event.toolCallId, event.toolName);
+		}
+		const mutation = renderTelegramEvent(event, { detail, correlatedToolName });
 		if (mutation.action) {
 			upsertAction(state.actions, mutation.action);
 		}
-		if (mutation.response && mutation.response.text) {
+		if (event.kind === 'tool.execution_complete') {
+			state.toolNames.delete(event.toolCallId);
+		}
+		if (state.requestId && mutation.response && mutation.response.text) {
 			if (state.responseMessageId !== mutation.response.messageId) {
 				state.responseMessageId = mutation.response.messageId;
 				state.response = '';
@@ -119,7 +232,7 @@ export class TelegramActivityCoalescer extends Disposable {
 				? appendBounded(state.response ?? '', mutation.response.text, maximumResponseLength)
 				: truncate(mutation.response.text, maximumResponseLength);
 		}
-		if (mutation.reasoning && mutation.reasoning.text) {
+		if (detail === 'debug' && mutation.reasoning && mutation.reasoning.text) {
 			if (state.reasoningId !== mutation.reasoning.reasoningId) {
 				state.reasoningId = mutation.reasoning.reasoningId;
 				state.reasoning = '';
@@ -129,41 +242,81 @@ export class TelegramActivityCoalescer extends Disposable {
 				: truncate(mutation.reasoning.text, maximumReasoningLength);
 		}
 		state.usage = mutation.usage ?? state.usage;
-		state.complete = mutation.terminal ?? state.complete;
+		if (mutation.terminal) {
+			state.complete = true;
+			state.terminalOutcome = mutation.terminal;
+			upsertAction(state.actions, {
+				key: 'request',
+				text: mutation.terminal === 'completed' ? l10n.t('Request completed')
+					: mutation.terminal === 'failed' ? l10n.t('Request failed') : l10n.t('Request cancelled'),
+			});
+		}
+		const visibleChange = !!mutation.action || !!mutation.usage || !!mutation.terminal || (detail === 'debug' && !!mutation.reasoning);
+		const finalBecameAvailable = !!state.requestId && state.complete && !!state.response && !state.finalAttempted;
+		if (!visibleChange && !finalBecameAvailable) {
+			return;
+		}
 		state.dirty = true;
 		state.revision++;
-		this.scheduleFlush(state, event.source === 'live' && (mutation.urgent === true || mutation.terminal === true));
+		this.scheduleFlush(state, mutation.urgent === true || mutation.terminal !== undefined || finalBecameAvailable);
 	}
 
-	private async createState(identity: TelegramPairedIdentity, sessionId: string): Promise<ActivityState | undefined> {
-		this.reset();
-		const generation = ++this.generation;
-		const item = await this.sessionService.getSessionItem(sessionId, CancellationToken.None);
-		if (generation !== this.generation || !this.getActiveIdentity(sessionId)) {
-			return undefined;
-		}
-		const state: ActivityState = {
-			generation,
-			pairingId: identity.pairingId,
-			chatId: identity.chatId,
-			sessionId,
-			sessionLabel: item?.label ?? sessionId,
+	private createState(authorized: AuthorizedActivitySession): ActivityState {
+		return {
+			generation: ++this.generation,
+			identity: authorized.identity,
+			pairingId: authorized.identity.pairingId,
+			userId: authorized.identity.userId,
+			chatId: authorized.identity.chatId,
+			sessionId: authorized.item.id,
+			sessionScopeFingerprint: authorized.scope.fingerprint,
+			sessionLabel: authorized.item.label,
+			workingDirectoryLabel: authorized.scope.workingDirectoryLabel,
 			actions: [],
-			messageIds: [],
-			lastMessageTexts: [],
+			toolNames: new Map(),
 			revision: 0,
 			dirty: false,
 			complete: false,
-			sealed: false,
+			connectionClosed: false,
+			terminalNotified: false,
 			lastFlushAt: 0,
+			finalAttempted: false,
 		};
-		this.activeState = state;
-		return state;
+	}
+
+	private applyReplayState(state: ActivityState, event: RemoteAgentEvent): void {
+		if (state.requestId) {
+			return;
+		}
+		if (event.kind === 'tool.execution_start') {
+			rememberToolName(state.toolNames, event.toolCallId, event.toolName);
+		}
+		if (event.kind === 'assistant.turn_start') {
+			state.replayTurnId = event.turnId;
+			state.actions.splice(0, state.actions.length,
+				{ key: 'attachment', text: l10n.t('Existing session attached') },
+				{ key: 'turn', text: l10n.t('Attached to an active turn') });
+			return;
+		}
+		if ((event.kind === 'assistant.turn_end' && event.turnId === state.replayTurnId) || isTerminalEvent(event)) {
+			state.replayTurnId = undefined;
+			state.actions.splice(0, state.actions.length, { key: 'attachment', text: l10n.t('Existing session attached') });
+			state.toolNames.clear();
+			return;
+		}
+		if (!state.replayTurnId) {
+			return;
+		}
+		const toolCallId = getToolCallId(event);
+		const mutation = renderTelegramEvent(event, { detail: 'compact', correlatedToolName: toolCallId ? state.toolNames.get(toolCallId) : undefined });
+		if (mutation.action) {
+			upsertAction(state.actions, mutation.action);
+		}
 	}
 
 	private scheduleFlush(state: ActivityState, urgent: boolean): void {
 		const now = this.scheduler.now();
-		const earliestEdit = state.messageIds.length > 0 ? state.lastFlushAt + minimumEditIntervalMs : now;
+		const earliestEdit = state.messageId !== undefined ? state.lastFlushAt + minimumEditIntervalMs : now;
 		const dueAt = Math.max(earliestEdit, urgent ? now : now + initialFlushDelayMs);
 		if (state.flushTimer && (state.flushDueAt ?? Number.POSITIVE_INFINITY) <= dueAt) {
 			return;
@@ -184,54 +337,131 @@ export class TelegramActivityCoalescer extends Disposable {
 	}
 
 	private async flush(state: ActivityState): Promise<void> {
-		if (this.activeState !== state || !state.dirty || !this.getActiveIdentity(state.sessionId)) {
+		const deliverable = state.connectionClosed ? await this.getDrainingSession(state) : await this.getAuthorizedSession(state.sessionId);
+		if (this.activeState !== state || !state.dirty || !deliverable) {
 			return;
 		}
 		const revision = state.revision;
-		const chunks = renderTelegramActivity({
+		const text = renderTelegramActivity({
 			workstation: this.environment.workstationLabel,
-			workspace: this.environment.workspaceLabel,
+			workspace: state.workingDirectoryLabel,
 			session: state.sessionLabel,
-			actions: state.actions.map(item => item.text),
-			response: state.response,
+			actions: state.actions,
 			reasoning: state.reasoning,
 			usage: state.usage,
 			complete: state.complete,
+			detail: this.getActivityDetail(),
 		});
-		const messageCount = Math.max(chunks.length, state.messageIds.length);
-		for (let index = 0; index < messageCount; index++) {
-			if (this.activeState !== state || !this.getActiveIdentity(state.sessionId)) {
-				return;
+		try {
+			if (state.messageId === undefined) {
+				const message = await this.host.sendMessage(state.chatId, text, { parseMode: 'HTML', disableNotification: true, replyMarkup: state.replyMarkup });
+				state.messageId = message.message_id;
+			} else if (state.lastMessageText !== text || state.clearReplyMarkupOnNextEdit) {
+				await this.host.editMessageText(state.chatId, state.messageId, text, {
+					parseMode: 'HTML',
+					replyMarkup: state.clearReplyMarkupOnNextEdit ? emptyInlineKeyboard : state.replyMarkup,
+				});
 			}
-			const text = chunks[index] ?? supersededContinuation;
-			if (state.lastMessageTexts[index] === text) {
-				continue;
-			}
-			try {
-				const messageId = state.messageIds[index];
-				if (messageId === undefined) {
-					const message = await this.host.sendMessage(state.chatId, text, { parseMode: 'MarkdownV2', disableNotification: true });
-					state.messageIds[index] = message.message_id;
-				} else {
-					await this.host.editMessageText(state.chatId, messageId, text, { parseMode: 'MarkdownV2' });
-				}
-				state.lastMessageTexts[index] = text;
-			} catch {
-				this.logService.warn('[TelegramRemote] Failed to publish a Telegram activity update.');
-			}
+			state.lastMessageText = text;
+			state.clearReplyMarkupOnNextEdit = false;
+		} catch {
+			this.logService.warn('[TelegramRemote] Failed to publish a Telegram activity update.');
+			return;
 		}
 		state.lastFlushAt = this.scheduler.now();
+		if (state.complete) {
+			await this.removeStopControl(state);
+			await this.sendFinalAnswer(state);
+			this.notifyTerminal(state);
+		}
 		if (state.revision === revision) {
 			state.dirty = false;
-			state.sealed = state.complete;
 		} else {
 			this.scheduleFlush(state, false);
 		}
 	}
 
-	private getActiveIdentity(sessionId: string): TelegramPairedIdentity | undefined {
+	private async sendFinalAnswer(state: ActivityState): Promise<void> {
+		const deliverable = state.connectionClosed ? await this.getDrainingSession(state) : await this.getAuthorizedSession(state.sessionId);
+		if (!state.requestId || !state.response || state.finalAttempted || !deliverable) {
+			return;
+		}
+		state.finalAttempted = true;
+		for (const chunk of renderTelegramMarkdownAnswer(state.response)) {
+			const stillDeliverable = state.connectionClosed ? await this.getDrainingSession(state) : await this.getAuthorizedSession(state.sessionId);
+			if (this.activeState !== state || !stillDeliverable) {
+				return;
+			}
+			try {
+				await this.host.sendMessage(state.chatId, chunk, { parseMode: 'HTML' });
+			} catch {
+				this.logService.warn('[TelegramRemote] Failed to deliver a Telegram final answer.');
+				return;
+			}
+		}
+	}
+
+	private async removeStopControl(state: ActivityState | undefined): Promise<void> {
+		if (!state?.replyMarkup) {
+			return;
+		}
+		state.replyMarkup = undefined;
+		state.clearReplyMarkupOnNextEdit = false;
+		if (state.messageId === undefined) {
+			return;
+		}
+		try {
+			await this.host.editMessageReplyMarkup(state.chatId, state.messageId, emptyInlineKeyboard);
+		} catch {
+			this.logService.warn('[TelegramRemote] Failed to remove a stale Telegram Stop control.');
+		}
+	}
+
+	private async getAuthorizedSession(sessionId: string, expectedIdentity?: TelegramPairedIdentity, knownItem?: ICopilotCLISessionItem): Promise<AuthorizedActivitySession | undefined> {
 		const identity = this.host.pairedIdentity;
-		return this.host.isAcceptingUpdates && identity && this.sessionState.getSelectedSessionId(identity) === sessionId ? identity : undefined;
+		if (!this.host.isAcceptingUpdates || !identity || (expectedIdentity && !sameIdentity(identity, expectedIdentity))
+			|| this.sessionState.getSelectedSessionId(identity) !== sessionId) {
+			return undefined;
+		}
+		const item = knownItem ?? await this.sessionService.getSessionItem(sessionId, CancellationToken.None);
+		const scope = item && this.sessionScopePolicy.authorizeSession(item);
+		return item && scope && this.sessionState.getSelectedSessionScopeFingerprint(identity) === scope.fingerprint
+			? { identity, item, scope }
+			: undefined;
+	}
+
+	private async getDrainingSession(state: ActivityState): Promise<AuthorizedActivitySession | undefined> {
+		const item = await this.sessionService.getSessionItem(state.sessionId, CancellationToken.None);
+		const scope = item && this.sessionScopePolicy.authorizeSession(item);
+		return item && scope && scope.fingerprint === state.sessionScopeFingerprint
+			? { identity: state.identity, item, scope }
+			: undefined;
+	}
+
+	private notifyTerminal(state: ActivityState): void {
+		if (!state.requestId || !state.terminalOutcome || state.terminalNotified) {
+			return;
+		}
+		state.terminalNotified = true;
+		this.terminalEmitter.fire({
+			identity: state.identity,
+			sessionId: state.sessionId,
+			requestId: state.requestId,
+			outcome: state.terminalOutcome,
+		});
+		if (state.connectionClosed) {
+			this.sessionState.finishSuspendedDelivery();
+			this.host.clearDeliveryClient();
+		}
+	}
+
+	private dropActiveState(removeStop: boolean): void {
+		const state = this.activeState;
+		this.reset();
+		if (removeStop) {
+			void this.removeStopControl(state);
+		}
+		this.host.clearDeliveryClient();
 	}
 
 	private reset(): void {
@@ -241,7 +471,7 @@ export class TelegramActivityCoalescer extends Disposable {
 	}
 
 	public override dispose(): void {
-		this.reset();
+		this.dropActiveState(true);
 		super.dispose();
 	}
 }
@@ -268,6 +498,14 @@ function upsertAction(actions: TelegramActivityAction[], action: TelegramActivit
 	}
 }
 
+function rememberToolName(toolNames: Map<string, string>, toolCallId: string, toolName: string): void {
+	toolNames.delete(toolCallId);
+	toolNames.set(toolCallId, toolName);
+	while (toolNames.size > maximumCorrelatedTools) {
+		toolNames.delete(toolNames.keys().next().value!);
+	}
+}
+
 function appendBounded(current: string, value: string, maximumLength: number): string {
 	return truncate(`${current}${value}`, maximumLength);
 }
@@ -276,11 +514,22 @@ function truncate(value: string, maximumLength: number): string {
 	return value.length <= maximumLength ? value : `${value.slice(0, maximumLength - 1)}…`;
 }
 
-function startsNewActivity(event: RemoteAgentEvent): boolean {
-	return event.kind !== 'assistant.usage' && event.kind !== 'session.usage_info' && event.kind !== 'session.idle';
+function getToolCallId(event: RemoteAgentEvent): string | undefined {
+	return event.kind === 'tool.execution_start' || event.kind === 'tool.execution_progress'
+		|| event.kind === 'tool.execution_partial_result' || event.kind === 'tool.execution_complete'
+		? event.toolCallId
+		: undefined;
+}
+
+function isTerminalEvent(event: RemoteAgentEvent): boolean {
+	return event.kind === 'session.task_complete' || event.kind === 'session.shutdown' || event.kind === 'abort' || event.kind === 'session.idle';
 }
 
 function isAgentScopedStream(event: RemoteAgentEvent): boolean {
 	return !!event.agentId && (event.kind === 'assistant.message' || event.kind === 'assistant.message_delta'
 		|| event.kind === 'assistant.reasoning' || event.kind === 'assistant.reasoning_delta');
+}
+
+function sameIdentity(left: TelegramPairedIdentity, right: TelegramPairedIdentity): boolean {
+	return left.pairingId === right.pairingId && left.userId === right.userId && left.chatId === right.chatId;
 }

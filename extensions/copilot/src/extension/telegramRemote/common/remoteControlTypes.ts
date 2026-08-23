@@ -76,7 +76,7 @@ export interface IRemoteControlSession {
 	readonly onDidReceiveSessionEvent: Event<SessionEvent>;
 	getReplayEvents(): readonly SessionEvent[];
 	abort(): Promise<void>;
-	notifyRemoteAttachment(label: string): void;
+	notifyRemoteAttachment(label: string, remotePermissionResponses: boolean): void;
 	getCurrentMode(): string | undefined;
 }
 
@@ -101,6 +101,7 @@ export interface IRemoteAttachmentInfo {
 	readonly transportId: string;
 	readonly label: string;
 	readonly themeIcon: string;
+	readonly remotePermissionResponses: boolean;
 }
 
 /** Adapter implemented by Mission Control now and Telegram in later phases. */
@@ -122,6 +123,7 @@ export interface IRemoteControlRegistry {
 
 	registerTransport(transport: IRemoteControlTransport): IDisposable;
 	attachTransport(sessionId: string, transportId: string): IDisposable;
+	suspendTransport(transportId: string): void;
 	detachTransport(transportId: string): void;
 	isTransportAttached(sessionId: string, transportId?: string): boolean;
 	getAttachments(sessionId: string): readonly IRemoteAttachmentInfo[];

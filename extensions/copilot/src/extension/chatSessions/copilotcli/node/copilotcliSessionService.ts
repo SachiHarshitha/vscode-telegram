@@ -525,13 +525,18 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 	}
 
 	private async constructSessionItemFromWrappedSession(session: RefCountedSession, token: CancellationToken): Promise<ICopilotCLISessionItem | undefined> {
-		const label = (await this.getSessionTitle(session.object.sessionId, token)) || this._cachedSessionItems.get(session.object.sessionId)?.label || labelFromPrompt(session.object.pendingPrompt ?? '');
+		const sessionId = session.object.sessionId;
+		const cachedItem = this._cachedSessionItems.get(sessionId);
+		const workingDirectory = getWorkingDirectory(session.object.workspace) ?? cachedItem?.workingDirectory ?? this._sessionWorkingDirectories.get(sessionId);
+		this._sessionWorkingDirectories.set(sessionId, workingDirectory);
+		const label = (await this.getSessionTitle(sessionId, token)) || cachedItem?.label || labelFromPrompt(session.object.pendingPrompt ?? '');
 		const createTime = Date.now();
 		return {
-			id: session.object.sessionId,
+			id: sessionId,
 			label,
 			status: session.object.status,
-			timing: this._cachedSessionItems.get(session.object.sessionId)?.timing ?? { created: createTime, startTime: createTime },
+			timing: cachedItem?.timing ?? { created: createTime, startTime: createTime },
+			workingDirectory,
 		};
 	}
 

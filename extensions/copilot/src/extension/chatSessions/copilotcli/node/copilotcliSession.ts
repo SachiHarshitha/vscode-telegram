@@ -216,7 +216,7 @@ export interface ICopilotCLISession extends IDisposable {
 	attachStream(stream: vscode.ChatResponseStream): IDisposable;
 	getReplayEvents(): readonly SessionEvent[];
 	abort(): Promise<void>;
-	notifyRemoteAttachment(label: string): void;
+	notifyRemoteAttachment(label: string, remotePermissionResponses: boolean): void;
 	getCurrentMode(): string | undefined;
 	selectCustomAgent(name: string | undefined): Promise<void>;
 	renameSdkSession(title: string): Promise<void>;
@@ -335,12 +335,14 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 		await this._sdkSession.abort();
 	}
 
-	notifyRemoteAttachment(label: string): void {
+	notifyRemoteAttachment(label: string, remotePermissionResponses: boolean): void {
 		if (!this._streamRouter.hasAttachedStream || this._remoteAttachmentNotifications.has(label)) {
 			return;
 		}
 		this._remoteAttachmentNotifications.add(label);
-		this._stream.warning(l10n.t('This session is now remotely controllable from {0}. Permission prompts may be answered remotely.', label));
+		this._stream.warning(remotePermissionResponses
+			? l10n.t('This session is now remotely controllable from {0}. Supported permission prompts may be answered remotely.', label)
+			: l10n.t('This session is now remotely controllable from {0}. Permission prompts must be answered locally.', label));
 	}
 
 	getCurrentMode(): string | undefined {

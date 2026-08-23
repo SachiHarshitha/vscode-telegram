@@ -66,6 +66,10 @@ export class TelegramAuthorization extends Disposable {
 		return this.storedIdentity ? toPublicIdentity(this.storedIdentity) : undefined;
 	}
 
+	hasPairedIdentityForToken(tokenFingerprint: string): boolean {
+		return this.storedIdentity?.tokenFingerprint === tokenFingerprint;
+	}
+
 	async getBotToken(): Promise<string | undefined> {
 		let value: string | undefined;
 		try {
@@ -148,6 +152,29 @@ export class TelegramAuthorization extends Disposable {
 	}
 
 	async forgetBotToken(): Promise<void> {
+		let revokeError: unknown;
+		try {
+			await this.revokePairing();
+		} catch (error) {
+			revokeError = error;
+		}
+		try {
+			await this.extensionContext.secrets.delete(botTokenSecretKey);
+		} catch {
+			throw new TelegramSecurityStateError('delete');
+		}
+		if (revokeError) {
+			throw new TelegramSecurityStateError('delete');
+		}
+	}
+
+	/** Deletes only the token and identity staged by an initial setup that never completed. */
+	async discardStagedConfiguration(expectedTokenFingerprint: string): Promise<void> {
+		validateTokenFingerprint(expectedTokenFingerprint);
+		const botToken = await this.getBotToken();
+		if (!botToken || getTelegramBotTokenFingerprint(botToken) !== expectedTokenFingerprint) {
+			return;
+		}
 		let revokeError: unknown;
 		try {
 			await this.revokePairing();

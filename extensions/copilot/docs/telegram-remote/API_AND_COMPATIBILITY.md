@@ -33,8 +33,8 @@ The goal is to make upgrade risk explicit.
 | Intent/status | `assistant.intent` and session state events | Copilot SDK | Yes where exposed | Do not synthesize hidden reasoning |
 | Reasoning stream | `assistant.reasoning[_delta]` | Copilot SDK | Conditional | Model/provider may expose readable, opaque or no reasoning |
 | Tool activity | `tool.execution_start`, `tool.execution_progress`, `tool.execution_partial_result`, `tool.execution_complete` | Copilot SDK 1.0.73 | Yes | Phase 5 uses only these verified event names |
-| Permission prompt | `permission.requested` | Copilot SDK/upstream | Yes | Remote callback must correlate request ID |
-| Permission response | registry result consumed by `CopilotCLISession`, then SDK `respondToPermission()` | Downstream seam + SDK | Yes | Do not expose raw SDK session to Telegram |
+| Permission prompt | `permission.requested` | Copilot SDK/upstream | Phase 6 for Telegram | Current Telegram capability is false; local UI remains authoritative |
+| Permission response | registry result consumed by `CopilotCLISession`, then SDK `respondToPermission()` | Downstream seam + SDK | Phase 6 for Telegram | Future design only; no raw SDK session exposure |
 | Agent question | `user_input.requested` | Copilot SDK | Yes | Choice/freeform input |
 | User-input response | registry result consumed by `CopilotCLISession`, then SDK `respondToUserInput()` | Downstream seam + SDK | Yes | P0 |
 | Plan approval/exit | current session/SDK plan request APIs | Upstream + SDK | Yes | P1; follow current source API names |
@@ -55,10 +55,12 @@ The goal is to make upgrade risk explicit.
 | Telegram long polling | `getUpdates` | Telegram Bot API | Yes | Default transport |
 | Telegram buttons | `InlineKeyboardMarkup` / callback queries | Telegram Bot API | Yes | Permissions, models, sessions |
 | Live status edit | `editMessageText` / reply markup edit | Telegram Bot API | Yes | Needed to avoid chat flooding |
+| Safe final-answer formatting | existing `markdown-it` -> strict Telegram HTML subset | Existing dependency + Telegram Bot API | Yes | Raw HTML escaped; unsafe schemes removed; independently balanced 4,096-character chunks |
 | Telegram file download | `getFile` / file endpoint | Telegram Bot API | Yes | P1 |
 | Session-list remote indicator | `ChatSessionItem.description` / `tooltip` | Proposed VS Code API | Yes | `badge`, `status` and `metadata` are already consumed upstream; these two are free |
 | Live indicator refresh | existing `refreshSession({reason:'update'})` on the content provider | Upstream internal | Yes | No new provider or API proposal needed |
 | Status bar indicator + kill switch | `vscode.window.createStatusBarItem` | Stable VS Code API | Yes | Precedent: `copilot.networkStatus` in `extension/log/vscode-node/loggingActions.ts` |
+| Enable/reconnect lifecycle | VS Code commands + SecretStorage/globalState + generation-bound contribution startup | Stable VS Code + downstream seam | Yes | Four-way readiness, separate runtime admission, workspace-only re-consent, recovery preservation, one poller |
 | Modal consent gate | `vscode.window.showWarningMessage(..., { modal: true })` | Stable VS Code API | Yes | Cancel is the default action |
 | Setup wizard | `window.showInputBox({ password: true })` / `showQuickPick` | Stable VS Code API | Yes | No webview in V1 |
 | Bot token storage | `IVSCodeExtensionContext.secrets` | Stable VS Code API | Yes | Pattern: `byok/vscode-node/byokStorageService.ts` |
@@ -214,7 +216,7 @@ V1 relies on stable Bot API primitives:
 - bot identity validation (`getMe`),
 - optional file APIs later.
 
-Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. Phase 3 adds SecretStorage, private-chat pairing and authorization; Phase 3b adds the explicit versioned consent gate; Phase 4 uses the authorized update boundary for session selection and native prompt/steer/abort routing; Phase 5 projects the verified registry event subset through bounded MarkdownV2 sends/edits. Networking remains disabled by default.
+Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. Phase 3 adds SecretStorage, private-chat pairing and authorization; Phase 3b adds the explicit versioned consent gate; Phase 4/4.1 use the authorized update plus current-workspace session-scope boundaries for native prompt/steer/abort routing; Phase 5/5.1 project bounded semantic HTML activity and separately sanitized final answers. Networking remains disabled by default and generation-bound Enable/Reconnect cannot create a second poller.
 
 Reference: https://core.telegram.org/bots/api
 

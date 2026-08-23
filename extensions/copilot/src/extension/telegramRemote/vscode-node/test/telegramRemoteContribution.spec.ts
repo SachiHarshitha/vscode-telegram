@@ -71,6 +71,28 @@ describe('TelegramRemoteContribution', () => {
 		contribution.dispose();
 	});
 
+	it('admits only the matching pair command while pairing is pending', async () => {
+		const { contribution } = createContribution(storageRoot);
+		const transport = mockTransportStartup(contribution);
+		const authorizedHandler = vi.fn(async (_accepted: TelegramAuthorizedUpdate) => { });
+		contribution.registerAuthorizedUpdateHandler(authorizedHandler);
+		const pairing = await contribution.startPairing(botToken, consentScopeFingerprint);
+
+		await transport.handleUpdate(telegramMessageUpdate(1, '/status'));
+		await transport.handleUpdate(telegramMessageUpdate(2, '/sessions'));
+		await transport.handleUpdate(telegramMessageUpdate(3, 'Run a prompt'));
+		await transport.handleUpdate(telegramCallbackUpdate(4, 'tr1:opaque-callback'));
+
+		expect({ state: contribution.authorizationState, routed: authorizedHandler.mock.calls.length, paired: contribution.pairedIdentity }).toEqual({
+			state: 'pairing-only',
+			routed: 0,
+			paired: undefined,
+		});
+		await transport.handleUpdate(telegramMessageUpdate(5, pairing.challenge.command));
+		expect({ state: contribution.authorizationState, routed: authorizedHandler.mock.calls.length }).toEqual({ state: 'authorized', routed: 0 });
+		contribution.dispose();
+	});
+
 	it('fails pairing closed when metadata persistence fails', async () => {
 		const { contribution, context, logService } = createContribution(storageRoot);
 		const transport = mockTransportStartup(contribution);
@@ -97,9 +119,123 @@ describe('TelegramRemoteContribution', () => {
 
 		await contribution.consent.begin(tokenFingerprint, consentScopeFingerprint);
 		await contribution.consent.commit(tokenFingerprint);
+		await contribution.authorization.pair({ userId: 101, chatId: 202, firstName: 'Operator' }, tokenFingerprint);
 		mockTransportStartup(contribution);
 		await expect(contribution.resumeStoredConnection(consentScopeFingerprint)).resolves.toBe(bot);
 		contribution.dispose();
+	});
+
+	it('requires token, exact consent, and token-bound pairing before stored reconnection', async () => {
+		const { contribution, context } = createContribution(storageRoot);
+		expect(await contribution.getStoredConnectionReadiness(consentScopeFingerprint)).toBe('missing-token');
+
+		const tokenFingerprint = await contribution.authorization.storeBotToken(botToken);
+		expect(await contribution.getStoredConnectionReadiness(consentScopeFingerprint)).toBe('missing-pairing');
+		await contribution.consent.begin(tokenFingerprint, consentScopeFingerprint);
+		await contribution.consent.commit(tokenFingerprint);
+		expect(await contribution.getStoredConnectionReadiness(consentScopeFingerprint)).toBe('missing-pairing');
+		await contribution.authorization.pair({ userId: 101, chatId: 202, firstName: 'Operator' }, tokenFingerprint);
+		expect(await contribution.getStoredConnectionReadiness(consentScopeFingerprint)).toBe('ready');
+		expect(await contribution.getStoredConnectionReadiness('111111111111111111111111')).toBe('needs-workspace-consent');
+
+		const tokenKey = [...context.secrets.values.keys()][0];
+		context.secrets.values.set(tokenKey, '654321:replacement-token');
+		expect(await contribution.getStoredConnectionReadiness(consentScopeFingerprint)).toBe('missing-pairing');
+		contribution.dispose();
+	});
+
+	it('blocks workspace A commands in workspace B and reuses the token and paired user after local consent', async () => {
+		const { contribution } = createContribution(storageRoot);
+		const tokenFingerprint = await contribution.authorization.storeBotToken(botToken);
+		await contribution.consent.begin(tokenFingerprint, consentScopeFingerprint);
+		await contribution.consent.commit(tokenFingerprint);
+		await contribution.authorization.pair({ userId: 101, chatId: 202, firstName: 'Operator' }, tokenFingerprint);
+		const originalIdentity = contribution.pairedIdentity;
+		const transport = mockTransportStartup(contribution);
+		const pairingBegin = vi.spyOn(contribution.pairing, 'begin');
+		const authorizedHandler = vi.fn(async (_accepted: TelegramAuthorizedUpdate) => { });
+		contribution.registerAuthorizedUpdateHandler(authorizedHandler);
+		await contribution.resumeStoredConnection(consentScopeFingerprint);
+
+		const workspaceB = '111111111111111111111111';
+		contribution.requireWorkspaceConsent('workspace-changed');
+		await transport.handleUpdate(telegramMessageUpdate(1, '/status'));
+		expect({ state: contribution.authorizationState, routed: authorizedHandler.mock.calls.length }).toEqual({ state: 'needs-consent', routed: 0 });
+
+		await contribution.authorizeWorkspace(workspaceB);
+		await contribution.resumeStoredConnection(workspaceB);
+		expect({
+			state: contribution.authorizationState,
+			readiness: await contribution.getStoredConnectionReadiness(workspaceB),
+			identity: contribution.pairedIdentity,
+			token: await contribution.authorization.getBotToken(),
+			pairingChallenges: pairingBegin.mock.calls.length,
+		}).toEqual({ state: 'authorized', readiness: 'ready', identity: originalIdentity, token: botToken, pairingChallenges: 0 });
+		contribution.dispose();
+	});
+
+	it('preserves saved credentials and pairing when a re-pair challenge expires', async () => {
+		const { contribution, logService } = createContribution(storageRoot);
+		const tokenFingerprint = await contribution.authorization.storeBotToken(botToken);
+		await contribution.consent.begin(tokenFingerprint, consentScopeFingerprint);
+		await contribution.consent.commit(tokenFingerprint);
+		await contribution.authorization.pair({ userId: 101, chatId: 202, firstName: 'Operator' }, tokenFingerprint);
+		const originalIdentity = contribution.pairedIdentity;
+		mockTransportStartup(contribution);
+		await contribution.resumeStoredConnection(consentScopeFingerprint);
+		contribution.beginPairing();
+
+		await contribution.cancelPairingPreservingConfiguration(consentScopeFingerprint, true);
+
+		expect({
+			readiness: await contribution.getStoredConnectionReadiness(consentScopeFingerprint),
+			identity: contribution.pairedIdentity,
+			token: await contribution.authorization.getBotToken(),
+		}).toEqual({ readiness: 'ready', identity: originalIdentity, token: botToken });
+		expect(logService.info).toHaveBeenCalledWith('[TelegramRemote] pairing=expired configuration-preserved=true');
+		contribution.dispose();
+	});
+
+	it('reuses stored credentials after disable and deduplicates concurrent enable attempts', async () => {
+		const { contribution } = createContribution(storageRoot);
+		const tokenFingerprint = await contribution.authorization.storeBotToken(botToken);
+		await contribution.consent.begin(tokenFingerprint, consentScopeFingerprint);
+		await contribution.consent.commit(tokenFingerprint);
+		await contribution.authorization.pair({ userId: 101, chatId: 202, firstName: 'Operator' }, tokenFingerprint);
+		const transport = mockTransportStartup(contribution);
+
+		const [first, duplicate] = await Promise.all([
+			contribution.resumeStoredConnection(consentScopeFingerprint),
+			contribution.resumeStoredConnection(consentScopeFingerprint),
+		]);
+		expect({ first, duplicate, starts: transport.start.mock.calls.length }).toEqual({ first: bot, duplicate: bot, starts: 1 });
+		await contribution.disableRemoteAccess();
+		await expect(contribution.resumeStoredConnection(consentScopeFingerprint)).resolves.toBe(bot);
+		expect(transport.start).toHaveBeenCalledTimes(2);
+		contribution.dispose();
+	});
+
+	it('restores after reload and can retry a failed stored reconnection without replacing the token', async () => {
+		const first = createContribution(storageRoot);
+		const tokenFingerprint = await first.contribution.authorization.storeBotToken(botToken);
+		await first.contribution.consent.begin(tokenFingerprint, consentScopeFingerprint);
+		await first.contribution.consent.commit(tokenFingerprint);
+		await first.contribution.authorization.pair({ userId: 101, chatId: 202, firstName: 'Operator' }, tokenFingerprint);
+		first.contribution.dispose();
+
+		const reloaded = createContribution(storageRoot, first.context);
+		const start = vi.spyOn(reloaded.contribution.transport, 'start');
+		vi.spyOn(reloaded.contribution.transport, 'stop').mockResolvedValue();
+		start.mockRejectedValueOnce(new TelegramBotApiError('network', 'Offline.'));
+		await expect(reloaded.contribution.resumeStoredConnection(consentScopeFingerprint)).rejects.toMatchObject({ kind: 'network' });
+		expect(await reloaded.contribution.getStoredConnectionReadiness(consentScopeFingerprint)).toBe('ready');
+		start.mockImplementation(async (_token, _handler, validatedHandler?: TelegramValidatedHandler) => {
+			await validatedHandler?.(bot);
+			return bot;
+		});
+		await expect(reloaded.contribution.resumeStoredConnection(consentScopeFingerprint)).resolves.toBe(bot);
+		expect(start).toHaveBeenCalledTimes(2);
+		reloaded.contribution.dispose();
 	});
 
 	it('authorizes opaque callbacks and invalidates them synchronously on disable or revoke', async () => {
@@ -190,18 +326,19 @@ describe('TelegramRemoteContribution', () => {
 	});
 });
 
-function createContribution(storageRoot: string): {
+function createContribution(storageRoot: string, existingContext?: TestTelegramExtensionContext): {
 	readonly contribution: TelegramRemoteContribution;
 	readonly context: TestTelegramExtensionContext;
 	readonly registry: RemoteControlRegistry;
-	readonly logService: ILogService & { error: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> };
+	readonly logService: ILogService & { error: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
 } {
 	const logService = new class extends mock<ILogService>() {
 		override error = vi.fn();
 		override warn = vi.fn();
+		override info = vi.fn();
 	};
 	const registry = new RemoteControlRegistry(logService);
-	const context = new TestTelegramExtensionContext(storageRoot);
+	const context = existingContext ?? new TestTelegramExtensionContext(storageRoot);
 	const contribution = new TelegramRemoteContribution(
 		context,
 		registry,
@@ -215,11 +352,12 @@ function mockTransportStartup(contribution: TelegramRemoteContribution): {
 	readonly handleUpdate: (update: TelegramUpdate) => Promise<void>;
 	readonly sendMessage: ReturnType<typeof vi.fn>;
 	readonly stop: ReturnType<typeof vi.fn>;
+	readonly start: ReturnType<typeof vi.fn>;
 } {
 	let handleUpdate: ((update: TelegramUpdate) => Promise<void>) | undefined;
 	const sendMessage = vi.spyOn(contribution.transport, 'sendMessage').mockResolvedValue({ message_id: 1, date: 1, chat: { id: 202, type: 'private' } });
 	const stop = vi.spyOn(contribution.transport, 'stop').mockResolvedValue();
-	vi.spyOn(contribution.transport, 'start').mockImplementation(async (_token, updateHandler, validatedHandler?: TelegramValidatedHandler) => {
+	const start = vi.spyOn(contribution.transport, 'start').mockImplementation(async (_token, updateHandler, validatedHandler?: TelegramValidatedHandler) => {
 		handleUpdate = updateHandler;
 		await validatedHandler?.(bot);
 		return bot;
@@ -228,5 +366,6 @@ function mockTransportStartup(contribution: TelegramRemoteContribution): {
 		handleUpdate: update => handleUpdate ? handleUpdate(update) : Promise.reject(new Error('Transport has not started.')),
 		sendMessage,
 		stop,
+		start,
 	};
 }

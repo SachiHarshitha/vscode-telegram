@@ -81,8 +81,8 @@
     "chatSessionCustomizationProvider"
   ],
   "telegramRemote": {
-    "implementationPhase": 5,
-    "patchRevision": 7,
+    "implementationPhase": 5.2,
+    "patchRevision": 10,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
@@ -96,7 +96,11 @@
     "nativeIndicatorsRegistered": true,
     "sessionRoutingRegistered": true,
     "authorizedPromptDispatchRegistered": true,
-    "eventProjectionRegistered": true
+    "eventProjectionRegistered": true,
+    "workspaceSessionScopeRegistered": true,
+    "activityDetailRegistered": true,
+    "safeHtmlFinalAnswerRegistered": true,
+    "lifecycleRecoveryRegistered": true
   },
   "baselineValidation": {
     "environment": {
@@ -435,7 +439,7 @@
       "command": ".\\script\\telegram-remote\\test-phase5.ps1",
       "status": "passed",
       "testFilesPassed": 22,
-      "testsPassed": 211
+      "testsPassed": 222
     },
     "coverage": [
       "verified @github/copilot 1.0.73 persisted and ephemeral event projection",
@@ -474,6 +478,80 @@
     "realBotActivityEndToEnd": {
       "status": "not-run",
       "reason": "A paired Telegram chat and an active native Copilot turn are required; the automated suite validates Bot API send/edit behavior with deterministic mocks."
+    }
+  },
+  "phase4_1Validation": {
+    "capturedAt": "2026-08-23",
+    "sourceCommit": "d15b9d9237760f6f9eb7be0083815948aaa1c9ba",
+    "securityPolicy": "strict-current-consented-workspace-roots",
+    "crossWorkspaceLocalApprovalImplemented": false,
+    "coverage": [
+      "empty window with foreign session returns no Telegram metadata",
+      "missing or invalid working directory fails closed",
+      "Windows case-insensitive URI identity, nested and multi-root authorization",
+      "sibling path and URI authority mismatch rejection",
+      "callback, dispatch, Stop, replay/activity/final delivery scope revalidation",
+      "consent v2 and selection v2 fail-closed restoration"
+    ]
+  },
+  "phase5_1Validation": {
+    "capturedAt": "2026-08-23",
+    "sourceCommit": "d15b9d9237760f6f9eb7be0083815948aaa1c9ba",
+    "phase5_1Runner": {
+      "command": ".\\script\\telegram-remote\\test-phase5.1.ps1",
+      "status": "passed",
+      "testFilesPassed": 25,
+      "testsPassed": 232
+    },
+    "coverage": [
+      "compact, detailed and debug activity disclosure modes",
+      "toolCallId name correlation and replay/new-generation isolation",
+      "picker-to-status editing and one activity card Stop lifecycle",
+      "separate exactly-once final answer with strict Telegram-safe HTML",
+      "capability-accurate setup, status and native attachment warnings",
+      "disable-enable and disable-reload-enable without token re-entry",
+      "retryable reconnect, stale consent, replaced token and missing pairing setup fallback",
+      "concurrent lifecycle generation cancellation and resume deduplication"
+    ],
+    "extensionTypecheck": {
+      "command": "npx tsc --noEmit --project tsconfig.json --pretty false",
+      "status": "passed"
+    },
+    "aggregateTypecheck": {
+      "command": "npm run typecheck",
+      "status": "baseline-failed",
+      "telegramAffected": false,
+      "reason": "The main extension project passes; the existing simulation-workbench project reports unrelated WebSocket/TextDecoder type incompatibilities in chatLibMain.ts, completionsFetchServiceImpl.ts, chatWebSocketManager.ts and stream.ts."
+    },
+    "extensionLint": {
+      "command": "targeted eslint for changed TypeScript files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "extensionBundle": {
+      "command": "npm run compile (extensions/copilot)",
+      "node": "v24.18.0",
+      "status": "passed",
+      "errors": 0
+    },
+    "runtimeSmoke": {
+      "node": "v24.18.0",
+      "status": "passed",
+      "workspaceTrustDisabled": true,
+      "extensionActivated": true,
+      "controllerMarkerObserved": "[TelegramRemote] vscode-telegram/telegram-remote; patch=9; host=controller; phase=5.1; remote-control-registry=ready; telegram-transport=ready; telegram-security=workspace-scoped; telegram-consent=ready; telegram-ui=consolidated; telegram-routing=ready; telegram-activity=detail-aware; telegram-network=consent-gated",
+      "enableCommandRegistered": true,
+      "enableCommandPaletteVisibleWhileDisabled": true,
+      "telegramNetworkObservedWhileDisabled": false,
+      "launchFlags": [
+        "--disable-workspace-trust",
+        "--log=trace",
+        "--log=GitHub.copilot-chat:trace"
+      ]
+    },
+    "realBotEndToEnd": {
+      "status": "not-run",
+      "reason": "The human persistent-profile checklist must verify the real bot; automated tests never read SecretStorage credentials or .env."
     }
   }
 }
