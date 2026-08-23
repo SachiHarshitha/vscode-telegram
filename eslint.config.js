@@ -2966,6 +2966,24 @@ export default defineConfig(
 			],
 		}
 	},
+	// Downstream-owned Telegram Remote sources use the fork copyright holder.
+	{
+		files: [
+			'extensions/copilot/src/extension/telegramRemote/**/*.{ts,tsx}',
+		],
+		rules: {
+			'header/header': [
+				2,
+				'block',
+				[
+					'---------------------------------------------------------------------------------------------',
+					' *  Copyright (c) 2026 Sachith H. Liyanagama, Emagin8 UG. All rights reserved.',
+					' *  Licensed under the MIT License. See License.txt in the project root for license information.',
+					' *--------------------------------------------------------------------------------------------',
+				],
+			],
+		},
+	},
 	// Forbid new JavaScript files - use TypeScript instead.
 	// The allowlist of pre-existing JS/CJS/MJS files lives in
 	// `.eslint-allowed-javascript-files`, which is gated by CODEOWNERS.

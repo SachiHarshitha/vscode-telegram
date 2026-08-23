@@ -36,7 +36,7 @@ import { ChatSessionOptionsMap, ChatSessionStatus, ChatSessionsExtensions, IAsyn
 import { ChatAgentLocation, ChatModeKind } from '../../common/constants.js';
 import { CHAT_CATEGORY } from '../actions/chatActions.js';
 import { IChatEditorOptions } from '../widgetHosts/editor/chatEditor.js';
-import { IChatService, ResponseModelState } from '../../common/chatService/chatService.js';
+import { ChatRequestQueueKind, ChatSendResult, IChatService, ResponseModelState } from '../../common/chatService/chatService.js';
 import { autorun, observableFromEvent } from '../../../../../base/common/observable.js';
 import { IChatRequestVariableEntry, PromptFileVariableKind, toPromptFileVariableEntry } from '../../common/attachments/chatVariableEntries.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
@@ -59,6 +59,23 @@ import { generateUuid } from '../../../../../base/common/uuid.js';
 import { AGENT_HOST_ENABLED_CONTEXT_KEY } from '../../../../../platform/agentHost/common/agentHostEnablementService.js';
 import { AgentHostCodexAgentEnabledSettingId, CodexPreferAgentHostEditorSettingId } from '../../../../../platform/agentHost/common/agentService.js';
 import { IsSessionsWindowContext } from '../../../../common/contextkeys.js';
+
+export type ChatSessionPromptQueue = 'queued' | 'steering';
+
+export function getChatSessionPromptQueueKind(queue: ChatSessionPromptQueue | undefined): ChatRequestQueueKind | undefined {
+	return queue === 'steering' ? ChatRequestQueueKind.Steering : queue === 'queued' ? ChatRequestQueueKind.Queued : undefined;
+}
+
+export async function waitForChatSessionPromptResult(initialResult: ChatSendResult): Promise<void> {
+	let result = initialResult;
+	while (result.kind === 'queued') {
+		result = await result.deferred;
+	}
+	if (result.kind === 'rejected') {
+		throw new Error(result.reason);
+	}
+	await result.data.responseCompletePromise;
+}
 
 const extensionPoint = ExtensionsRegistry.registerExtensionPoint<IChatSessionsExtensionPoint[]>({
 	extensionPoint: 'chatSessions',
@@ -670,7 +687,7 @@ export class ChatSessionsService extends Disposable implements IChatSessionsServ
 					});
 				}
 
-				async run(accessor: ServicesAccessor, chatOptions?: { resource: UriComponents; prompt: string; attachedContext?: IChatRequestVariableEntry[] }): Promise<void> {
+				async run(accessor: ServicesAccessor, chatOptions?: { resource: UriComponents; prompt: string; attachedContext?: IChatRequestVariableEntry[]; queue?: ChatSessionPromptQueue }): Promise<void> {
 					const chatService = accessor.get(IChatService);
 					const customizationHarnessService = accessor.get(ICustomizationHarnessService);
 					const toolsService = accessor.get(ILanguageModelToolsService);
@@ -687,12 +704,9 @@ export class ChatSessionsService extends Disposable implements IChatSessionsServ
 								attachedContext = [promptFile, ...(attachedContext ?? [])];
 							}
 
-							const result = await chatService.sendRequest(sessionResource, chatOptions.prompt, { agentIdSilent: type, attachedContext });
-							if (result.kind === 'queued') {
-								await result.deferred;
-							} else if (result.kind === 'sent') {
-								await result.data.responseCompletePromise;
-							}
+							const queue = getChatSessionPromptQueueKind(chatOptions.queue);
+							const result = await chatService.sendRequest(sessionResource, chatOptions.prompt, { agentIdSilent: type, attachedContext, queue });
+							await waitForChatSessionPromptResult(result);
 						} finally {
 							ref?.dispose();
 						}

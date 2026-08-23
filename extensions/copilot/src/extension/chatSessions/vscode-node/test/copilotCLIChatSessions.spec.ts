@@ -26,6 +26,7 @@ import { ChatSessionWorktreeProperties, IChatSessionWorktreeService } from '../.
 import { IFolderRepositoryManager, IsolationMode } from '../../common/folderRepositoryManager';
 import { emptyWorkspaceInfo } from '../../common/workspaceInfo';
 import { IChatDelegationSummaryService } from '../../copilotcli/common/delegationSummaryService';
+import { createPendingCopilotCLIRequestMarker } from '../../copilotcli/common/pendingRequestContext';
 import { SessionIdForCLI } from '../../copilotcli/common/utils';
 import { ICopilotCLIModels, ICopilotCLISDK } from '../../copilotcli/node/copilotCli';
 import { CopilotCLIPromptResolver } from '../../copilotcli/node/copilotcliPromptResolver';
@@ -343,8 +344,12 @@ describe('CopilotCLIChatSessionParticipant', () => {
 		} as unknown as ICopilotCLISession;
 		const sessionService = new TestSessionService();
 		sessionService.isNewSessionId.mockImplementation(id => id === 'new-session');
+		let observedReferences: readonly vscode.ChatPromptReference[] | undefined;
 		const promptResolver = {
-			resolvePrompt: vi.fn(async () => ({ prompt: 'on', attachments: [] })),
+			resolvePrompt: vi.fn(async (request: vscode.ChatRequest) => {
+				observedReferences = request.references;
+				return { prompt: 'on', attachments: [] };
+			}),
 		} as unknown as CopilotCLIPromptResolver;
 		const logService = new class extends mock<ILogService>() {
 			declare readonly _serviceBrand: undefined;
@@ -410,7 +415,7 @@ describe('CopilotCLIChatSessionParticipant', () => {
 				command: 'remote',
 				prompt: 'on',
 				sessionResource: resource,
-				references: [],
+				references: [createPendingCopilotCLIRequestMarker('abandoned')],
 				tools: [],
 				toolInvocationToken: undefined,
 			} as unknown as vscode.ChatRequest,
@@ -435,6 +440,7 @@ describe('CopilotCLIChatSessionParticipant', () => {
 			CancellationToken.None,
 		);
 		expect(sessionItemProvider.refreshSession).not.toHaveBeenCalled();
+		expect(observedReferences).toEqual([]);
 	});
 });
 

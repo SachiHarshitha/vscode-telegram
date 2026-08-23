@@ -38,10 +38,14 @@ import { CopilotCLIAgents, CopilotCLIModels, CopilotCLISDK, ICopilotCLIAgents, I
 import { CopilotCLIImageSupport, ICopilotCLIImageSupport } from '../copilotcli/node/copilotCLIImageSupport';
 import { CopilotCLIPromptResolver } from '../copilotcli/node/copilotcliPromptResolver';
 import { CopilotCLISessionService, ICopilotCLISessionService } from '../copilotcli/node/copilotcliSessionService';
+import { RemoteControlRegistry } from '../../telegramRemote/node/remoteControlRegistry';
 import { CopilotCLISkills, ICopilotCLISkills } from '../copilotcli/node/copilotCLISkills';
 import { CopilotCLIMCPHandler, ICopilotCLIMCPHandler } from '../copilotcli/node/mcpHandler';
 import { IUserQuestionHandler } from '../copilotcli/node/userInputHelpers';
 import { CopilotCLIContrib, getServices } from '../copilotcli/vscode-node/contribution';
+import { MissionControlTransport } from '../../telegramRemote/vscode-node/missionControlTransport';
+import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../telegramRemote/vscode-node/remotePromptDispatcher';
+import { IRemoteControlRegistry } from '../../telegramRemote/common/remoteControlTypes';
 import { CopilotCLIFolderMruService } from '../copilotcli/vscode-node/copilotCLIFolderMru';
 import { ICopilotCLISessionTracker } from '../copilotcli/vscode-node/copilotCLISessionTracker';
 import { CustomSessionTitleService } from '../copilotcli/vscode-node/customSessionTitleServiceImpl';
@@ -125,6 +129,8 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			new ServiceCollection(
 				[IAgentSessionsWorkspace, new SyncDescriptor(AgentSessionsWorkspace)],
 				[ICopilotCLIImageSupport, new SyncDescriptor(CopilotCLIImageSupport)],
+				[IRemoteControlRegistry, new SyncDescriptor(RemoteControlRegistry)],
+				[IRemotePromptDispatcher, new SyncDescriptor(RemotePromptDispatcher)],
 				[ICopilotCLISessionService, new SyncDescriptor(CopilotCLISessionService)],
 				[IChatDelegationSummaryService, delegationSummary],
 				[ICopilotCLIModels, new SyncDescriptor(CopilotCLIModels)],
@@ -182,6 +188,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 
 		this._register(copilotcliAgentInstaService.invokeFunction(accessor => accessor.get(ICopilotCLISessionTracker)));
 		this._register(copilotcliAgentInstaService.createInstance(CopilotCLIContrib));
+		this._register(copilotcliAgentInstaService.createInstance(MissionControlTransport));
 
 		copilotModels.registerLanguageModelChatProvider(vscode.lm);
 
@@ -211,7 +218,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			return;
 		}
 
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=0; contribution=not-registered`);
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=1; remote-control-registry=ready; telegram-contribution=not-registered`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

@@ -17,6 +17,7 @@ import { ChatVariablesCollection, extractDebugTargetSessionIds, isPromptFile } f
 import { FolderRepositoryInfo, IFolderRepositoryManager, IsolationMode } from '../../common/folderRepositoryManager';
 import { emptyWorkspaceInfo, getWorkingDirectory, isIsolationEnabled, IWorkspaceInfo } from '../../common/workspaceInfo';
 import { SessionIdForCLI } from '../../copilotcli/common/utils';
+import { IRemoteControlRegistry } from '../../../telegramRemote/common/remoteControlTypes';
 import { COPILOT_CLI_CONTEXT_SIZE_PROPERTY, COPILOT_CLI_REASONING_EFFORT_PROPERTY, ICopilotCLIAgents, ICopilotCLIModels, resolveContextTier } from '../../copilotcli/node/copilotCli';
 import { ICopilotCLISession } from '../../copilotcli/node/copilotcliSession';
 import { ICopilotCLISessionService } from '../../copilotcli/node/copilotcliSessionService';
@@ -89,6 +90,7 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 		@IPromptsService private readonly promptsService: IPromptsService,
 		@ILogService private readonly logService: ILogService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IRemoteControlRegistry private readonly remoteControlRegistry: IRemoteControlRegistry,
 	) { }
 
 	async getOrCreateSession(
@@ -128,6 +130,9 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 
 		disposables.add(session);
 		disposables.add(session.object.attachStream(stream));
+		for (const label of this.remoteControlRegistry.getAttachedTransportLabels(session.object.sessionId)) {
+			session.object.notifyRemoteAttachment(label);
+		}
 		session.object.setPermissionLevel(request.permissionLevel);
 
 		return { session, isNewSession, model, agent, trusted };

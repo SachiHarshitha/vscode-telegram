@@ -1,10 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Copyright (c) 2026 Sachith H. Liyanagama, Emagin8 UG. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 export const TELEGRAM_REMOTE_BUILD_MARKER = 'vscode-telegram/telegram-remote';
-export const TELEGRAM_REMOTE_PATCH_REVISION = 1;
+export const TELEGRAM_REMOTE_PATCH_REVISION = 2;
 
 export interface TelegramRemoteHostEnvironment {
 	readonly sessionController: boolean;

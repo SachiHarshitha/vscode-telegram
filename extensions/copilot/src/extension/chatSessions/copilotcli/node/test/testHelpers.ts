@@ -34,6 +34,7 @@ export class MockCliSdkSession {
 		this.summary = summary;
 	};
 	public summary?: string;
+	private readonly eventHandlers = new Map<string, Set<(event: { type: string; data: unknown }) => void>>();
 	constructor(public readonly sessionId: string, public readonly startTime: Date) { }
 	getChatContextMessages(): Promise<{}[]> { return Promise.resolve(this.messages); }
 	getEvents(): {}[] { return this.events; }
@@ -43,8 +44,21 @@ export class MockCliSdkSession {
 		this.aborted = true;
 		return Promise.resolve();
 	}
-	emit(event: string, args: { content: string | undefined }): void {
+	on(event: string, handler: (event: { type: string; data: unknown }) => void): () => void {
+		let handlers = this.eventHandlers.get(event);
+		if (!handlers) {
+			handlers = new Set();
+			this.eventHandlers.set(event, handlers);
+		}
+		handlers.add(handler);
+		return () => handlers?.delete(handler);
+	}
+	emit(event: string, args: { content?: string }): void {
 		this.emittedEvents.push({ event, content: args.content });
+		const sessionEvent = { type: event, data: args };
+		this.events.push(sessionEvent);
+		this.eventHandlers.get(event)?.forEach(handler => handler(sessionEvent));
+		this.eventHandlers.get('*')?.forEach(handler => handler(sessionEvent));
 	}
 	clearCustomAgent() {
 		return;

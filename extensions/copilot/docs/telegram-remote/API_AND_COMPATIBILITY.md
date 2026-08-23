@@ -23,12 +23,12 @@ The goal is to make upgrade risk explicit.
 | List Copilot CLI sessions | `ICopilotCLISessionService.getAllSessions()` | Upstream internal | Yes | Preferred because Telegram targets the same VS Code sessions |
 | Get session | `ICopilotCLISessionService.getSession()` | Upstream internal | Yes | Returns `IReference<ICopilotCLISession>`; caller must dispose it |
 | Create session | `ICopilotCLISessionService.createSession()` | Upstream internal | Yes | Reuse workspace/MCP/worktree setup and dispose returned reference |
-| Session history/replay | `getChatHistory()` + session-bridge access to `sdkSession.getEvents()` | Upstream + SDK | Yes | Filter persisted replay types; buffer/deduplicate live overlap |
+| Session history/replay | `getChatHistory()` + `ICopilotCLISession.getReplayEvents()` | Upstream + SDK | Yes | Phase 1 filters persisted replay types and buffers/deduplicates live overlap without exposing the SDK session |
 | Normal prompt | pending request context + `workbench.action.chat.openSessionWithPrompt.copilotcli` | Upstream internal command | Yes in current fork | Dispatch without awaiting the full turn; required for real `ChatRequest`/token; no direct SDK send |
 | Mid-turn steering | same native request path, then upstream SDK `send(... mode: 'immediate')` | Upstream internal + SDK | Yes | Busy-session detection remains inside `CopilotCLISession` |
 | Remote origin attribution | registry-created discriminated origin | Downstream seam | Required | Never infer permission/mode from `SendOptions.source` string prefixes |
 | Queueing | SDK enqueue/default send behavior | Copilot SDK | Yes | P1 |
-| Abort | registry session binding -> wrapped SDK `abort()` | Downstream seam + SDK | Yes | Not present on `ICopilotCLISession` today |
+| Abort | registry session binding -> `ICopilotCLISession.abort()` -> wrapped SDK `abort()` | Downstream seam + SDK | Yes | Implemented in Phase 1; logical attachment remains when no live wrapper is bound |
 | Assistant streaming | `assistant.message_delta`, `assistant.message` | Copilot SDK | Yes | Telegram renderer coalesces deltas |
 | Intent/status | `assistant.intent` and session state events | Copilot SDK | Yes where exposed | Do not synthesize hidden reasoning |
 | Reasoning stream | `assistant.reasoning[_delta]` | Copilot SDK | Conditional | Model/provider may expose readable, opaque or no reasoning |
@@ -98,7 +98,7 @@ These are internal source interfaces, not public third-party extension APIs. Bec
 
 Source: [`../../src/extension/chatSessions/copilotcli/node/copilotcliSession.ts`](../../src/extension/chatSessions/copilotcli/node/copilotcliSession.ts)
 
-Current source already demonstrates:
+Current source now provides:
 
 - detecting a busy session,
 - treating a new message as steering,
@@ -108,21 +108,23 @@ Current source already demonstrates:
 - permission response paths,
 - user-input response paths,
 - model updates,
-- Mission Control remote event forwarding and command processing.
+- a wrapper-lifetime transport-neutral event/replay/control bridge,
+- registry-coordinated permission and user-input response races,
+- Mission Control forwarding and command processing in `missionControlTransport.ts`.
 
 This is the most important reference implementation for Telegram remote semantics.
 
-However, `ICopilotCLISession` itself exposes none of the following:
+Phase 1 adds these narrow transport-neutral members to `ICopilotCLISession`:
 
-- persistent SDK event subscription,
-- abort,
-- `respondToPermission()`,
-- `respondToUserInput()`,
-- selected-model mutation.
+- `onDidReceiveSessionEvent`,
+- `getReplayEvents()`,
+- awaited `abort()`,
+- `notifyRemoteAttachment()`,
+- `getCurrentMode()`.
 
-Those capabilities are on the concrete wrapper/its `sdkSession` or inside request-local code. Most SDK listeners used for native rendering are registered inside `_handleRequestImplInner` and disposed with that request. Mission Control adds its own persistent wildcard listener only while remote control is active. The implementation therefore requires a small transport-neutral seam in `CopilotCLISession`; a Telegram-side cast to the concrete class is not the supported design.
+SDK response calls remain owned by `CopilotCLISession`; transports return correlated values through the registry and never receive `respondToPermission()`, `respondToUserInput()`, selected-model mutation, or raw SDK access. Native rendering listeners remain request-scoped, while one constructor-owned wildcard listener feeds the registry bridge for wrapper lifetime.
 
-Current Mission Control detection uses `source.startsWith('command-')` and then consults shared `_mcState.mcMode`. The registry refactor must replace this as a permission/mode discriminator with a typed origin carried separately from the SDK source string. It must also consolidate overlapping request/persistent Mission Control forwarding so each SDK event ID is exported once.
+Mission Control mode attribution now uses only a registry-created, runtime-validated typed origin carried separately from the SDK source string. `SendOptions.source` is telemetry/correlation data only. Registry deduplication and a single wrapper-lifetime publication point ensure each SDK event ID is exported once per attached transport.
 
 ### Controller path
 
@@ -185,7 +187,7 @@ Upstream Mission Control routes remote prompts through `workbench.action.chat.op
 
 For a third-party companion extension this would be an unsuitable core dependency. Inside this source fork it is the required current path: it creates a real `ChatRequest`, supplies the `ChatParticipantToolToken`, preserves the native request lifecycle and makes the message visible in chat. Feature-detect it, keep its arguments centralized and fail visibly when compatibility tests detect an upstream change. Direct SDK `send()` is not a V1 fallback.
 
-The command action awaits `responseCompletePromise`. Remote transports therefore dispatch it fire-and-forget, immediately acknowledge accepted input, observe the returned promise for errors and perform correlation-safe pending-context cleanup on rejection.
+The command action accepts `queue: 'queued' | 'steering'`, forwards the queue kind, awaits the eventual sent turn's `responseCompletePromise`, and throws immediate or deferred rejections. Remote transports dispatch it fire-and-forget with `queue: 'steering'`, immediately acknowledge accepted input, observe the returned promise for errors, and perform correlation-safe pending-context cleanup on rejection.
 
 ### Raw concrete session / SDK access
 

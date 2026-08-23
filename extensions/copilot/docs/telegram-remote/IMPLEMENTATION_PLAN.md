@@ -6,12 +6,12 @@ This plan was revalidated against the repository at:
 
 | Item | Value |
 | --- | --- |
-| VS Code commit | `2b514caa28dd1a2d41a4494a618b1188e03355ef` |
+| VS Code commit | `58af001e0c7b342016db51cef2a026c7791f5d58` |
 | Copilot extension | `GitHub.copilot-chat` `0.63.0` |
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Design/docs only; no Telegram source exists yet |
+| Implementation status | Phases 0 and 1 implemented and validated; Telegram network/UI contributions are not registered |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -83,6 +83,29 @@ extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts
 
 ## 4. Phase 1 — native control seam and Mission Control generalization
 
+**Status:** Implemented and validated on 2026-08-23. The controller host now composes the transport-neutral registry, native prompt dispatcher, and extracted Mission Control adapter. Telegram networking and UI remain intentionally absent until Phase 2.
+
+### Implementation record
+
+- Phase 1a uses random, bounded, expiring correlation entries and a non-model attached-context marker. Marker stripping happens at the controller participant boundary, while exact session/correlation matching controls access to the staged typed origin.
+- The internal workbench command accepts explicit queued/steering intent, waits for the actual sent turn to complete, and throws both immediate and deferred rejections. `RemotePromptDispatcher` acknowledges acceptance immediately and observes the completion promise without a direct SDK fallback.
+- Phase 1b exposes only the documented wrapper-lifetime bridge plus narrow existing session-service operations; the raw SDK session is private. Initializer-time attachment warnings cover transports attached before a response stream exists.
+- Phase 1c registers arbitrary transports and logical per-session attachments, filters supported persisted replay events, buffers the live/replay overlap, preserves ordered fan-out, deduplicates IDs, repairs self-parent links, races responders with loser cancellation, and retains logical attachment across wrapper churn.
+- Mission Control state, event export, polling, prompt dispatch, mode handling, permission/question correlation, QR/status UI, and teardown now live in `missionControlTransport.ts`/`missionControlQr.ts`. `copilotcliSession.ts` contains no Mission Control API client or poller.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Extension typecheck | Passed: `npm run typecheck` (extension, simulation workbench, worker, and completions panel projects) |
+| Phase 1 extension contracts | Passed: 9 files, 186 tests, 1 skipped; covers correlation, controller marker stripping, registry replay/order/dedup/fan-out, dispatcher failure cleanup, Mission Control prompt/mode/abort/permission/question/ack/retry/teardown, wrapper bridge, session service, API client, and initializer behavior |
+| VS Code core typecheck | Passed: `npm run typecheck-client` |
+| Full source build | Passed with zero errors: root `npm run compile`; the final Copilot bundle was rebuilt with `npm run compile` in `extensions/copilot` |
+| Native command Electron suite | Passed: 30 tests; 13 unrelated pre-existing tests remain skipped |
+| Runtime smoke | Passed in an isolated Code OSS profile with `--disable-workspace-trust --log=trace --log=GitHub.copilot-chat:trace`; `untrusted:false` and `remote-control-registry=ready` were observed |
+
+The broad legacy participant suite's assertions pass, but its process currently exits nonzero because `test/simulation/cache/base.sqlite` is an unhydrated Git LFS pointer and Git LFS is not installed on this machine. Controller-path and Phase 1 contract suites do not depend on that fixture.
+
 ### Phase 1a — correlated native prompt dispatcher
 
 Create a single transport-neutral dispatcher used by Mission Control and Telegram.
@@ -90,9 +113,9 @@ Create a single transport-neutral dispatcher used by Mission Control and Telegra
 #### Files
 
 ```text
-extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts          (new)
+extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts                   (new)
 extensions/copilot/src/extension/chatSessions/copilotcli/common/pendingRequestContext.ts       (modify)
-extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/remotePromptDispatcher.ts  (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/remotePromptDispatcher.ts           (new)
 extensions/copilot/src/extension/chatSessions/vscode-node/copilotCLIChatSessions.ts              (modify)
 src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts                   (narrow modify)
 ```
@@ -160,9 +183,10 @@ extensions/copilot/src/extension/chatSessions/copilotcli/node/test/copilotcliSes
 #### Files
 
 ```text
-extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts
-extensions/copilot/src/extension/chatSessions/copilotcli/node/remoteControlRegistry.ts             (new)
-extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/missionControlTransport.ts     (new)
+extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts
+extensions/copilot/src/extension/telegramRemote/node/remoteControlRegistry.ts                       (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/missionControlTransport.ts               (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/missionControlQr.ts                      (new)
 extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts                   (modify)
 extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts                             (composition)
 ```
@@ -310,7 +334,7 @@ extensions/copilot/src/extension/telegramRemote/node/telegramSessionState.ts  (n
 ### Files
 
 ```text
-extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteAgentEvent.ts       (new)
+extensions/copilot/src/extension/telegramRemote/common/remoteAgentEvent.ts                (new)
 extensions/copilot/src/extension/telegramRemote/node/telegramEventRenderer.ts             (new)
 extensions/copilot/src/extension/telegramRemote/node/telegramActivityCoalescer.ts          (new)
 ```
@@ -429,13 +453,10 @@ extensions/copilot/package.nls.json
 ### Downstream-owned directories
 
 ```text
-extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteControlTypes.ts
-extensions/copilot/src/extension/chatSessions/copilotcli/common/remoteAgentEvent.ts
-extensions/copilot/src/extension/chatSessions/copilotcli/node/remoteControlRegistry.ts
-extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/remotePromptDispatcher.ts
-extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/missionControlTransport.ts
 extensions/copilot/src/extension/telegramRemote/**
 ```
+
+The root `eslint.config.js` contains the path-scoped header rule for this downstream-owned directory. Existing upstream files retain the Microsoft header.
 
 ## 15. Configuration and commands
 

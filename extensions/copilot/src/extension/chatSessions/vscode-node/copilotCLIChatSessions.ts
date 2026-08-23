@@ -38,7 +38,8 @@ import { IChatFolderMruService, IFolderRepositoryManager, IsolationMode } from '
 import { getWorkingDirectory, IWorkspaceInfo } from '../common/workspaceInfo';
 import { ICustomSessionTitleService } from '../copilotcli/common/customSessionTitleService';
 import { IChatDelegationSummaryService } from '../copilotcli/common/delegationSummaryService';
-import { clearPendingCopilotCLIRequestContext, setPendingCopilotCLIRequestContext, takePendingCopilotCLIRequestContext } from '../copilotcli/common/pendingRequestContext';
+import { clearPendingCopilotCLIRequestContext, COPILOT_CLI_PENDING_REQUEST_MARKER_ID, createPendingCopilotCLIRequestCorrelationId, createPendingCopilotCLIRequestMarker, getPendingCopilotCLIRequestCorrelationId, setPendingCopilotCLIRequestContext, takePendingCopilotCLIRequestContext } from '../copilotcli/common/pendingRequestContext';
+import type { RemoteRequestOrigin } from '../../telegramRemote/common/remoteControlTypes';
 import { SessionIdForCLI } from '../copilotcli/common/utils';
 import { getCopilotCLISessionDir } from '../copilotcli/node/cliHelpers';
 import { ICopilotCLIModels, ICopilotCLISDK } from '../copilotcli/node/copilotCli';
@@ -784,12 +785,13 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 		request: vscode.ChatRequest,
 		session: ICopilotCLISession,
 		isNewSession: boolean,
+		correlationId: string | undefined,
 		token: vscode.CancellationToken,
-	): Promise<{ input: { prompt: string; command?: CopilotCLICommand; source?: SendOptions['source'] }; attachments: Attachment[] }> {
-		const contextForRequest = takePendingCopilotCLIRequestContext(session.sessionId);
+	): Promise<{ input: { prompt: string; command?: CopilotCLICommand; source?: SendOptions['source']; origin?: RemoteRequestOrigin }; attachments: Attachment[] }> {
+		const contextForRequest = correlationId ? takePendingCopilotCLIRequestContext(session.sessionId, correlationId) : undefined;
 
 		if (contextForRequest) {
-			return { input: { prompt: contextForRequest.prompt, source: contextForRequest.source }, attachments: contextForRequest.attachments };
+			return { input: { prompt: contextForRequest.prompt, source: contextForRequest.source, origin: contextForRequest.origin }, attachments: contextForRequest.attachments };
 		}
 
 		if (request.command && !request.prompt && !isNewSession) {
@@ -816,18 +818,25 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 		return branchNamePromise;
 	}
 	private async handleRequestImpl(request: vscode.ChatRequest, context: vscode.ChatContext, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult | void> {
+		const correlationId = getPendingCopilotCLIRequestCorrelationId(request.references);
+		const sanitizedReferences = request.references.filter(reference => reference.id !== COPILOT_CLI_PENDING_REQUEST_MARKER_ID);
+		const sanitizedRequest = sanitizedReferences.length === request.references.length
+			? request
+			: new Proxy(request, {
+				get: (target, property, receiver) => property === 'references' ? sanitizedReferences : Reflect.get(target, property, receiver),
+			});
 		const { chatSessionContext } = context;
 		const disposables = new DisposableStore();
 		let sdkSessionId: string | undefined = undefined;
 		let session: IReference<ICopilotCLISession> | undefined = undefined;
 		let shouldRefreshSessionItem = true;
 		try {
-			this.sendTelemetryForHandleRequest(request, context);
+			this.sendTelemetryForHandleRequest(sanitizedRequest, context);
 
 			const authInfo = await this.authenticate();
 
 			if (!chatSessionContext || !SessionIdForCLI.isCLIResource(request.sessionResource)) {
-				return await this.handleDelegationFromAnotherChat(request, undefined, request.references, context, stream, authInfo, token);
+				return await this.handleDelegationFromAnotherChat(sanitizedRequest, undefined, sanitizedRequest.references, context, stream, authInfo, token);
 			}
 
 			const { resource } = chatSessionContext.chatSessionItem;
@@ -848,15 +857,15 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 				return {};
 			}
 
-			const branchNamePromise = isNewSession ? this.generateNewBranchName(request, token) : Promise.resolve(undefined);
+			const branchNamePromise = isNewSession ? this.generateNewBranchName(sanitizedRequest, token) : Promise.resolve(undefined);
 
 			if (isNewSession) {
 				this._optionGroupBuilder.lockInputStateGroups(chatSessionContext.inputState);
 			}
 
 			const selectedOptions = getSelectedSessionOptions(chatSessionContext.inputState);
-			const isRemoteCommand = request.command === 'remote';
-			const sessionResult = await this.getOrCreateSession(request, chatSessionContext.chatSessionItem.resource, { ...selectedOptions, newBranch: branchNamePromise, stream }, disposables, token);
+			const isRemoteCommand = sanitizedRequest.command === 'remote';
+			const sessionResult = await this.getOrCreateSession(sanitizedRequest, chatSessionContext.chatSessionItem.resource, { ...selectedOptions, newBranch: branchNamePromise, stream }, disposables, token);
 			({ session } = sessionResult);
 			shouldRefreshSessionItem = !(isNewSession && isRemoteCommand);
 
@@ -877,20 +886,20 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 
 			sdkSessionId = session.object.sessionId;
 
-			await this.sessionRequestLifecycle.startRequest(sdkSessionId, request, context.history.length === 0, session.object.workspace, agent?.name);
+			await this.sessionRequestLifecycle.startRequest(sdkSessionId, sanitizedRequest, context.history.length === 0, session.object.workspace, agent?.name);
 
-			if (request.command === 'delegate') {
-				await this.handleDelegationToCloud(session.object, request, context, stream, token);
+			if (sanitizedRequest.command === 'delegate') {
+				await this.handleDelegationToCloud(session.object, sanitizedRequest, context, stream, token);
 				return {};
 			} else {
-				const { input, attachments } = await this.resolveInput(request, session.object, isNewSession, token);
-				await session.object.handleRequest(request, input, attachments, model, authInfo, token);
+				const { input, attachments } = await this.resolveInput(sanitizedRequest, session.object, isNewSession, correlationId, token);
+				await session.object.handleRequest(sanitizedRequest, input, attachments, model, authInfo, token);
 			}
 
 			const modelDetailsEnabled = this.configurationService.getConfig(ConfigKey.Advanced.CLIModelDetailsEnabled);
-			const creditsUsed = this._chatQuotaService.getCreditsForTurn(request.id);
+			const creditsUsed = this._chatQuotaService.getCreditsForTurn(sanitizedRequest.id);
 			const { result, responseModelId } = await getCopilotCLIModelDetails(session.object, model, this.copilotCLIModels, this.logService, modelDetailsEnabled, creditsUsed);
-			await persistCopilotCLIResponseModelId(sdkSessionId, request.id, responseModelId, model?.model === 'auto', this.chatSessionMetadataStore, this.logService, creditsUsed);
+			await persistCopilotCLIResponseModelId(sdkSessionId, sanitizedRequest.id, responseModelId, model?.model === 'auto', this.chatSessionMetadataStore, this.logService, creditsUsed);
 
 			return result;
 		} catch (ex) {
@@ -902,10 +911,10 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 			}
 			throw ex;
 		} finally {
-			this._chatQuotaService.resetTurnCredits(request.id);
+			this._chatQuotaService.resetTurnCredits(sanitizedRequest.id);
 			if (sdkSessionId && session) {
 				await this.sessionRequestLifecycle.endRequest(
-					sdkSessionId, request,
+					sdkSessionId, sanitizedRequest,
 					{ status: session.object.status, workspace: session.object.workspace, createdPullRequestUrl: session.object.createdPullRequestUrl },
 					token,
 				);
@@ -993,13 +1002,17 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 			}
 		}
 
-		setPendingCopilotCLIRequestContext(session.object.sessionId, { prompt, attachments });
+		const correlationId = createPendingCopilotCLIRequestCorrelationId();
+		setPendingCopilotCLIRequestContext(session.object.sessionId, correlationId, { prompt, attachments });
 		void vscode.commands.executeCommand('workbench.action.chat.openSessionWithPrompt.copilotcli', {
 			resource: SessionIdForCLI.getResource(session.object.sessionId),
 			prompt: userPrompt || request.prompt,
-			attachedContext: references.map(ref => convertReferenceToVariable(ref, attachments))
+			attachedContext: [
+				...references.map(ref => convertReferenceToVariable(ref, attachments)),
+				createPendingCopilotCLIRequestMarker(correlationId),
+			]
 		}).then(undefined, error => {
-			clearPendingCopilotCLIRequestContext(session.object.sessionId);
+			clearPendingCopilotCLIRequestContext(session.object.sessionId, correlationId);
 			this.logService.error(error, '[CopilotCLIChatSessionContentProvider] Failed to open Copilot CLI session');
 		});
 

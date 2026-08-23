@@ -73,21 +73,15 @@ flowchart TB
 
 ## 3. Proposed module layout
 
-Shared remote-control code belongs with the Copilot CLI integration; Telegram code remains isolated in its own module:
+All downstream-authored remote-control and Telegram code remains isolated in the fork-owned module. Upstream Copilot CLI files contain only the narrow integration hooks required by that module:
 
 ```text
-extensions/copilot/src/extension/chatSessions/copilotcli/
-    common/
-        remoteControlTypes.ts
-    node/
-        remoteControlRegistry.ts
-        missionControlTransport.ts
-
 extensions/copilot/src/extension/telegramRemote/
     common/
+        remoteControlTypes.ts
         telegramTypes.ts
     node/
-        telegramRemoteContribution.ts
+        remoteControlRegistry.ts
         telegramTransport.ts
         telegramService.ts
         telegramBotClient.ts
@@ -96,6 +90,12 @@ extensions/copilot/src/extension/telegramRemote/
         telegramEventRenderer.ts
         telegramSettings.ts
         proposedApiSetup.ts
+        test/
+    vscode-node/
+        remotePromptDispatcher.ts
+        missionControlTransport.ts
+        missionControlQr.ts
+        telegramRemoteContribution.ts
         test/
 ```
 

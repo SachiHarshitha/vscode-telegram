@@ -49,6 +49,7 @@ import { type CopilotCLIModelInfo, type ICopilotCLIModels, type ICopilotCLISDK }
 import { CopilotCLIPromptResolver } from '../../copilotcli/node/copilotcliPromptResolver';
 import { CopilotCLISession, CopilotCLISessionInput, ICopilotCLISession } from '../../copilotcli/node/copilotcliSession';
 import { CopilotCLISessionService, CopilotCLISessionWorkspaceTracker, ICopilotCLISessionService } from '../../copilotcli/node/copilotcliSessionService';
+import { RemoteControlRegistry } from '../../../telegramRemote/node/remoteControlRegistry';
 import { ICopilotCLIMCPHandler } from '../../copilotcli/node/mcpHandler';
 import { MockCliSdkSession, MockCliSdkSessionManager, MockSkillLocations, NullCopilotCLIAgents, NullICopilotCLIImageSupport } from '../../copilotcli/node/test/testHelpers';
 import { IQuestion, IQuestionAnswer, IUserQuestionHandler } from '../../copilotcli/node/userInputHelpers';
@@ -347,7 +348,7 @@ describe('CopilotCLIChatSessionParticipant.handleRequest', () => {
 		// The chatSessionContext lost workaround tests override this.
 		mockExecuteCommand.mockImplementation(async (command: string, args: any) => {
 			if (command === 'workbench.action.chat.openSessionWithPrompt.copilotcli') {
-				const callbackRequest = new TestChatRequest(args.prompt);
+				const callbackRequest = new TestChatRequest(args.prompt, args.attachedContext as vscode.ChatPromptReference[] | undefined);
 				callbackRequest.sessionResource = args.resource;
 				const callbackContext = createChatContext(args.resource.path.slice(1), false, callbackRequest);
 				const callbackStream = new MockChatResponseStream();
@@ -421,7 +422,7 @@ describe('CopilotCLIChatSessionParticipant.handleRequest', () => {
 						}
 					}();
 				}
-				const session = new TestCopilotCLISession(workspaceInfo, agentName, sdkSession, [], undefined, logService, workspaceService, new MockChatSessionMetadataStore(), instantiationService, new NullRequestLogger(), new NullICopilotCLIImageSupport(), new FakeToolsService(), new FakeUserQuestionHandler(), accessor.get(IConfigurationService), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '0.0.0', sessionId: 'test' })), new FakeGitService(), { _serviceBrand: undefined } as any, { _serviceBrand: undefined, resetTurnCredits() { }, getCreditsForTurn() { return undefined; }, setLastCopilotUsage() { } } as any, new NullTelemetryService());
+				const session = new TestCopilotCLISession(workspaceInfo, agentName, sdkSession, [], undefined, logService, workspaceService, new MockChatSessionMetadataStore(), instantiationService, new NullRequestLogger(), new NullICopilotCLIImageSupport(), new FakeToolsService(), new FakeUserQuestionHandler(), accessor.get(IConfigurationService), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '0.0.0', sessionId: 'test' })), new FakeGitService(), { _serviceBrand: undefined } as any, { _serviceBrand: undefined, resetTurnCredits() { }, getCreditsForTurn() { return undefined; }, setLastCopilotUsage() { } } as any, new NullTelemetryService(), disposables.add(new RemoteControlRegistry(logService)));
 				cliSessions.push(session);
 				return disposables.add(session);
 			}
@@ -2001,7 +2002,7 @@ describe('CopilotCLIChatSessionParticipant.handleRequest', () => {
 				if (command === 'workbench.action.chat.openSessionWithPrompt.copilotcli') {
 					// Simulate VS Code core: it opens the session and fires handleRequest,
 					// but the core bug means chatSessionContext is undefined.
-					const callbackRequest = new TestChatRequest(args.prompt);
+					const callbackRequest = new TestChatRequest(args.prompt, args.attachedContext as vscode.ChatPromptReference[] | undefined);
 					callbackRequest.sessionResource = args.resource;
 					const callbackContext = { chatSessionContext: undefined } as vscode.ChatContext;
 					const callbackStream = new MockChatResponseStream();

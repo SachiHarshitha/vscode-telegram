@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "baseline": {
     "capturedAt": "2026-08-23",
-    "vscodeCommit": "2b514caa28dd1a2d41a4494a618b1188e03355ef",
+    "vscodeCommit": "58af001e0c7b342016db51cef2a026c7791f5d58",
     "copilotExtension": {
       "id": "GitHub.copilot-chat",
       "version": "0.63.0",
@@ -81,8 +81,8 @@
     "chatSessionCustomizationProvider"
   ],
   "telegramRemote": {
-    "implementationPhase": 0,
-    "patchRevision": 1,
+    "implementationPhase": 1,
+    "patchRevision": 2,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
@@ -145,6 +145,73 @@
       "networkContributionRegistered": false,
       "uiContributionRegistered": false,
       "environmentNote": "The isolated Code OSS launch used exact-version native binaries from the installed VS Code Insiders build for @vscode/policy-watcher 1.4.0, @vscode/spdlog 0.15.8 and @vscode/sqlite3 5.1.12-vscode because this machine lacks the Visual Studio Spectre-mitigated libraries needed to rebuild them."
+    }
+  },
+  "phase1Validation": {
+    "capturedAt": "2026-08-23",
+    "sourceCommit": "58af001e0c7b342016db51cef2a026c7791f5d58",
+    "environment": {
+      "platform": "win32-x64",
+      "defaultNode": "v24.1.0",
+      "buildAndRuntimeNode": "v24.18.0",
+      "debugArguments": [
+        "--disable-workspace-trust",
+        "--log=trace",
+        "--log=GitHub.copilot-chat:trace"
+      ]
+    },
+    "extensionTypecheck": {
+      "command": "npm run typecheck",
+      "status": "passed"
+    },
+    "targetedUnitTests": {
+      "status": "passed",
+      "testFilesPassed": 10,
+      "testsPassed": 187,
+      "testsSkipped": 1,
+      "coverage": [
+        "correlated pending contexts and marker isolation",
+        "controller participant marker stripping",
+        "registry replay, ordering, deduplication, fan-out, wrapper churn and response races",
+        "native prompt dispatcher steering and rejection cleanup",
+        "Mission Control prompt, mode, abort, permission, question, completion acknowledgement and teardown",
+        "wrapper-lifetime session bridge and session-service encapsulation",
+        "Mission Control API client regression",
+        "chat session initializer attachment notification",
+        "compatibility metadata alignment"
+      ]
+    },
+    "coreTypecheck": {
+      "command": "npm run typecheck-client",
+      "status": "passed"
+    },
+    "sourceBuild": {
+      "command": "npm run compile (root) + npm run compile (extensions/copilot)",
+      "node": "v24.18.0 (root) / v24.1.0 (final extension rebuild)",
+      "status": "passed",
+      "errors": 0
+    },
+    "coreElectronTests": {
+      "command": ".\\scripts\\test.bat --run src/vs/workbench/contrib/chat/test/browser/chatSessions/chatSessionsService.test.ts",
+      "status": "passed",
+      "testsPassed": 30,
+      "testsPending": 13
+    },
+    "runtimeSmoke": {
+      "node": "v24.18.0",
+      "status": "passed",
+      "workspaceTrusted": true,
+      "extensionActivated": true,
+      "controllerMarkerObserved": "[TelegramRemote] vscode-telegram/telegram-remote; patch=2; host=controller; phase=1; remote-control-registry=ready; telegram-contribution=not-registered",
+      "networkContributionRegistered": false,
+      "uiContributionRegistered": false,
+      "missionControlNetworkFlowRun": false,
+      "environmentNote": "The isolated Insiders seed had no GitHub session. Composition and trust/debug logging were validated; network behavior is covered by contract tests."
+    },
+    "knownTestFixtureLimitation": {
+      "file": "test/simulation/cache/base.sqlite",
+      "reason": "The checkout contains a Git LFS pointer rather than the SQLite payload and git-lfs is unavailable.",
+      "impact": "The broad legacy participant assertions pass, but Vitest reports unhandled ERR_SQLITE_ERROR failures from model-metadata cache initialization. Controller-path and Phase 1 contract suites are unaffected."
     }
   }
 }

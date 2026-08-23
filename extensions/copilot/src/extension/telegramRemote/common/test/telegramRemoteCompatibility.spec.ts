@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Copyright (c) 2026 Sachith H. Liyanagama, Emagin8 UG. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -39,6 +39,6 @@ describe('Telegram remote compatibility', () => {
 
 	it('has a stable diagnostics marker and patch revision', () => {
 		expect(TELEGRAM_REMOTE_BUILD_MARKER).toBe('vscode-telegram/telegram-remote');
-		expect(TELEGRAM_REMOTE_PATCH_REVISION).toBe(1);
+		expect(TELEGRAM_REMOTE_PATCH_REVISION).toBe(2);
 	});
 });

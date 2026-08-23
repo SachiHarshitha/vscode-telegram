@@ -43,6 +43,7 @@ import { IChatDelegationSummaryService } from '../../common/delegationSummarySer
 import { getCopilotCLISessionDir } from '../cliHelpers';
 import { ICopilotCLISDK } from '../copilotCli';
 import { CopilotCLISession, ICopilotCLISession } from '../copilotcliSession';
+import { RemoteControlRegistry } from '../../../../telegramRemote/node/remoteControlRegistry';
 import { COPILOT_CLI_CHAT_PANEL_SYSTEM_MESSAGE, CopilotCLISessionService, CopilotCLISessionWorkspaceTracker, ICopilotCLISessionItem } from '../copilotcliSessionService';
 import { CopilotCLIMCPHandler } from '../mcpHandler';
 import { MissionControlApiClient } from '../missionControlApiClient';
@@ -204,7 +205,7 @@ describe('CopilotCLISessionService', () => {
 						deleteSession: vi.fn(async () => { }),
 					};
 				}
-				return disposables.add(new CopilotCLISession(workspaceInfo, agentName, sdkSession, [], undefined, logService, workspaceService, new MockChatSessionMetadataStore(), instantiationService, new NullRequestLogger(), new NullICopilotCLIImageSupport(), new FakeToolsService(), new FakeUserQuestionHandler(), accessor.get(IConfigurationService), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '0.0.0', sessionId: 'test' })), new MockGitService(), { _serviceBrand: undefined } as any, { _serviceBrand: undefined, resetTurnCredits() { }, getCreditsForTurn() { return undefined; }, setLastCopilotUsage() { } } as any, new NullTelemetryService()));
+				return disposables.add(new CopilotCLISession(workspaceInfo, agentName, sdkSession, [], undefined, logService, workspaceService, new MockChatSessionMetadataStore(), instantiationService, new NullRequestLogger(), new NullICopilotCLIImageSupport(), new FakeToolsService(), new FakeUserQuestionHandler(), accessor.get(IConfigurationService), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '0.0.0', sessionId: 'test' })), new MockGitService(), { _serviceBrand: undefined } as any, { _serviceBrand: undefined, resetTurnCredits() { }, getCreditsForTurn() { return undefined; }, setLastCopilotUsage() { } } as any, new NullTelemetryService(), disposables.add(new RemoteControlRegistry(logService))));
 			}
 		} as unknown as IInstantiationService;
 		configurationService = accessor.get(IConfigurationService);

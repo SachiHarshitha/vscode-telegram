@@ -22,6 +22,7 @@ import { IWorkspaceInfo } from '../../../common/workspaceInfo';
 import { CopilotCLIModelInfo, ICopilotCLIAgents, ICopilotCLIModels } from '../../../copilotcli/node/copilotCli';
 import { ICopilotCLISession } from '../../../copilotcli/node/copilotcliSession';
 import { ICopilotCLISessionService } from '../../../copilotcli/node/copilotcliSessionService';
+import { RemoteControlRegistry } from '../../../../telegramRemote/node/remoteControlRegistry';
 import { CopilotCLIChatSessionInitializer } from '../copilotCLIChatSessionInitializer';
 
 // ─── Test Helpers ────────────────────────────────────────────────
@@ -180,6 +181,7 @@ function createInitializer(overrides?: {
 		promptsService,
 		logService,
 		configurationService,
+		new RemoteControlRegistry(logService),
 	);
 
 	return { initializer, sessionService, folderRepoManager, worktreeService, workspaceFolderService, models, agents, promptsService, metadataStore, logService, configurationService };

@@ -805,11 +805,7 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 					this.logService.trace(`[CopilotCLISession] Reusing CopilotCLI session ${options.sessionId}.`);
 					this._partialSessionHistories.delete(options.sessionId);
 					session.acquire();
-					if (options.agent) {
-						await session.object.sdkSession.selectCustomAgent(options.agent.name);
-					} else {
-						session.object.sdkSession.clearCustomAgent();
-					}
+					await session.object.selectCustomAgent(options.agent?.name);
 					return session;
 				}
 			}
@@ -859,10 +855,10 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 		let modelId: string | undefined = undefined;
 
 		// Try to shutdown session as soon as possible.
-		const existingSession = this._sessionWrappers.get(sessionId)?.object?.sdkSession;
+		const existingSession = this._sessionWrappers.get(sessionId)?.object;
 		if (existingSession) {
-			modelId = await existingSession.getSelectedModel();
-			events = existingSession.getEvents();
+			modelId = await existingSession.getSelectedModelId();
+			events = existingSession.getReplayEvents();
 		} else {
 			let shutdown = Promise.resolve();
 			try {
@@ -1173,10 +1169,19 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 		}
 	}
 
-	private async updateSdkSessionMetadata(sessionId: string, title: string, operation: (sdkSession: LocalSession) => Promise<void>): Promise<void> {
+	private async updateSdkSessionMetadata(sessionId: string, title: string, operation: 'rename' | 'summary'): Promise<void> {
+		const wrappedSession = this._sessionWrappers.get(sessionId)?.object;
+		if (wrappedSession) {
+			if (operation === 'rename') {
+				await wrappedSession.renameSdkSession(title);
+			} else {
+				await wrappedSession.updateSdkSessionSummary(title);
+			}
+			return;
+		}
 		let sessionManager: internal.LocalSessionManager | undefined;
 		let shouldCloseSession = false;
-		const sdkSession = (this._sessionWrappers.get(sessionId)?.object.sdkSession as LocalSession | undefined) ?? await (async () => {
+		const sdkSession = await (async () => {
 			sessionManager = await this.getSessionManager();
 			const session = await sessionManager.getSession({ sessionId }, true) as LocalSession | undefined;
 			shouldCloseSession = !!session;
@@ -1191,7 +1196,11 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 		}
 
 		try {
-			await operation(sdkSession);
+			if (operation === 'rename') {
+				await sdkSession.renameSession(title);
+			} else {
+				await sdkSession.updateSessionSummary(title);
+			}
 		} finally {
 			if (shouldCloseSession && sessionManager) {
 				await sessionManager.closeSession(sessionId).catch(error => {
@@ -1202,13 +1211,13 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 	}
 
 	public async renameSession(sessionId: string, title: string): Promise<void> {
-		await this.updateSdkSessionMetadata(sessionId, title, sdkSession => sdkSession.renameSession(title));
+		await this.updateSdkSessionMetadata(sessionId, title, 'rename');
 		this._sessionLabels.delete(sessionId);
 		this._onDidChangeSessions.fire();
 	}
 
 	public async updateSessionSummary(sessionId: string, title: string): Promise<void> {
-		await this.updateSdkSessionMetadata(sessionId, title, sdkSession => sdkSession.updateSessionSummary(title));
+		await this.updateSdkSessionMetadata(sessionId, title, 'summary');
 		// Invalidate the derived-label cache so a subsequent title resolution
 		// can pick up the freshly-written summary instead of returning a stale
 		// label that was extracted from session history on a prior pass.

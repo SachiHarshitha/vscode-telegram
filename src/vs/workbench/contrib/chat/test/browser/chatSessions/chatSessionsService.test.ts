@@ -11,13 +11,50 @@ import { ContextKeyService } from '../../../../../../platform/contextkey/browser
 import { ContextKeyExpr, IContextKey, RawContextKey } from '../../../../../../platform/contextkey/common/contextkey.js';
 import { TestConfigurationService } from '../../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
-import { applyCodexAgentHostPreference, ChatSessionsService } from '../../../browser/chatSessions/chatSessions.contribution.js';
+import { applyCodexAgentHostPreference, ChatSessionsService, getChatSessionPromptQueueKind, waitForChatSessionPromptResult } from '../../../browser/chatSessions/chatSessions.contribution.js';
 import { ChatSessionOptionsMap, IChatSessionHistoryItem, IChatSessionItem, IChatSessionItemController, IChatSessionItemsDelta, IChatSessionsExtensionPoint, ReadonlyChatSessionOptionsMap, SessionType } from '../../../common/chatSessionsService.js';
 import { workbenchInstantiationService } from '../../../../../test/browser/workbenchTestServices.js';
 import { AGENT_HOST_ENABLED_CONTEXT_KEY } from '../../../../../../platform/agentHost/common/agentHostEnablementService.js';
 import { AgentHostCodexAgentEnabledSettingId, CodexPreferAgentHostEditorSettingId, GITHUB_COPILOT_PROTECTED_RESOURCE, GITHUB_REPO_PROTECTED_RESOURCE, protectedResourcesRequireGitHubCopilotSignIn } from '../../../../../../platform/agentHost/common/agentService.js';
 import { ProtectedResourceMetadata } from '../../../../../../platform/agentHost/common/state/protocol/state.js';
 import { IsSessionsWindowContext } from '../../../../../common/contextkeys.js';
+import { ChatRequestQueueKind, type ChatSendResult } from '../../../common/chatService/chatService.js';
+
+suite('Chat session native prompt submission', () => {
+
+	test('maps explicit queue options to the chat service queue kind', () => {
+		assert.strictEqual(getChatSessionPromptQueueKind(undefined), undefined);
+		assert.strictEqual(getChatSessionPromptQueueKind('queued'), ChatRequestQueueKind.Queued);
+		assert.strictEqual(getChatSessionPromptQueueKind('steering'), ChatRequestQueueKind.Steering);
+	});
+
+	test('waits for sent completion and surfaces immediate and deferred rejection', async () => {
+		let complete!: () => void;
+		const responseCompletePromise = new Promise<void>(resolve => complete = resolve);
+		let settled = false;
+		const sent = {
+			kind: 'sent',
+			data: { responseCompletePromise },
+		} as ChatSendResult;
+		const waiting = waitForChatSessionPromptResult(sent).then(() => settled = true);
+		await Promise.resolve();
+		assert.strictEqual(settled, false);
+		complete();
+		await waiting;
+
+		await assert.rejects(
+			waitForChatSessionPromptResult({ kind: 'rejected', reason: 'read-only session' }),
+			new Error('read-only session'),
+		);
+		await assert.rejects(
+			waitForChatSessionPromptResult({
+				kind: 'queued',
+				deferred: Promise.resolve({ kind: 'rejected', reason: 'unknown session' }),
+			}),
+			new Error('unknown session'),
+		);
+	});
+});
 
 suite('Codex Agent Host preference', () => {
 
