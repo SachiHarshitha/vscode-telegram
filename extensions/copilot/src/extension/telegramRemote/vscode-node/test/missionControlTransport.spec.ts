@@ -151,7 +151,7 @@ describe('MissionControlTransport', () => {
 	it('routes abort through the registry and acknowledges the command', async () => {
 		const commands = [{ id: 'abort-1', content: '', state: 'in_progress', type: 'abort' }];
 		const { transport, registry } = createTransport(commands);
-		const abort = vi.spyOn(registry, 'abort').mockResolvedValue();
+		const abort = vi.spyOn(registry, 'abort').mockResolvedValue(true);
 		const state = createState();
 		(transport as unknown as { states: Map<string, unknown> }).states.set(state.sessionId, state);
 

@@ -9,7 +9,7 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import type { Event } from '../../../util/vs/base/common/event';
 import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport } from '../common/remoteControlTypes';
-import type { TelegramPollingStatus, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
+import type { TelegramAnswerCallbackQueryOptions, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
 import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHandler } from './telegramService';
 
 /** Telegram Bot API transport; the contribution owns Phase 3 authorization and lifecycle policy. */
@@ -41,12 +41,12 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		return this.service.start(botToken, handleUpdate, handleValidated, options);
 	}
 
-	sendMessage(chatId: number, text: string): Promise<void> {
-		return this.service.sendMessage(chatId, text);
+	sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
+		return this.service.sendMessage(chatId, text, options);
 	}
 
-	answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
-		return this.service.answerCallbackQuery(callbackQueryId, text);
+	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {
+		return this.service.answerCallbackQuery(callbackQueryId, options);
 	}
 
 	stop(): Promise<void> {

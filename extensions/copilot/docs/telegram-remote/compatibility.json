@@ -81,8 +81,8 @@
     "chatSessionCustomizationProvider"
   ],
   "telegramRemote": {
-    "implementationPhase": 3,
-    "patchRevision": 4,
+    "implementationPhase": 4,
+    "patchRevision": 6,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
@@ -91,7 +91,12 @@
     "secureStateRegistered": true,
     "authorizationRegistered": true,
     "callbackRegistryRegistered": true,
-    "uiContributionRegistered": false
+    "consentGateRegistered": true,
+    "uiContributionRegistered": true,
+    "nativeIndicatorsRegistered": true,
+    "sessionRoutingRegistered": true,
+    "authorizedPromptDispatchRegistered": true,
+    "eventProjectionRegistered": false
   },
   "baselineValidation": {
     "environment": {
@@ -326,6 +331,101 @@
       "networkActive": false,
       "telegramNetworkLogMatches": 0,
       "environmentNote": "The isolated source launch used --disable-workspace-trust and trace logging. The seeded profile had no GitHub session, which did not affect contribution composition or the dormant-network assertion."
+    }
+  },
+  "phase3bValidation": {
+    "capturedAt": "2026-08-23",
+    "sourceCommit": "e9561f6de21732c48e28377e03e8dea9c7a92f16",
+    "phase3bRunner": {
+      "command": ".\\script\\telegram-remote\\test-phase3b.ps1",
+      "status": "passed",
+      "testFilesPassed": 14,
+      "testsPassed": 176
+    },
+    "coverage": [
+      "versioned token and exact machine/workspace-scope consent",
+      "direct-setting and restart consent gates",
+      "modal risk disclosure, masked token input and cancellation rollback",
+      "transport-neutral session-list and status-bar attachment indicators",
+      "one-time in-chat remote-control warning",
+      "synchronous local disable during offline or in-progress cleanup",
+      "setup/status UI token redaction"
+    ],
+    "extensionTypecheck": {
+      "command": "npx tsc --noEmit --project tsconfig.json --pretty false",
+      "status": "passed"
+    },
+    "extensionLint": {
+      "command": "targeted eslint for changed TypeScript files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "sourceBuild": {
+      "command": "npm run compile (root, including extensions/copilot)",
+      "node": "v24.18.0",
+      "status": "passed",
+      "errors": 0
+    },
+    "runtimeSmoke": {
+      "node": "v24.18.0",
+      "status": "passed",
+      "workspaceTrusted": true,
+      "extensionActivated": true,
+      "controllerMarkerObserved": "[TelegramRemote] vscode-telegram/telegram-remote; patch=5; host=controller; phase=3b; remote-control-registry=ready; telegram-transport=ready; telegram-security=ready; telegram-consent=ready; telegram-ui=ready; telegram-network=consent-gated",
+      "showStatusCommandObserved": true,
+      "maskedTokenInputObserved": true,
+      "networkActive": false,
+      "telegramNetworkLogMatches": 0,
+      "environmentNote": "The isolated source launch used --disable-workspace-trust and trace logging. No token was entered; cancel left the feature disabled."
+    }
+  },
+  "phase4Validation": {
+    "capturedAt": "2026-08-23",
+    "sourceCommit": "53eff351812ba20d7057a7a030a1ccd5d03e11c2",
+    "phase4Runner": {
+      "command": ".\\script\\telegram-remote\\test-phase4.ps1",
+      "status": "passed",
+      "testFilesPassed": 19,
+      "testsPassed": 204
+    },
+    "coverage": [
+      "authorized /start, /status, /sessions, /deselect and /stop routing",
+      "metadata-only session listing and validation without wrapper acquisition",
+      "opaque generation-bound inline session selection",
+      "paired-identity and consent-scope-bound durable selected-session state",
+      "registry logical attachment restore, switch, suspend and deletion cleanup",
+      "correlated native prompt dispatch with Telegram provenance and steering queue",
+      "accepted-prompt idempotency when acknowledgement delivery fails",
+      "one-shot request/session-bound Stop with no-live-wrapper fail-closed behavior"
+    ],
+    "extensionTypecheck": {
+      "command": "npx tsc --noEmit --project tsconfig.json --pretty false",
+      "status": "passed"
+    },
+    "extensionLint": {
+      "command": "targeted eslint for changed TypeScript files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "sourceBuild": {
+      "command": "npm run compile (root, including extensions/copilot)",
+      "node": "v24.18.0",
+      "status": "passed",
+      "errors": 0
+    },
+    "runtimeSmoke": {
+      "node": "v24.18.0",
+      "status": "passed",
+      "workspaceTrusted": true,
+      "extensionActivated": true,
+      "controllerMarkerObserved": "[TelegramRemote] vscode-telegram/telegram-remote; patch=6; host=controller; phase=4; remote-control-registry=ready; telegram-transport=ready; telegram-security=ready; telegram-consent=ready; telegram-ui=ready; telegram-routing=ready; telegram-network=consent-gated",
+      "networkActive": false,
+      "telegramNetworkLogMatches": 0,
+      "environmentNote": "The isolated source launch used --disable-workspace-trust and trace logging. No bot token was injected, so runtime routing stayed consent-gated."
+    },
+    "realBotEndToEnd": {
+      "status": "not-run",
+      "reason": "A paired Telegram chat and interactive native Copilot session are required; the automated Phase 4 suite uses deterministic Bot API and workbench mocks."
     }
   }
 }

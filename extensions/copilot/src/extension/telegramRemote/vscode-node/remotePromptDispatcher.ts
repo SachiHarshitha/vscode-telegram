@@ -49,15 +49,24 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 			origin,
 		});
 
-		const completion = Promise.resolve(vscode.commands.executeCommand(
-			'workbench.action.chat.openSessionWithPrompt.copilotcli',
-			{
-				resource: SessionIdForCLI.getResource(sessionId),
-				prompt,
-				queue: 'steering',
-				attachedContext: [marker],
-			}
-		)).then(() => undefined, error => {
+		let dispatched: Thenable<unknown>;
+		try {
+			dispatched = vscode.commands.executeCommand(
+				'workbench.action.chat.openSessionWithPrompt.copilotcli',
+				{
+					resource: SessionIdForCLI.getResource(sessionId),
+					prompt,
+					queue: 'steering',
+					attachedContext: [marker],
+				}
+			);
+		} catch (error) {
+			clearPendingCopilotCLIRequestContext(sessionId, correlationId);
+			this.logService.error(error, `[RemotePromptDispatcher] Failed to dispatch remote prompt for session ${sessionId}`);
+			throw error;
+		}
+
+		const completion = Promise.resolve(dispatched).then(() => undefined, error => {
 			clearPendingCopilotCLIRequestContext(sessionId, correlationId);
 			this.logService.error(error, `[RemotePromptDispatcher] Failed to dispatch remote prompt for session ${sessionId}`);
 			throw error;

@@ -47,6 +47,9 @@ import { MissionControlTransport } from '../../telegramRemote/vscode-node/missio
 import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../telegramRemote/vscode-node/remotePromptDispatcher';
 import { IRemoteControlRegistry } from '../../telegramRemote/common/remoteControlTypes';
 import { TelegramRemoteContribution } from '../../telegramRemote/vscode-node/telegramRemoteContribution';
+import { TelegramCommandRouter } from '../../telegramRemote/node/telegramCommandRouter';
+import { TelegramSessionState } from '../../telegramRemote/node/telegramSessionState';
+import { getTelegramRemoteEnvironment } from '../../telegramRemote/vscode-node/telegramRemoteEnvironment';
 import { TelegramSetupWizard } from '../../telegramRemote/vscode-node/telegramSetupWizard';
 import { TelegramStatusBar } from '../../telegramRemote/vscode-node/telegramStatusBar';
 import { CopilotCLIFolderMruService } from '../copilotcli/vscode-node/copilotCLIFolderMru';
@@ -221,9 +224,20 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 		}
 
 		const telegramContribution = this._register(instantiationService.createInstance(TelegramRemoteContribution));
+		const telegramEnvironment = getTelegramRemoteEnvironment();
+		const telegramSessionState = this._register(instantiationService.createInstance(TelegramSessionState, telegramEnvironment.consentScopeFingerprint));
+		this._register(instantiationService.createInstance(
+			TelegramCommandRouter,
+			telegramContribution,
+			telegramSessionState,
+			instantiationService.invokeFunction(accessor => accessor.get(ICopilotCLISessionService)),
+			instantiationService.invokeFunction(accessor => accessor.get(IRemoteControlRegistry)),
+			instantiationService.invokeFunction(accessor => accessor.get(IRemotePromptDispatcher)),
+			telegramEnvironment,
+		));
 		this._register(instantiationService.createInstance(TelegramSetupWizard, telegramContribution));
 		this._register(instantiationService.createInstance(TelegramStatusBar, telegramContribution));
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=3b; remote-control-registry=ready; telegram-transport=ready; telegram-security=ready; telegram-consent=ready; telegram-ui=ready; telegram-network=consent-gated`);
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=4; remote-control-registry=ready; telegram-transport=ready; telegram-security=ready; telegram-consent=ready; telegram-ui=ready; telegram-routing=ready; telegram-network=consent-gated`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

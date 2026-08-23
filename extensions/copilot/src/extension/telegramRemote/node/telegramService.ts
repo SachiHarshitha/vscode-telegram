@@ -12,9 +12,12 @@ import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import {
 	ITelegramBotClient,
+	TelegramAnswerCallbackQueryOptions,
 	TelegramBotApiError,
+	TelegramMessage,
 	TelegramPollingFailureKind,
 	TelegramPollingStatus,
+	TelegramSendMessageOptions,
 	TelegramUpdate,
 	TelegramUser,
 } from '../common/telegramTypes';
@@ -141,20 +144,20 @@ export class TelegramService extends Disposable {
 		}
 	}
 
-	async sendMessage(chatId: number, text: string): Promise<void> {
+	async sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
 		const client = this.activeRun?.client;
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
-		await client.sendMessage(chatId, text);
+		return client.sendMessage(chatId, text, options);
 	}
 
-	async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+	async answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {
 		const client = this.activeRun?.client;
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
-		await client.answerCallbackQuery(callbackQueryId, { text });
+		await client.answerCallbackQuery(callbackQueryId, options);
 	}
 
 	async stop(): Promise<void> {

@@ -242,9 +242,9 @@ describe('TelegramService', () => {
 
 		await service.start(botToken, async () => { }, validated);
 		await service.sendMessage(202, 'paired');
-		await service.answerCallbackQuery('callback-1', 'Done');
+		await service.answerCallbackQuery('callback-1', { text: 'Done' });
 		expect(validated).toHaveBeenCalledWith(bot);
-		expect(sendMessage).toHaveBeenCalledWith(202, 'paired');
+		expect(sendMessage).toHaveBeenCalledWith(202, 'paired', undefined);
 		expect(answerCallbackQuery).toHaveBeenCalledWith('callback-1', { text: 'Done' });
 		await service.stop();
 		await expect(service.sendMessage(202, 'stopped')).rejects.toMatchObject({ kind: 'api' });

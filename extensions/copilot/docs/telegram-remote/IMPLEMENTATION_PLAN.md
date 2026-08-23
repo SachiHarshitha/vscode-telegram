@@ -11,7 +11,7 @@ This plan was revalidated against the repository at:
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Phases 0, 1, 2 and 3 implemented and validated; secure state, pairing and callback authorization are ready, while networking remains dormant until the Phase 3b consent/setup surface invokes them |
+| Implementation status | Phases 0 through 4 implemented and validated; consent-gated Telegram setup, native visibility, session selection and native prompt/steer/abort routing are active, while event projection remains blocked until Phase 5 |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -354,18 +354,45 @@ extensions/copilot/script/telegram-remote/test-phase3.ps1                       
 
 ## 7. Phase 3b — consent, native visibility and kill switch
 
-This phase blocks remote attachment and prompt dispatch.
+**Status:** Implemented and validated on 2026-08-23. This phase remains the mandatory gate for every Telegram network start, attachment and prompt dispatch.
+
+### Implementation record
+
+- Five fail-closed user settings and localized commands cover enablement, activity detail, polling timeout, notifications and status-bar visibility. A true setting alone never starts networking.
+- `TelegramConsent` persists a versioned token-and-machine/workspace-scope fingerprint. Setup writes pending consent before validation and commits it only after private-chat pairing is durable; restart restore requires the exact current token and scope.
+- The native setup wizard presents the full modal risk disclosure with cancel as the default, accepts the bot token only in a password-masked input, validates it with `getMe`, and completes a single-use private-chat pairing challenge before enabling the setting.
+- A stable status item exposes status, log, unpair and local Disable controls. Attached sessions override the optional status-bar visibility setting so remote control can never become locally invisible.
+- Controller session-list entries render transport-neutral attachment icons/labels, and a live chat stream receives one warning that permission prompts may be answered remotely.
+- Disable synchronously blocks dispatch, invalidates callbacks, detaches every Telegram session and cancels setup before waiting for poll/lease cleanup. The local block remains effective when cleanup fails offline.
+- Telegram Bot API polling timeout is bounded to 1–50 seconds and defaults to 25 seconds.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 3b PowerShell runner | Passed: 14 files, 176 tests via `script/telegram-remote/test-phase3b.ps1` |
+| Consent and setup security | Passed: direct-setting consent gate, exact-scope restart, cancel/decline rollback, password input, risk disclosure parity and token redaction |
+| Visibility and kill switch | Passed: session-list/status-bar attachment state, in-chat warning, synchronous offline disable and no-hidden-indicator invariant |
+| TypeScript / lint / extension bundle | Passed: extension typecheck, targeted ESLint with zero warnings and extension compile |
+| Source-workbench smoke | Passed: patch 5 / Phase 3b marker and commands observed with workspace trust disabled; disabled status and masked setup input worked, with no Telegram network activity before consent |
 
 ### Files
 
 ```text
 extensions/copilot/src/extension/telegramRemote/vscode-node/telegramSetupWizard.ts (new)
 extensions/copilot/src/extension/telegramRemote/vscode-node/telegramStatusBar.ts    (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramConsent.ts             (new)
+extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts        (modify)
+extensions/copilot/src/extension/telegramRemote/node/remoteControlRegistry.ts       (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts             (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts           (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts (modify)
 extensions/copilot/src/extension/chatSessions/vscode-node/copilotCLIChatSessions.ts (modify)
-extensions/copilot/src/extension/chatSessions/copilotcli/vscode-node/copilotCLIChatSessionInitializer.ts (modify)
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts   (modify)
 extensions/copilot/src/platform/configuration/common/configurationService.ts        (modify)
 extensions/copilot/package.json                                                      (modify)
 extensions/copilot/package.nls.json                                                  (modify)
+extensions/copilot/script/telegram-remote/test-phase3b.ps1                           (new)
 ```
 
 ### Implement
@@ -388,11 +415,44 @@ extensions/copilot/package.nls.json                                             
 
 ## 8. Phase 4 — session selection, prompt, steering and abort
 
+**Status:** Implemented and validated on 2026-08-23. Authorized Telegram updates can now select an existing controller session and drive its native request path; activity/event projection remains intentionally deferred to Phase 5.
+
+### Implementation record
+
+- `TelegramCommandRouter` is registered only behind `TelegramRemoteContribution`'s numeric private-chat authorization boundary. It supports `/start`, `/status`, `/sessions`, `/deselect`, `/stop`, ordinary text and opaque inline callbacks.
+- Session listing uses only `getAllSessions()` and selection/prompt validation uses only `getSessionItem()`. Telegram code never calls `getSession()`, creates a wrapper, casts to `CopilotCLISession` or accesses the SDK session.
+- `TelegramSessionState` persists a bounded, versioned selection containing only numeric IDs, pairing ID, session ID, timestamp and the current consent-scope fingerprint. A selection from another workspace scope fails closed.
+- Selecting a session creates the Telegram registry attachment; deselect, pairing revoke, disable and upstream deletion detach it. Restart restoration first revalidates metadata.
+- Ordinary text creates a registry-trusted Telegram origin and dispatches through `RemotePromptDispatcher`. The native command always receives `queue: 'steering'`; the workbench and `CopilotCLISession` retain idle/busy and SDK `mode: 'immediate'` decisions.
+- Accepted input receives an immediate plain-text acknowledgement with an opaque, request-bound Stop button. A failed acknowledgement is contained after dispatch so the Bot API update is not retried into a duplicate native prompt.
+- Stop requires the current pairing, selected session and active dispatch correlation, consumes once and calls `IRemoteControlRegistry.abort()`. The registry reports false when no live wrapper is already bound, so Telegram never opens or mutates a session merely to abort it.
+- Session picker generations, selection revisions and dispatch correlations reject stale callbacks. Session deletion invalidates callbacks, clears durable selection, detaches the indicator and sends an explicit authorized-chat notice.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 4 PowerShell runner | Passed: 19 files, 204 tests via `script/telegram-remote/test-phase4.ps1` |
+| Selection isolation | Passed: metadata-only list/validation, opaque picker callbacks, workspace-scope binding, restart restore, deselect, revoke/disable suspension and deletion cleanup |
+| Prompt and steering path | Passed: registry-created Telegram provenance, correlation marker, native command, forced steering queue, synchronous/deferred cleanup and no direct SDK fallback |
+| Stop and idempotency | Passed: request/session/identity binding, one-shot/stale Stop rejection, no-live-wrapper result and accepted-prompt containment when acknowledgement fails |
+| TypeScript / lint / extension bundle | Passed: extension typecheck, targeted ESLint with zero warnings and extension compile |
+| Source-workbench smoke | Passed: patch 6 / Phase 4 routing-ready marker observed with workspace trust disabled; commands loaded while networking remained consent-gated |
+
 ### Files
 
 ```text
 extensions/copilot/src/extension/telegramRemote/node/telegramCommandRouter.ts (new)
 extensions/copilot/src/extension/telegramRemote/node/telegramSessionState.ts  (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteEnvironment.ts (new)
+extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts   (modify)
+extensions/copilot/src/extension/telegramRemote/node/remoteControlRegistry.ts  (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts        (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts      (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/remotePromptDispatcher.ts (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts (modify)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts       (modify)
+extensions/copilot/script/telegram-remote/test-phase4.ps1                       (new)
 ```
 
 ### Implement

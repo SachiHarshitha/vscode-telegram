@@ -135,7 +135,7 @@ export interface IRemoteControlRegistry {
 
 	requestPermission(sessionId: string, request: IRemotePermissionRequest, token: CancellationToken): Promise<RemotePermissionResult | undefined>;
 	requestUserInput(sessionId: string, request: IRemoteUserInputRequest, token: CancellationToken): Promise<IRemoteUserInputResponse | undefined>;
-	abort(sessionId: string): Promise<void>;
+	abort(sessionId: string): Promise<boolean>;
 }
 
 export const IRemoteControlRegistry = createServiceIdentifier<IRemoteControlRegistry>('IRemoteControlRegistry');

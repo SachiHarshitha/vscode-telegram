@@ -47,7 +47,9 @@ describe('TelegramRemoteContribution', () => {
 		const { contribution, context } = createContribution(storageRoot);
 		const transport = mockTransportStartup(contribution);
 		const authorizedHandler = vi.fn(async (_accepted: TelegramAuthorizedUpdate) => { });
+		const authorizedConnection = vi.fn();
 		contribution.registerAuthorizedUpdateHandler(authorizedHandler);
+		contribution.onDidAuthorizeConnection(authorizedConnection);
 
 		const pairing = await contribution.startPairing(botToken, consentScopeFingerprint);
 		expect(pairing.bot).toBe(bot);
@@ -57,6 +59,7 @@ describe('TelegramRemoteContribution', () => {
 		await transport.handleUpdate(telegramMessageUpdate(1, pairing.challenge.command));
 		expect(contribution.authorization.pairedIdentity).toEqual(expect.objectContaining({ userId: 101, chatId: 202 }));
 		expect(contribution.consent.hasCurrentConsent(getTelegramBotTokenFingerprint(botToken), consentScopeFingerprint)).toBe(true);
+		expect(authorizedConnection).toHaveBeenCalledWith(expect.objectContaining({ userId: 101, chatId: 202 }));
 		expect(transport.sendMessage).toHaveBeenCalledWith(202, expect.stringContaining('Pairing succeeded'));
 
 		await transport.handleUpdate(telegramMessageUpdate(2, 'unauthorized', 999, 202));
@@ -172,6 +175,8 @@ describe('TelegramRemoteContribution', () => {
 		await transport.handleUpdate(telegramMessageUpdate(1, pairing.challenge.command));
 		registry.attachTransport('session-1', 'telegram');
 		transport.stop.mockRejectedValueOnce(new TelegramBotApiError('network', 'Offline.'));
+		const blocked = vi.fn();
+		contribution.onDidBlockRemoteAccess(blocked);
 
 		const disabling = contribution.disableRemoteAccess();
 		expect({
@@ -179,6 +184,7 @@ describe('TelegramRemoteContribution', () => {
 			attachments: registry.getAttachedSessionIds('telegram'),
 			callbacks: contribution.callbacks.size,
 		}).toEqual({ acceptingUpdates: false, attachments: [], callbacks: 0 });
+		expect(blocked).toHaveBeenCalledOnce();
 		await expect(disabling).rejects.toMatchObject({ kind: 'network' });
 		contribution.dispose();
 	});
@@ -211,7 +217,7 @@ function mockTransportStartup(contribution: TelegramRemoteContribution): {
 	readonly stop: ReturnType<typeof vi.fn>;
 } {
 	let handleUpdate: ((update: TelegramUpdate) => Promise<void>) | undefined;
-	const sendMessage = vi.spyOn(contribution.transport, 'sendMessage').mockResolvedValue();
+	const sendMessage = vi.spyOn(contribution.transport, 'sendMessage').mockResolvedValue({ message_id: 1, date: 1, chat: { id: 202, type: 'private' } });
 	const stop = vi.spyOn(contribution.transport, 'stop').mockResolvedValue();
 	vi.spyOn(contribution.transport, 'start').mockImplementation(async (_token, updateHandler, validatedHandler?: TelegramValidatedHandler) => {
 		handleUpdate = updateHandler;

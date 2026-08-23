@@ -164,4 +164,17 @@ describe('RemoteControlRegistry', () => {
 		expect(registry.getValidatedMissionControlMode(trusted)).toBe('plan');
 		expect(registry.getValidatedMissionControlMode(forged)).toBeUndefined();
 	});
+
+	it('aborts only an already-bound live wrapper and reports whether one existed', async () => {
+		const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
+		const session = new TestSession('session-1', () => []);
+
+		await expect(registry.abort(session.sessionId)).resolves.toBe(false);
+		const binding = registry.bindSession(session);
+		await expect(registry.abort(session.sessionId)).resolves.toBe(true);
+		expect(session.abort).toHaveBeenCalledOnce();
+		binding.dispose();
+		await expect(registry.abort(session.sessionId)).resolves.toBe(false);
+		expect(session.abort).toHaveBeenCalledOnce();
+	});
 });

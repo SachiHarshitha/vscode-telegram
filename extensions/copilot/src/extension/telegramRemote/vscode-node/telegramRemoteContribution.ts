@@ -10,7 +10,7 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { IRemoteControlRegistry } from '../common/remoteControlTypes';
-import { TelegramBotApiError, TelegramPollingStatus, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
+import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
 import { TelegramAuthorization, TelegramPairedIdentity } from '../node/telegramAuthorization';
 import { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration, TelegramCallbackRegistry } from '../node/telegramCallbackRegistry';
 import { TelegramConsent } from '../node/telegramConsent';
@@ -35,6 +35,10 @@ export type TelegramAuthorizedUpdateHandler = (accepted: TelegramAuthorizedUpdat
 export class TelegramRemoteContribution extends Disposable {
 	private readonly pairingCompletedEmitter = this._register(new Emitter<TelegramPairedIdentity>());
 	readonly onDidCompletePairing: Event<TelegramPairedIdentity> = this.pairingCompletedEmitter.event;
+	private readonly authorizedConnectionEmitter = this._register(new Emitter<TelegramPairedIdentity>());
+	readonly onDidAuthorizeConnection: Event<TelegramPairedIdentity> = this.authorizedConnectionEmitter.event;
+	private readonly blockedEmitter = this._register(new Emitter<void>());
+	readonly onDidBlockRemoteAccess: Event<void> = this.blockedEmitter.event;
 
 	readonly transport: TelegramTransport;
 	readonly authorization: TelegramAuthorization;
@@ -67,6 +71,14 @@ export class TelegramRemoteContribution extends Disposable {
 
 	get isAcceptingUpdates(): boolean {
 		return this.acceptingUpdates;
+	}
+
+	get pairedIdentity(): TelegramPairedIdentity | undefined {
+		return this.authorization.pairedIdentity;
+	}
+
+	get onDidChangePairedIdentity(): Event<TelegramPairedIdentity | undefined> {
+		return this.authorization.onDidChangePairedIdentity;
 	}
 
 	/** Starts validation and polling only after a versioned consent record is durable. */
@@ -150,9 +162,30 @@ export class TelegramRemoteContribution extends Disposable {
 		return identity ? this.callbacks.consume(callbackData, identity, constraints) : undefined;
 	}
 
+	sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
+		return this.transport.sendMessage(chatId, text, options);
+	}
+
+	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {
+		return this.transport.answerCallbackQuery(callbackQueryId, options);
+	}
+
+	invalidateSessionCallbacks(sessionId: string): void {
+		this.callbacks.invalidateSession(sessionId);
+	}
+
+	invalidateRequestCallbacks(sessionId: string, requestId: string): void {
+		this.callbacks.invalidateRequest(sessionId, requestId);
+	}
+
+	invalidateAllCallbacks(): void {
+		this.callbacks.invalidateAll();
+	}
+
 	async revokePairing(): Promise<void> {
 		this.pairing.cancel();
 		this.callbacks.invalidateAll();
+		this.registry.detachTransport(this.transport.id);
 		await this.authorization.revokePairing();
 	}
 
@@ -210,6 +243,10 @@ export class TelegramRemoteContribution extends Disposable {
 					throw new TelegramBotApiError('aborted', 'Telegram connection startup was cancelled.');
 				}
 				this.acceptingUpdates = true;
+				const identity = this.authorization.pairedIdentity;
+				if (identity) {
+					this.authorizedConnectionEmitter.fire(identity);
+				}
 			}, pollingOptions);
 			return bot;
 		} catch (error) {
@@ -264,6 +301,7 @@ export class TelegramRemoteContribution extends Disposable {
 				}
 				this.callbacks.invalidateAll();
 				this.pairingCompletedEmitter.fire(this.authorization.pairedIdentity!);
+				this.authorizedConnectionEmitter.fire(this.authorization.pairedIdentity!);
 				await this.sendPairingMessage(result.identity.chatId, l10n.t('Pairing succeeded. Telegram Remote is authorized for this private chat.'));
 			} catch {
 				this.logService.error('[TelegramRemote] Failed to persist Telegram pairing state.');
@@ -294,6 +332,7 @@ export class TelegramRemoteContribution extends Disposable {
 		this.tokenFingerprint = undefined;
 		this.pairing.cancel();
 		this.callbacks.invalidateAll();
+		this.blockedEmitter.fire();
 	}
 
 	public override dispose(): void {

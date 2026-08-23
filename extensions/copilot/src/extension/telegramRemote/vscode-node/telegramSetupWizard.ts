@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { hostname } from 'node:os';
 import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import { ConfigKey, ConfigTarget, IConfigurationService } from '../../../platform/configuration/common/configurationService';
@@ -13,9 +12,9 @@ import { Emitter } from '../../../util/vs/base/common/event';
 import { Disposable, DisposableStore, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { TelegramBotApiError, TelegramPollingStatus, validateTelegramBotToken } from '../common/telegramTypes';
 import type { TelegramPairedIdentity } from '../node/telegramAuthorization';
-import { getTelegramConsentScopeFingerprint } from '../node/telegramConsent';
 import { TelegramPairingChallenge } from '../node/telegramPairingService';
 import { TelegramPollerLeaseHeldError } from '../node/telegramPollerLease';
+import { getTelegramRemoteEnvironment } from './telegramRemoteEnvironment';
 import { TelegramRemoteContribution } from './telegramRemoteContribution';
 
 export const TelegramRemoteCommand = Object.freeze({
@@ -322,15 +321,11 @@ export class TelegramSetupWizard extends Disposable {
 	}
 
 	private getConsentScope(): TelegramConsentScope {
-		const workspaceIdentifiers = vscode.workspace.workspaceFile
-			? [vscode.workspace.workspaceFile.toString()]
-			: (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString());
-		const openWorkspaceLabel = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath || folder.uri.toString()).join(', ');
-		const workspaceLabel = vscode.workspace.workspaceFile?.fsPath ?? (openWorkspaceLabel || l10n.t('No workspace is open'));
+		const environment = getTelegramRemoteEnvironment();
 		return {
-			fingerprint: getTelegramConsentScopeFingerprint(vscode.env.machineId, workspaceIdentifiers),
-			workstationLabel: hostname(),
-			workspaceLabel,
+			fingerprint: environment.consentScopeFingerprint,
+			workstationLabel: environment.workstationLabel,
+			workspaceLabel: environment.workspaceLabel,
 		};
 	}
 

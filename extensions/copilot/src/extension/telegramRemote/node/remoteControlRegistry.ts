@@ -264,8 +264,13 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		);
 	}
 
-	abort(sessionId: string): Promise<void> {
-		return this.bindingsBySessionId.get(sessionId)?.session.abort() ?? Promise.resolve();
+	async abort(sessionId: string): Promise<boolean> {
+		const session = this.bindingsBySessionId.get(sessionId)?.session;
+		if (!session) {
+			return false;
+		}
+		await session.abort();
+		return true;
 	}
 
 	private acceptLiveEvent(sessionId: string, binding: ISessionBinding, event: SessionEvent): void {

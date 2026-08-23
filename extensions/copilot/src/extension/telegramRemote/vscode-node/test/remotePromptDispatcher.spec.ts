@@ -51,4 +51,16 @@ describe('RemotePromptDispatcher', () => {
 		expect(takePendingCopilotCLIRequestContext('session-1', result.correlationId)).toBeUndefined();
 		expect(logService.error).toHaveBeenCalledTimes(1);
 	});
+
+	it('clears its correlation when command dispatch throws synchronously', () => {
+		vscodeMocks.executeCommand.mockImplementation(() => { throw new Error('sync rejection'); });
+		const logService = new class extends mock<ILogService>() {
+			override error = vi.fn();
+		};
+		const dispatcher = new RemotePromptDispatcher(logService);
+		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: '43' };
+
+		expect(() => dispatcher.dispatch('session-sync', 'prompt', origin)).toThrow('sync rejection');
+		expect(logService.error).toHaveBeenCalledOnce();
+	});
 });
