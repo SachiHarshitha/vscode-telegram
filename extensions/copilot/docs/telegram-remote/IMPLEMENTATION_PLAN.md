@@ -53,6 +53,8 @@ Telegram-specific work does not begin until the native dispatcher and the transp
 
 ## 3. Phase 0 — baseline, controller path and guardrails
 
+**Status:** Implemented on the revalidated baseline. Post-change validation is recorded in `compatibility.json`.
+
 ### Code and metadata changes
 
 - Add machine-readable compatibility metadata containing the baseline values above, the enabled API proposal list, and a Telegram patch revision.
@@ -68,6 +70,9 @@ Telegram-specific work does not begin until the native dispatcher and the transp
 extensions/copilot/src/platform/configuration/common/configurationService.ts
 extensions/copilot/package.json
 extensions/copilot/docs/telegram-remote/compatibility.json       (new)
+extensions/copilot/src/extension/telegramRemote/common/telegramRemoteCompatibility.ts (new)
+extensions/copilot/src/extension/telegramRemote/common/test/telegramRemoteCompatibility.spec.ts (new)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts
 ```
 
 ### Exit criteria

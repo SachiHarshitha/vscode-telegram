@@ -23,6 +23,7 @@ import { IExtensionContribution } from '../../common/contributions';
 import { prExtensionInstalledContextKey } from '../../contextKeys/vscode-node/contextKeys.contribution';
 import { GitBranchNameGenerator } from '../../prompt/node/gitBranch';
 import { ChatSummarizerProvider } from '../../prompt/node/summarizer';
+import { resolveTelegramRemoteHostCompatibility, TELEGRAM_REMOTE_BUILD_MARKER, TELEGRAM_REMOTE_PATCH_REVISION } from '../../telegramRemote/common/telegramRemoteCompatibility';
 import { IToolsService } from '../../tools/common/toolsService';
 import { IAgentSessionsWorkspace } from '../common/agentSessionsWorkspace';
 import { IChatSessionMetadataStore } from '../common/chatSessionMetadataStore';
@@ -118,6 +119,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 	}
 
 	private registerCopilotCLIServices(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {
+		this.registerTelegramRemoteControllerHost(logService);
 		const cloudSessionProvider = this.registerCopilotCloudAgent();
 		const copilotcliAgentInstaService = instantiationService.createChild(
 			new ServiceCollection(
@@ -191,6 +193,25 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 		// #endregion
 
 		return { sessionMetadata };
+	}
+
+	/**
+	 * Sole composition point for Telegram Remote contributions. Phase 0 intentionally registers
+	 * only the compatibility/build diagnostic; transport, network and UI work start in later phases.
+	 */
+	private registerTelegramRemoteControllerHost(logService: ILogService): void {
+		const compatibility = resolveTelegramRemoteHostCompatibility({
+			sessionController: true,
+			agentSessionsWorkspace: vscode.workspace.isAgentSessionsWorkspace,
+		});
+		const marker = `${TELEGRAM_REMOTE_BUILD_MARKER}; patch=${TELEGRAM_REMOTE_PATCH_REVISION}`;
+
+		if (!compatibility.supported) {
+			logService.info(`[TelegramRemote] ${marker}; unavailable=${compatibility.reason}`);
+			return;
+		}
+
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=0; contribution=not-registered`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

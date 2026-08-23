@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "capturedAt": "2026-08-23",
+    "vscodeCommit": "2b514caa28dd1a2d41a4494a618b1188e03355ef",
+    "copilotExtension": {
+      "id": "GitHub.copilot-chat",
+      "version": "0.63.0",
+      "vscodeEngine": "^1.135.0",
+      "nodeEngine": ">=22.14.0"
+    },
+    "copilotRuntime": {
+      "package": "@github/copilot",
+      "declaredRange": "^1.0.73",
+      "lockedVersion": "1.0.73"
+    }
+  },
+  "enabledApiProposals": [
+    "agentSessionsWorkspace",
+    "agentsWindowConfiguration",
+    "chatDebug",
+    "chatHooks",
+    "extensionsAny",
+    "newSymbolNamesProvider",
+    "interactive",
+    "codeActionAI",
+    "activeComment",
+    "commentReveal",
+    "contribCommentThreadAdditionalMenu",
+    "contribCommentsViewThreadMenus",
+    "contribChatEditorInlineGutterMenu",
+    "documentFiltersExclusive",
+    "embeddings",
+    "findTextInFiles",
+    "findTextInFiles2",
+    "languageModelToolSupportsModel",
+    "findFiles2",
+    "textSearchProvider",
+    "terminalDataWriteEvent",
+    "terminalExecuteCommandEvent",
+    "terminalSelection",
+    "terminalQuickFixProvider",
+    "mappedEditsProvider",
+    "aiRelatedInformation",
+    "aiSettingsSearch",
+    "chatParticipantAdditions",
+    "defaultChatParticipant",
+    "contribSourceControlInputBoxMenu",
+    "authLearnMore",
+    "testObserver",
+    "aiTextSearchProvider",
+    "chatParticipantPrivate",
+    "chatProvider",
+    "contribDebugCreateConfiguration",
+    "chatReferenceDiagnostic",
+    "textSearchProvider2",
+    "chatReferenceBinaryData",
+    "languageModelSystem",
+    "languageModelCapabilities",
+    "languageModelPricing",
+    "inlineCompletionsAdditions",
+    "chatStatusItem",
+    "chatInputNotification",
+    "taskProblemMatcherStatus",
+    "contribLanguageModelToolSets",
+    "textDocumentChangeReason",
+    "resolvers",
+    "taskExecutionTerminal",
+    "dataChannels",
+    "languageModelThinkingPart",
+    "chatSessionsProvider",
+    "devDeviceId",
+    "contribEditorContentMenu",
+    "chatPromptFiles",
+    "mcpServerDefinitions",
+    "tabInputMultiDiff",
+    "workspaceTrust",
+    "environmentPower",
+    "terminalTitle",
+    "toolInvocationApproveCombination",
+    "chatSessionCustomizationProvider"
+  ],
+  "telegramRemote": {
+    "implementationPhase": 0,
+    "patchRevision": 1,
+    "buildMarker": "vscode-telegram/telegram-remote",
+    "controllerOnly": true,
+    "agentSessionsWorkspaceSupported": false,
+    "networkContributionRegistered": false,
+    "uiContributionRegistered": false
+  },
+  "baselineValidation": {
+    "environment": {
+      "platform": "win32-x64",
+      "node": "v24.1.0",
+      "dependencySetup": "npm ci --ignore-scripts --workspaces=false && npm run postinstall",
+      "dependencySetupStatus": "passed",
+      "note": "The root native npm ci requires Visual Studio Spectre-mitigated libraries on this machine; extension-local validation uses the pinned extension lockfile."
+    },
+    "typecheck": {
+      "command": "npm run typecheck",
+      "status": "passed"
+    },
+    "copilotCliUnitTests": {
+      "command": "npm run test:unit -- src/extension/chatSessions/copilotcli src/extension/chatSessions/vscode-node/test/copilotCLIChatSessions.spec.ts",
+      "status": "baseline-failure",
+      "testFilesPassed": 42,
+      "testFilesFailed": 1,
+      "testsPassed": 815,
+      "testsFailed": 1,
+      "testsSkipped": 5,
+      "knownFailure": {
+        "file": "src/extension/chatSessions/copilotcli/node/test/copilotcliSession.spec.ts",
+        "test": "preserves order of edit toolCallIds and permissions for multiple pending edits",
+        "isolatedReproduction": true
+      }
+    }
+  },
+  "phase0Validation": {
+    "typecheck": {
+      "command": "npm run typecheck",
+      "status": "passed"
+    },
+    "targetedUnitTests": {
+      "command": "npx vitest --run --pool=forks src/extension/telegramRemote/common/test/telegramRemoteCompatibility.spec.ts src/extension/chatSessions/vscode-node/test/copilotCLIChatSessions.spec.ts",
+      "status": "passed",
+      "testFilesPassed": 2,
+      "testsPassed": 17
+    },
+    "metadataAlignment": {
+      "status": "passed",
+      "manifestDefaultMatchesConfigDefault": true,
+      "enabledApiProposalsMatchManifest": true
+    },
+    "sourceBuild": {
+      "command": "node build/lib/preLaunch.ts",
+      "node": "v24.18.0",
+      "status": "passed"
+    },
+    "runtimeSmoke": {
+      "node": "v24.18.0",
+      "status": "passed",
+      "extensionActivated": true,
+      "controllerMarkerObserved": "[TelegramRemote] vscode-telegram/telegram-remote; patch=1; host=controller; phase=0; contribution=not-registered",
+      "networkContributionRegistered": false,
+      "uiContributionRegistered": false,
+      "environmentNote": "The isolated Code OSS launch used exact-version native binaries from the installed VS Code Insiders build for @vscode/policy-watcher 1.4.0, @vscode/spdlog 0.15.8 and @vscode/sqlite3 5.1.12-vscode because this machine lacks the Visual Studio Spectre-mitigated libraries needed to rebuild them."
+    }
+  }
+}
