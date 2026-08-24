@@ -50,7 +50,13 @@ export interface TelegramRequestActivity {
 	completeRequest(identity: TelegramPairedIdentity, sessionId: string, requestId: string, outcome: 'completed' | 'failed' | 'cancelled' | 'superseded'): Promise<void>;
 	isStopControl(sessionId: string, requestId: string, generation: number, messageId: number): boolean;
 	closeRemoteConnection(): string | undefined;
+	handleCallback?(update: TelegramUpdate, identity: TelegramPairedIdentity): Promise<boolean>;
+	resolveReply?(update: TelegramUpdate, identity: TelegramPairedIdentity): Promise<TelegramActivityReplyResolution>;
 }
+
+export type TelegramActivityReplyResolution =
+	| { readonly kind: 'none' | 'handled' | 'stale' }
+	| { readonly kind: 'steer'; readonly sessionId: string; readonly requestId?: string; readonly activityRoundId: string };
 
 export interface TelegramRequestTerminalEvent {
 	readonly identity: TelegramPairedIdentity;
@@ -165,6 +171,20 @@ export class TelegramCommandRouter extends Disposable {
 					await this.safeSend(identity.chatId, l10n.t('Unknown Telegram Remote command. Use /start, /new, /status, /sessions, /deselect, or /stop.'));
 					return;
 				case undefined:
+					if (this.activity.resolveReply) {
+						const reply = await this.activity.resolveReply(update, identity);
+						if (reply.kind === 'handled') {
+							return;
+						}
+						if (reply.kind === 'stale') {
+							await this.safeSend(identity.chatId, l10n.t('That Copilot activity is no longer steerable. Use /status or reply to a currently running activity.'));
+							return;
+						}
+						if (reply.kind === 'steer') {
+							await this.dispatchPrompt(update, identity, text);
+							return;
+						}
+					}
 					if (await this.dispatchPendingNewSession(update, identity, text)) {
 						return;
 					}
@@ -249,6 +269,10 @@ export class TelegramCommandRouter extends Disposable {
 				await this.safeAnswer(callback.id, { text: stopped ? l10n.t('Stopped.') : l10n.t('No active task.'), showAlert: !stopped });
 				return;
 			}
+		}
+
+		if (await this.activity.handleCallback?.(update, identity)) {
+			return;
 		}
 
 		await this.safeAnswer(callback.id, { text: l10n.t('This control is stale. Use /status to refresh it.'), showAlert: true });

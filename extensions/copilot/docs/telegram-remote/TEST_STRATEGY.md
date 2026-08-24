@@ -68,36 +68,38 @@ Cover:
 - wrong nonce,
 - same callback replayed twice.
 
-### Event renderer
+### Activity aggregation and Rich renderer
 
 Snapshot/test rendering for:
 
-- assistant text,
-- tool start/complete,
-- compact semantic tool summaries with raw output/diff/reasoning absent,
-- detailed current-tool output in a bounded expandable blockquote,
-- debug-only bounded/redacted diagnostic reasoning,
-- final-answer Telegram-safe HTML for emphasis, links, lists, code, blockquotes, tables, Unicode and emoji,
-- raw HTML escaping and unsafe-link neutralization,
-- independently valid 4,096-character chunk boundaries,
+- transport-neutral `ActivityRound` creation,
+- read/search burst grouping and semantic-boundary separation,
+- command/edit `toolCallId` start-to-completion lifecycle,
+- failed command rendering,
+- SDK-visible reasoning/progress rounds without hidden chain-of-thought reconstruction,
+- `InputRichBlockDetails` generation with only round-local details,
+- redaction and hard bounds before Telegram presentation,
+- compact/detailed/debug disclosure of successful tool output and correlation metadata,
 - subagent state,
 - errors,
 - context usage,
 - output truncation.
 
-### Activity coalescer
+### Granular activity timeline
 
 Cover:
 
-- many deltas collapse into bounded edits,
-- final answer is delivered separately and exactly once,
-- rate limit respected,
+- one meaningful round creates one persistent Rich Message,
+- command start and completion edit the same `message_id`,
+- high-frequency updates respect the minimum edit interval,
 - replay seeds internal state without appearing as new current work,
 - new prompt generation clears old visible activity state,
 - session switch clears previous activity state,
 - Stop markup is removed on complete, failure, cancel, supersession and invalid scope,
 - Disable during a correlated turn removes Stop, reports drain-only local continuation, and waits for the SDK terminal event before final completion/answer delivery,
-- identical status text/control state skips the edit, control removal sends an explicit empty keyboard, and `message-not-modified` does not create a replacement message,
+- `message-not-modified` is accepted, while deleted/expired/failed edits create a reply-linked replacement,
+- `(chatId,messageId)` correlation resolves live steering and rejects completed/expired/wrong-generation replies,
+- timeline metadata never calls `getSession()` or retains `IReference<ICopilotCLISession>`,
 - Bot API failures do not leak credentials or raw content.
 
 ### Session scope policy
@@ -230,16 +232,15 @@ Critical cases:
 
 ### Session reference lifecycle
 
-- one-shot operation disposes its `IReference<ICopilotCLISession>` in success and error paths,
-- long-lived binding retains one reference until detach,
-- reselection disposes the previous reference,
-- session deletion, Telegram disable and extension deactivation dispose the reference,
-- repeated attach/detach leaves no reference or listener leak,
-- disposed sessions receive no later remote action.
+- listing, selection, activity correlation and timeline delivery use metadata APIs and do not call `getSession()`,
+- `/new` creates provisional controller metadata and does not acquire a wrapper reference; the first native prompt owns materialization,
+- live wrapper control remains owned by the native request path and registry binding,
+- session deletion, Telegram disable and extension deactivation leave no downstream wrapper/listener reference,
+- repeated attach/detach leaves no listener leak and disposed sessions receive no later remote action.
 
-## 6. Permission integration tests (Phase 6 target)
+## 6. Permission integration tests
 
-Current Phase 5.1 tests instead assert that Telegram advertises no permission-response capability and that setup, status bar, `/status`, and the native in-chat warning say permission prompts must be answered locally. The race suite below becomes required when Phase 6 registers a Telegram responder.
+The Telegram responder is active, so callback correlation and the registry response race are release-gating behavior.
 
 Simulate:
 
@@ -389,7 +390,7 @@ Required before V1:
 - pairing code expires,
 - pairing code cannot be reused,
 - callback replay rejected,
-- cross-session permission callback rejected when Phase 6 is implemented,
+- cross-session permission callback rejected,
 - cross-user callback rejected,
 - duplicate updates do not duplicate actions,
 - bot token absent from logs/errors/snapshots,
@@ -423,32 +424,33 @@ This default profile is intentionally persistent so iterative runs reuse GitHub/
 9. Verify the remote message appears in native VS Code chat.
 10. Start a longer task.
 11. While running, steer: `Do not modify files yet; only diagnose.`
-12. Trigger an operation that requires permission; verify Telegram claims no approval capability and the prompt must be answered locally.
-13. Verify compact activity contains semantic actions but no raw diff, stdout/stderr, file contents or reasoning.
-14. Switch the local `activityDetail` setting to `detailed`; verify only the current bounded detail appears in a collapsed expandable quote. Test `debug` only with synthetic non-secret content and return to `compact` afterward.
+12. Trigger an operation that requires permission; verify an individual expandable bubble offers only **Approve once** and **Deny**, and that answering locally first makes Telegram's control stale.
+13. Verify the activity appears as chronological semantic Rich Message bubbles: read/search bursts aggregate, while commands, edits, progress/direction changes and the final result remain separate.
+14. Expand several bubbles and verify each contains only its own bounded, redacted details. Confirm no hidden chain-of-thought claim or unrelated request history appears.
 15. Select another session and confirm the existing picker/status message is edited rather than duplicated; button labels remain concise while status shows the full authorized path.
-16. Start a long task, verify one activity card owns Stop, press Stop, and verify its buttons disappear.
-17. Verify the final assistant answer arrives separately with working links/lists/code/Unicode and only once.
-18. Open an empty VS Code window using a separate profile and verify foreign session titles/paths are not listed. Repeat with a sibling repository and one authorized multi-root folder.
-19. Return to VS Code and verify the same session/history/state is intact.
-20. Enable/smoke-test Mission Control and confirm it still works.
-21. Disable Telegram locally and verify remote commands no longer act, attached state clears immediately, and the status item becomes muted `Telegram: Off` with Enable but no Unpair/Disable action.
-22. Enable again and verify the same exact-scope configuration reconnects without asking for the bot token; confirm the authorized selection restores only after connection/scope validation.
-23. Restart the extension-development window while disabled, enable again, and repeat the no-token-prompt check.
-24. Simulate a retryable network failure, use Reconnect, and confirm only one poller resumes. If the saved token/consent/pairing is intentionally invalidated, confirm Enable routes to setup instead.
+16. Start a long task, verify the initial request bubble owns Stop, press Stop, and verify its buttons disappear.
+17. Reply to a running reasoning/progress bubble and verify the text immediately steers the same native Copilot session; repeat after completion and verify a stale response with no dispatch.
+18. Verify a running command bubble is edited in place on completion rather than duplicated.
+19. Open an empty VS Code window using a separate profile and verify foreign session titles/paths are not listed. Repeat with a sibling repository and one authorized multi-root folder.
+20. Return to VS Code and verify the same session/history/state is intact.
+21. Enable/smoke-test Mission Control and confirm it still works.
+22. Disable Telegram locally and verify remote commands no longer act, attached state clears immediately, and the status item becomes muted `Telegram: Off` with Enable but no Unpair/Disable action.
+23. Enable again and verify the same exact-scope configuration reconnects without asking for the bot token; confirm the authorized selection restores only after connection/scope validation.
+24. Restart the extension-development window while disabled, enable again, and repeat the no-token-prompt check.
+25. Simulate a retryable network failure, use Reconnect, and confirm only one poller resumes. If the saved token/consent/pairing is intentionally invalidated, confirm Enable routes to setup instead.
 
 Do not mark this real-bot checklist passed until a human performs it. Never print or inspect the persistent profile's bot token or GitHub/Copilot credentials.
 
-## 13.1 Phase 5.1 automated runner
+## 13.1 Automated regression
 
 From `extensions/copilot`:
 
 ```powershell
-.\script\telegram-remote\test-phase5.ps1 -SkipTypecheck
-.\script\telegram-remote\test-phase5.1.ps1
+npx vitest run src/extension/telegramRemote
+npx tsc --noEmit --project tsconfig.json
 ```
 
-The Phase 5.1 runner currently covers 25 files / 241 tests using fake tokens and in-memory Bot API hosts only. It includes the Phase 5.2 lifecycle corrections, does not read `.env`, and does not contact Telegram.
+The Phase 5.3 deterministic run covers 26 files / 148 tests using fake tokens and in-memory Bot API hosts only. It includes the Phase 5.2 lifecycle corrections, Rich Message payloads, semantic rounds and reply/callback control flow; it does not read `.env` or contact Telegram. The older PowerShell runners remain useful phase-history gates but do not yet enumerate every new Phase 5.3 file.
 
 ## 14. Release compatibility report
 

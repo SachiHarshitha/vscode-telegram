@@ -15,7 +15,7 @@ import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions
 import { RemoteControlRegistry } from '../remoteControlRegistry';
 import type { TelegramPairedIdentity } from '../telegramAuthorization';
 import { TelegramCallbackRegistry, type TelegramCallbackConstraints, type TelegramCallbackInput } from '../telegramCallbackRegistry';
-import { TelegramCommandRouter, type TelegramCommandHost, type TelegramPromptDispatcher, type TelegramRequestActivity, type TelegramRequestTerminalEvent, type TelegramSessionCreator } from '../telegramCommandRouter';
+import { TelegramCommandRouter, type TelegramActivityReplyResolution, type TelegramCommandHost, type TelegramPromptDispatcher, type TelegramRequestActivity, type TelegramRequestTerminalEvent, type TelegramSessionCreator } from '../telegramCommandRouter';
 import { TelegramSessionState } from '../telegramSessionState';
 import { TestTelegramExtensionContext, telegramCallbackUpdate, telegramMessageUpdate } from './testTelegramSecurityState';
 
@@ -140,6 +140,28 @@ describe('TelegramCommandRouter', () => {
 		test.activity.reachTerminal({ identity, sessionId: firstSession.id, requestId: 'request-1', outcome: 'completed' });
 	});
 
+	it('routes a reply to a live activity through the native prompt dispatcher', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.activity.resolveReply.mockResolvedValueOnce({
+			kind: 'steer', sessionId: firstSession.id, requestId: 'request-1', activityRoundId: 'round-1',
+		});
+		const update = telegramMessageUpdate(43, 'Use the generic transport registry');
+		const replyUpdate: TelegramUpdate = {
+			...update,
+			message: update.message ? {
+				...update.message,
+				reply_to_message: { message_id: 99, date: 1, chat: update.message.chat },
+			} : undefined,
+		};
+
+		await test.host.deliver(replyUpdate);
+
+		expect(test.activity.resolveReply).toHaveBeenCalledWith(replyUpdate, identity);
+		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Use the generic transport registry', expect.objectContaining({ kind: 'telegram', updateId: '43' }));
+		expect(test.sessionService.getSession).not.toHaveBeenCalled();
+	});
+
 	it('binds Stop to the current activity message and rejects stale generations', async () => {
 		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
 		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
@@ -260,6 +282,8 @@ class TestRequestActivity implements TelegramRequestActivity {
 			this.active = undefined;
 		}
 	});
+	readonly handleCallback = vi.fn(async () => false);
+	readonly resolveReply = vi.fn<(_update: TelegramUpdate, _identity: TelegramPairedIdentity) => Promise<TelegramActivityReplyResolution>>(async () => ({ kind: 'none' }));
 	closeRemoteConnection(): string | undefined {
 		return this.active?.sessionId;
 	}

@@ -48,7 +48,7 @@ import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../telegramR
 import { IRemoteControlRegistry } from '../../telegramRemote/common/remoteControlTypes';
 import { TelegramRemoteContribution } from '../../telegramRemote/vscode-node/telegramRemoteContribution';
 import { TelegramCommandRouter } from '../../telegramRemote/node/telegramCommandRouter';
-import { TelegramActivityCoalescer } from '../../telegramRemote/node/telegramActivityCoalescer';
+import { TelegramActivityTimeline } from '../../telegramRemote/node/telegramActivityTimeline';
 import { TelegramSessionState } from '../../telegramRemote/node/telegramSessionState';
 import { getTelegramRemoteEnvironment } from '../../telegramRemote/vscode-node/telegramRemoteEnvironment';
 import { CurrentWorkspaceTelegramSessionScopePolicy } from '../../telegramRemote/vscode-node/telegramSessionScope';
@@ -236,8 +236,8 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			...telegramEnvironment,
 			remotePermissionResponses: getTelegramRemoteCapabilities(telegramContribution.transport).remotePermissionResponses,
 		};
-		const activityCoalescer = this._register(instantiationService.createInstance(
-			TelegramActivityCoalescer,
+		const activityTimeline = this._register(instantiationService.createInstance(
+			TelegramActivityTimeline,
 			telegramContribution,
 			telegramSessionState,
 			sessionService,
@@ -246,7 +246,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			() => configurationService.getConfig(ConfigKey.Advanced.CLITelegramActivityDetail),
 			undefined,
 		));
-		this._register(telegramContribution.transport.setEventPublisher(activityCoalescer));
+		this._register(telegramContribution.transport.setEventPublisher(activityTimeline));
 		this._register(instantiationService.createInstance(
 			TelegramCommandRouter,
 			telegramContribution,
@@ -259,11 +259,11 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			},
 			telegramCommandEnvironment,
 			sessionScopePolicy,
-			activityCoalescer,
+			activityTimeline,
 		));
 		const telegramSetupWizard = this._register(instantiationService.createInstance(TelegramSetupWizard, telegramContribution));
 		this._register(instantiationService.createInstance(TelegramStatusBar, telegramContribution, telegramSetupWizard));
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=5.2; remote-control-registry=ready; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-routing=authorized-only; telegram-activity=drain-only; telegram-network=consent-gated`);
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=5.3; remote-control-registry=ready; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-routing=authorized-only; telegram-activity=rich-timeline; telegram-network=consent-gated`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

@@ -22,19 +22,19 @@ The goal is to make upgrade risk explicit.
 | --- | --- | --- | --- | --- |
 | List Copilot CLI sessions | `ICopilotCLISessionService.getAllSessions()` | Upstream internal | Yes | Preferred because Telegram targets the same VS Code sessions |
 | Get session | `ICopilotCLISessionService.getSession()` | Upstream internal | Yes | Returns `IReference<ICopilotCLISession>`; caller must dispose it |
-| Create session | `ICopilotCLISessionService.createSession()` | Upstream internal | Yes | Reuse workspace/MCP/worktree setup and dispose returned reference |
+| Create session from Telegram | `CopilotCLIChatSessionContentProvider.createTelegramSession()` then native first prompt | Upstream controller + narrow glue | Implemented | Creates provisional controller metadata only; native request materializes the normal wrapper/workspace/MCP path, so Telegram owns no session reference |
 | Session history/replay | `getChatHistory()` + `ICopilotCLISession.getReplayEvents()` | Upstream + SDK | Yes | Phase 1 filters persisted replay types and buffers/deduplicates live overlap without exposing the SDK session |
 | Normal prompt | pending request context + `workbench.action.chat.openSessionWithPrompt.copilotcli` | Upstream internal command | Yes in current fork | Dispatch without awaiting the full turn; required for real `ChatRequest`/token; no direct SDK send |
 | Mid-turn steering | same native request path, then upstream SDK `send(... mode: 'immediate')` | Upstream internal + SDK | Yes | Busy-session detection remains inside `CopilotCLISession` |
 | Remote origin attribution | registry-created discriminated origin | Downstream seam | Required | Never infer permission/mode from `SendOptions.source` string prefixes |
 | Queueing | SDK enqueue/default send behavior | Copilot SDK | Yes | P1 |
 | Abort | registry session binding -> `ICopilotCLISession.abort()` -> wrapped SDK `abort()` | Downstream seam + SDK | Yes | Implemented in Phase 1; logical attachment remains when no live wrapper is bound |
-| Assistant streaming | `assistant.message_delta`, `assistant.message` | Copilot SDK | Yes | Telegram renderer coalesces deltas |
+| Assistant streaming | `assistant.message_delta`, `assistant.message` | Copilot SDK | Yes | Deltas update their semantic progress round; full messages finalize it |
 | Intent/status | `assistant.intent` and session state events | Copilot SDK | Yes where exposed | Do not synthesize hidden reasoning |
 | Reasoning stream | `assistant.reasoning[_delta]` | Copilot SDK | Conditional | Model/provider may expose readable, opaque or no reasoning |
-| Tool activity | `tool.execution_start`, `tool.execution_progress`, `tool.execution_partial_result`, `tool.execution_complete` | Copilot SDK 1.0.73 | Yes | Phase 5 uses only these verified event names |
-| Permission prompt | `permission.requested` | Copilot SDK/upstream | Phase 6 for Telegram | Current Telegram capability is false; local UI remains authoritative |
-| Permission response | registry result consumed by `CopilotCLISession`, then SDK `respondToPermission()` | Downstream seam + SDK | Phase 6 for Telegram | Future design only; no raw SDK session exposure |
+| Tool activity | `tool.execution_start`, `tool.execution_progress`, `tool.execution_partial_result`, `tool.execution_complete` | Copilot SDK 1.0.73 | Yes | `toolCallId` owns one ActivityRound/message lifecycle; reads/searches aggregate semantically |
+| Permission prompt | `permission.requested` | Copilot SDK/upstream | Yes | Individual waiting Rich Message with one-shot controls |
+| Permission response | registry result consumed by `CopilotCLISession`, then SDK `respondToPermission()` | Downstream seam + SDK | Yes | Telegram returns approve-once/deny only; no raw SDK session exposure or policy mutation |
 | Agent question | `user_input.requested` | Copilot SDK | Yes | Choice/freeform input |
 | User-input response | registry result consumed by `CopilotCLISession`, then SDK `respondToUserInput()` | Downstream seam + SDK | Yes | P0 |
 | Plan approval/exit | current session/SDK plan request APIs | Upstream + SDK | Yes | P1; follow current source API names |
@@ -53,9 +53,13 @@ The goal is to make upgrade risk explicit.
 | Native advanced model provider integration | richer LM/chat provider proposals | Proposed VS Code API | Yes only when enabled | Inherited from upstream fork |
 | Native remote prompt rendered in same chat | pending request context + upstream internal workbench command | Internal | Required in current fork | Both controller implementations use this route; guard with compatibility tests |
 | Telegram long polling | `getUpdates` | Telegram Bot API | Yes | Default transport |
-| Telegram buttons | `InlineKeyboardMarkup` / callback queries | Telegram Bot API | Yes | Permissions, models, sessions |
-| Live status edit | `editMessageText` / reply markup edit | Telegram Bot API | Yes | Needed to avoid chat flooding |
-| Safe final-answer formatting | existing `markdown-it` -> strict Telegram HTML subset | Existing dependency + Telegram Bot API | Yes | Raw HTML escaped; unsafe schemes removed; independently balanced 4,096-character chunks |
+| Telegram buttons | `InlineKeyboardMarkup` / `CallbackQuery` | Telegram Bot API | Yes | Sessions, Stop, permissions and questions use opaque one-shot callback data |
+| Rich activity send | `sendRichMessage` + `InputRichMessage` | Telegram Bot API 10.1/10.2 | Yes | One persistent message per semantic ActivityRound |
+| Expandable activity | `InputRichBlockDetails` with paragraph/pre/list blocks | Telegram Bot API 10.2 | Yes | Collapsed summary plus details belonging only to that round |
+| Live status edit | `editMessageText` with `rich_message` / reply markup edit | Telegram Bot API | Yes | Updates the original running-round message; replacement fallback on edit failure |
+| Reply correlation | incoming `Message.reply_to_message` + `ReplyParameters` | Telegram Bot API | Yes | Reply-to-bubble steering and edit-failure replacement linkage |
+| Rich draft streaming | `sendRichMessageDraft` + `InputRichBlockThinking` | Telegram Bot API 10.1/10.2 | Typed adapter only | Not used by V1 timeline: drafts are ephemeral 30-second previews and provide no persistent reply target |
+| Activity sanitization | bounded event projection + `redactTelegramSecrets()` | Downstream seam | Yes | Presentation receives sanitized, bounded round details; no hidden chain-of-thought extraction |
 | Telegram file download | `getFile` / file endpoint | Telegram Bot API | Yes | P1 |
 | Session-list remote indicator | `ChatSessionItem.description` / `tooltip` | Proposed VS Code API | Yes | `badge`, `status` and `metadata` are already consumed upstream; these two are free |
 | Live indicator refresh | existing `refreshSession({reason:'update'})` on the content provider | Upstream internal | Yes | No new provider or API proposal needed |
@@ -94,7 +98,7 @@ Current source exposes session lifecycle and methods including:
 
 These are internal source interfaces, not public third-party extension APIs. Because this project is a downstream fork, using them is acceptable but creates rebase risk that must be covered by tests.
 
-`getSession()` and `createSession()` return `IReference<ICopilotCLISession>`, not a bare session. Code must retain the reference only while the remote binding or operation needs it and dispose it deterministically. Treat reference acquire/release as part of the API contract and test it.
+`getSession()` and `createSession()` return `IReference<ICopilotCLISession>`, not a bare session. The current Telegram selection, timeline and `/new` paths avoid these calls; tests assert that activity tracking does not acquire a wrapper. Any later caller must retain the reference only for its explicit operation and dispose it deterministically.
 
 ### `CopilotCLISession`
 
@@ -195,6 +199,8 @@ The command action accepts `queue: 'queued' | 'steering'`, forwards the queue ki
 
 Telegram code must not cast `ICopilotCLISession` to `CopilotCLISession` or retain its `sdkSession`. Extend the transport-neutral registry/session seam instead.
 
+`/new` deliberately does not call `ICopilotCLISessionService.createSession()`. The controller provider creates a provisional session in a currently authorized open workspace, and its first prompt travels through the native chat command. This avoids constructing incomplete wrapper options and leaves materialization/reference ownership with the normal controller path.
+
 ### Public `GitHub.copilot-chat` extension export
 
 The installed Copilot extension's small public export does not currently provide the comprehensive session-control surface required by this project. A separate companion extension cannot rely on it for the full feature set.
@@ -203,12 +209,14 @@ The installed Copilot extension's small public export does not currently provide
 
 Never use DOM/screen/chat text scraping as an API.
 
-## 7. Telegram API assumptions
+## 7. Telegram API contract
 
-V1 relies on stable Bot API primitives:
+The Phase 5.3 contract was checked against the official Telegram Bot API 10.2 documentation on 2026-08-24. The narrow dependency-free HTTP adapter now supports:
 
 - `getUpdates` long polling,
 - `sendMessage`,
+- `sendRichMessage`,
+- `sendRichMessageDraft`,
 - `editMessageText`,
 - `editMessageReplyMarkup`,
 - callback queries,
@@ -216,7 +224,9 @@ V1 relies on stable Bot API primitives:
 - bot identity validation (`getMe`),
 - optional file APIs later.
 
-Phase 2 implements the first six primitives in `telegramRemote/node/telegramBotClient.ts`. Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` is owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. Phase 3 adds SecretStorage, private-chat pairing and authorization; Phase 3b adds the explicit versioned consent gate; Phase 4/4.1 use the authorized update plus current-workspace session-scope boundaries for native prompt/steer/abort routing; Phase 5/5.1 project bounded semantic HTML activity and separately sanitized final answers. Networking remains disabled by default and generation-bound Enable/Reconnect cannot create a second poller.
+`InputRichMessage` uses exactly one of `html`, `markdown` or `blocks`; this implementation uses `blocks`. Each activity contains an `InputRichBlockDetails` with a `RichText` summary and nested paragraph/preformatted/list blocks. `InputRichBlockThinking` is accepted only by the draft method. `editMessageText` sends `rich_message` instead of `text`. `sendRichMessageDraft` is private-chat-only, requires a non-zero `draft_id`, returns `True`, and creates a 30-second ephemeral preview that must later be persisted with `sendRichMessage`; therefore the activity timeline uses persistent send/edit instead.
+
+Requests use the extension's `IFetcherService`; response envelopes and method-specific results are validated before they cross into control code. `getUpdates` remains owned by `TelegramService`, which persists the next accepted offset and holds a token-fingerprinted singleton lease. Networking remains disabled by default and generation-bound Enable/Reconnect cannot create a second poller.
 
 Reference: https://core.telegram.org/bots/api
 

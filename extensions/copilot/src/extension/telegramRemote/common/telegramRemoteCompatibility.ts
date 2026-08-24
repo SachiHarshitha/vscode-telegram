@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 export const TELEGRAM_REMOTE_BUILD_MARKER = 'vscode-telegram/telegram-remote';
-export const TELEGRAM_REMOTE_PATCH_REVISION = 10;
+export const TELEGRAM_REMOTE_PATCH_REVISION = 11;
 
 export interface TelegramRemoteHostEnvironment {
 	readonly sessionController: boolean;

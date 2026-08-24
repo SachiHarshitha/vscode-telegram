@@ -210,13 +210,13 @@ Recommended sequence:
 
 No Tailscale or inbound firewall configuration is required for the default long-polling mode.
 
-Current Phase 4.1/5.1 behavior is deliberately conservative:
+Current Phase 5.3 behavior is deliberately conservative:
 
 - only sessions whose valid file-URI working directory is inside a root of the currently consented window are shown or controllable;
 - an empty window, missing working directory or foreign/sibling workspace fails closed; cross-workspace local approval is not implemented yet;
-- permission prompts must be answered locally in this build;
-- `github.copilot.chat.cli.telegram.activityDetail` defaults to `compact`; `detailed` and especially `debug` are local opt-ins that send additional bounded, redacted content through Telegram;
-- each request uses one editable activity card with Stop, followed by a separate formatted final answer.
+- permission prompts expose only per-request **Approve once** and **Deny** controls; Telegram cannot change the permission policy;
+- SDK-visible activity is converted into bounded, redacted semantic rounds; no hidden model chain-of-thought is exposed;
+- each meaningful round is one expandable Telegram Rich Message, and running tool rounds are edited in place.
 
 Lifecycle controls:
 

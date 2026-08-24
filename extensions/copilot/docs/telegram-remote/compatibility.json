@@ -81,8 +81,8 @@
     "chatSessionCustomizationProvider"
   ],
   "telegramRemote": {
-    "implementationPhase": 5.2,
-    "patchRevision": 10,
+    "implementationPhase": 5.3,
+    "patchRevision": 11,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
@@ -100,7 +100,12 @@
     "workspaceSessionScopeRegistered": true,
     "activityDetailRegistered": true,
     "safeHtmlFinalAnswerRegistered": true,
-    "lifecycleRecoveryRegistered": true
+    "lifecycleRecoveryRegistered": true,
+    "granularActivityTimelineRegistered": true,
+    "telegramRichMessagesRegistered": true,
+    "activityReplySteeringRegistered": true,
+    "remotePermissionResponsesRegistered": true,
+    "remoteUserInputResponsesRegistered": true
   },
   "baselineValidation": {
     "environment": {
@@ -552,6 +557,50 @@
     "realBotEndToEnd": {
       "status": "not-run",
       "reason": "The human persistent-profile checklist must verify the real bot; automated tests never read SecretStorage credentials or .env."
+    }
+  },
+  "phase5_3Validation": {
+    "capturedAt": "2026-08-24",
+    "officialApiContract": "https://core.telegram.org/bots/api",
+    "officialBotApiVersion": "10.2",
+    "telegramRemoteAggregate": {
+      "command": "npx vitest run src/extension/telegramRemote",
+      "status": "passed",
+      "testFilesPassed": 26,
+      "testsPassed": 148
+    },
+    "extensionTypecheck": {
+      "command": "npx tsc --noEmit --project tsconfig.json",
+      "status": "passed"
+    },
+    "extensionLint": {
+      "command": "targeted eslint for changed TypeScript files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "extensionBundle": {
+      "command": "npm run compile",
+      "status": "passed"
+    },
+    "controllerAndMissionControlRegression": {
+      "status": "passed",
+      "testFilesPassed": 3,
+      "testsPassed": 29,
+      "focusedCopilotCLISessionTestsPassed": 3
+    },
+    "coverage": [
+      "transport-neutral semantic ActivityRound aggregation",
+      "read/search burst grouping and command toolCallId lifecycle",
+      "InputRichBlockDetails rendering and redaction",
+      "sendRichMessage, sendRichMessageDraft and editMessageText rich_message payloads",
+      "same-message command completion and edit-failure replacement",
+      "message-to-activity correlation, native reply steering and stale replies",
+      "permission callback correlation, replay rejection and local cancellation",
+      "metadata-only activity tracking without session references"
+    ],
+    "realBotRichMessageEndToEnd": {
+      "status": "not-run",
+      "reason": "The configured private bot/chat and current Telegram client must be exercised manually; automated tests use deterministic Bot API mocks."
     }
   }
 }

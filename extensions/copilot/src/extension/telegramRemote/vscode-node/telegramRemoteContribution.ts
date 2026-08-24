@@ -10,7 +10,7 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { IRemoteControlRegistry } from '../common/remoteControlTypes';
-import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramEditMessageTextOptions, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
+import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
 import { TelegramAuthorization, TelegramPairedIdentity } from '../node/telegramAuthorization';
 import { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration, TelegramCallbackRegistry } from '../node/telegramCallbackRegistry';
 import { TelegramConsent } from '../node/telegramConsent';
@@ -242,8 +242,20 @@ export class TelegramRemoteContribution extends Disposable {
 		return this.transport.sendMessage(chatId, text, options);
 	}
 
+	sendRichMessage(chatId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
+		return this.transport.sendRichMessage(chatId, richMessage, options);
+	}
+
+	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
+		return this.transport.sendRichMessageDraft(chatId, draftId, richMessage);
+	}
+
 	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
 		return this.transport.editMessageText(chatId, messageId, text, options);
+	}
+
+	editRichMessage(chatId: number, messageId: number, richMessage: TelegramInputRichMessage, options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true> {
+		return this.transport.editRichMessage(chatId, messageId, richMessage, options);
 	}
 
 	editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramSendMessageOptions['replyMarkup']): Promise<TelegramMessage | true> {

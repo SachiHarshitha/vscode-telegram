@@ -10,8 +10,11 @@ import {
 	TelegramBotApiError,
 	TelegramChatId,
 	TelegramEditMessageTextOptions,
+	TelegramEditRichMessageOptions,
 	TelegramGetUpdatesOptions,
 	TelegramMessage,
+	TelegramInputRichMessage,
+	TelegramSendRichMessageOptions,
 	TelegramSendMessageOptions,
 	TelegramUpdate,
 	TelegramUser,
@@ -85,7 +88,37 @@ export class TelegramBotClient implements ITelegramBotClient {
 			reply_markup: options.replyMarkup,
 			disable_notification: options.disableNotification,
 			parse_mode: options.parseMode,
+			reply_parameters: options.replyParameters,
 		}, parseTelegramMessage);
+	}
+
+	async sendRichMessage(chatId: TelegramChatId, richMessage: TelegramInputRichMessage, options: TelegramSendRichMessageOptions = {}): Promise<TelegramMessage> {
+		validateChatId(chatId);
+		validateRichMessage(richMessage, false);
+		return this.call('sendRichMessage', {
+			chat_id: chatId,
+			rich_message: richMessage,
+			reply_markup: options.replyMarkup,
+			disable_notification: options.disableNotification,
+			reply_parameters: options.replyParameters,
+		}, parseTelegramMessage);
+	}
+
+	async sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
+		validateChatId(chatId);
+		if (chatId <= 0) {
+			throw new TelegramBotApiError('api', 'Telegram rich message drafts require a private chat id.');
+		}
+		if (!Number.isSafeInteger(draftId) || draftId === 0) {
+			throw new TelegramBotApiError('api', 'Telegram rich message draft id must be a non-zero safe integer.');
+		}
+		validateRichMessage(richMessage, true);
+		return this.call('sendRichMessageDraft', { chat_id: chatId, draft_id: draftId, rich_message: richMessage }, value => {
+			if (value !== true) {
+				throw new TelegramBotApiError('invalid-response', 'Telegram sendRichMessageDraft returned an invalid result.');
+			}
+			return true;
+		});
 	}
 
 	async editMessageText(chatId: TelegramChatId, messageId: number, text: string, options: TelegramEditMessageTextOptions = {}): Promise<TelegramMessage | true> {
@@ -98,6 +131,18 @@ export class TelegramBotClient implements ITelegramBotClient {
 			text,
 			reply_markup: options.replyMarkup,
 			parse_mode: options.parseMode,
+		}, parseTelegramMessageOrTrue);
+	}
+
+	async editRichMessage(chatId: TelegramChatId, messageId: number, richMessage: TelegramInputRichMessage, options: TelegramEditRichMessageOptions = {}): Promise<TelegramMessage | true> {
+		validateChatId(chatId);
+		validateMessageId(messageId);
+		validateRichMessage(richMessage, false);
+		return this.call('editMessageText', {
+			chat_id: chatId,
+			message_id: messageId,
+			rich_message: richMessage,
+			reply_markup: options.replyMarkup,
 		}, parseTelegramMessageOrTrue);
 	}
 
@@ -231,4 +276,19 @@ function validateMessageText(text: string): void {
 	if (!text || text.length > maximumMessageLength) {
 		throw new TelegramBotApiError('api', `Telegram message text must contain between 1 and ${maximumMessageLength} characters.`);
 	}
+}
+
+function validateRichMessage(message: TelegramInputRichMessage, allowThinking: boolean): void {
+	if (!Array.isArray(message.blocks) || message.blocks.length === 0 || message.blocks.length > 100) {
+		throw new TelegramBotApiError('api', 'Telegram rich message must contain between 1 and 100 blocks.');
+	}
+	if (!allowThinking && containsThinkingBlock(message.blocks)) {
+		throw new TelegramBotApiError('api', 'Telegram thinking blocks may only be used in rich message drafts.');
+	}
+}
+
+function containsThinkingBlock(blocks: TelegramInputRichMessage['blocks']): boolean {
+	return blocks.some(block => block.type === 'thinking'
+		|| (block.type === 'details' && containsThinkingBlock(block.blocks))
+		|| (block.type === 'list' && block.items.some(item => containsThinkingBlock(item.blocks))));
 }

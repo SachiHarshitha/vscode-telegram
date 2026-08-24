@@ -60,6 +60,7 @@ export function redactTelegramSecrets(value: string): string {
 	return value
 		.replace(/\b\d{5,}:[A-Za-z0-9_-]{20,}\b/g, 'redacted bot token')
 		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer redacted')
+		.replace(/((?:^|[\s,{])["']?[A-Za-z0-9_.-]*(?:api[_-]?key|authorization|token|password|secret|credential)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gim, '$1redacted')
 		.replace(/\b(api[_-]?key|authorization|token|password|secret)(\s*[:=]\s*)[^\s,;]+/gi, '$1$2redacted');
 }
 

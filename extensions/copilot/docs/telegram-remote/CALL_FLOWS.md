@@ -174,17 +174,18 @@ sequenceDiagram
     REG->>X: set pending context(prompt, origin)
     REG->>VS: dispatch openSessionWithPrompt.copilotcli (do not await)
     REG-->>R: accepted / dispatching
-    R-->>T: create one activity card + request-bound Stop
+    R-->>T: send initial Rich progress round + request-bound Stop
     VS->>P: real ChatRequest + toolInvocationToken
     P->>X: take pending request context
     P->>S: handleRequest(...)
     S->>SDK: send(prompt, agentMode)
     SDK-->>S: events
     S-->>REG: publish session events
-    REG-->>R: normalized remote events
+    REG-->>R: projected remote events
     R->>A: reauthorize before publish/flush
-    R-->>T: edit the same activity card (max once/second)
-    R-->>T: send final answer separately once as Telegram-safe HTML
+    R->>R: ActivityAggregator -> semantic ActivityRounds
+    R-->>T: one Rich Message per round
+    R-->>T: edit running rounds in place
 ```
 
 `executeCommand()` remains pending until `responseCompletePromise` settles, so the transport does not await it. It attaches a rejection handler and reports progress/completion through registry events. If dispatch later fails, clear only the correlated pending context and return an explicit Telegram error. Direct SDK `send()` is not a fallback because it bypasses the VS Code request lifecycle and cannot supply the required `ChatParticipantToolToken`.
@@ -208,16 +209,39 @@ sequenceDiagram
     REG->>REG: create typed telegram origin
     REG->>VS: pending context + dispatch command without awaiting turn
     REG-->>R: steering dispatch accepted
-    R-->>T: create current request activity card + Stop
+    R-->>T: send current request progress round + Stop
     VS->>S: handleRequest(real ChatRequest)
     S->>SDK: send({ prompt, mode: "immediate" })
     SDK-->>S: steering accepted / continued events
     S-->>REG: publish activity events
     REG-->>R: normalized remote events
-    R-->>T: edit the same activity card; final answer remains separate
+    R-->>T: append semantic Rich Message rounds
 ```
 
 Reference: https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/steering-and-queueing
+
+### Reply to a specific activity bubble
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram user
+    participant TL as TelegramActivityTimeline
+    participant R as TelegramCommandRouter
+    participant D as RemotePromptDispatcher
+    participant VS as Native VS Code chat path
+    participant S as CopilotCLISession
+
+    T->>TL: reply to bot message_id with steering text
+    TL->>TL: resolve chat/message correlation
+    TL-->>R: sessionId + requestId + activityRoundId
+    R->>R: revalidate paired identity, selected session and workspace scope
+    R->>D: dispatch same session + typed Telegram origin
+    D->>VS: pending context + openSessionWithPrompt.copilotcli
+    VS->>S: real ChatRequest/tool token
+    S->>S: busy session -> SDK immediate steering
+```
+
+If the activity generation is complete, replaced, expired, deleted from correlation state or no longer steerable, the router returns an explicit stale-activity response and does not dispatch.
 
 ## 7. Tool execution activity
 
@@ -226,28 +250,32 @@ sequenceDiagram
     participant SDK as SDK Session
     participant S as CopilotCLISession
     participant C as RemoteControlRegistry
-    participant E as TelegramEventRenderer
+    participant A as ActivityAggregator
+    participant TL as TelegramActivityTimeline
     participant T as Telegram
 
     SDK-->>S: tool.execution_start
     S-->>C: publish SDK event
-    C->>E: publish normalized toolStart event
-    E-->>T: update activity card
+    C->>A: projected tool start
+    A-->>TL: new command/edit/read/search round
+    TL-->>T: sendRichMessage(InputRichBlockDetails)
     SDK-->>S: tool.execution_progress / partial result
     S-->>C: publish SDK event
-    C->>E: publish normalized toolProgress event
-    E-->>T: throttled editMessageText
+    C->>A: projected tool progress
+    A-->>TL: update same round by toolCallId
+    TL-->>T: throttled editMessageText(rich_message)
     SDK-->>S: tool.execution_complete
     S-->>C: publish SDK event
-    C->>E: publish normalized toolComplete event
-    E-->>T: update activity card
+    C->>A: projected tool completion
+    A-->>TL: complete same round
+    TL-->>T: edit original Rich Message
 ```
 
-The renderer should rate-limit message edits and preserve only useful recent actions in compact mode.
+Consecutive read/search tools share a semantic inspection round until a reasoning, progress, command, edit, subagent, interaction or terminal boundary. Commands and file edits remain separate rounds. An edit failure falls back to a new Rich Message linked to the former one with `ReplyParameters`.
 
-## 8. Permission request — Phase 6 target
+## 8. Permission request
 
-In the current Phase 5.1 build, Telegram does not register `requestPermission`; VS Code (and Mission Control when attached) remain the only responders. Telegram setup, status, and in-chat attachment notices therefore state that permission prompts must be answered locally. The following race is the planned Phase 6 design.
+Telegram is an attached registry responder for a concrete pending permission request. The existing first-valid-response-wins race remains authoritative.
 
 ```mermaid
 sequenceDiagram
@@ -359,19 +387,19 @@ Cross-provider/BYOK changes may have stronger constraints than same-provider mod
 flowchart LR
     A[SDK SessionEvent] --> B[Session-lifetime publication hook]
     B --> C[RemoteControlRegistry]
-    C --> N[Remote event normalizer]
-    N --> D{Event class}
-	D -->|high frequency/state/error| E[Renderer + bounded coalescer]
-	D -->|interactive| F[Request registry only]
-	E --> H[One bounded HTML activity card]
-	E --> J[Separate final-answer HTML chunks]
-	H --> I[Bot API send/edit]
-	J --> I
+    C --> N[RemoteAgentEvent projector]
+    N --> D[ActivityAggregator]
+    D --> E[Semantic ActivityRounds]
+    E --> F[TelegramRichRenderer]
+    F --> G[One InputRichBlockDetails bubble per round]
+    G --> H[sendRichMessage / editMessageText rich_message]
+    C --> I[Permission/question request race]
+    I --> E
 ```
 
 Persisted SDK events may be replayed when attaching Telegram to an existing session. Ephemeral deltas should not be expected to exist after the fact. Replay seeds bounded internal correlation/state only and is never presented as new current activity or a new answer.
 
-Phase 5.1 marks replay delivery explicitly and schedules at most one activity edit per second. Each current request has at most one activity message and a separately sent final answer. Compact mode contains semantic summaries only; detailed mode adds an expandable current-tool summary; debug mode can add bounded redacted diagnostics. HTML chunks are independently balanced and at most 4,096 characters. Every event, flush and final send revalidates the active paired identity and current workspace-authorized session. Interactive permission and user-input requests never become generic activity cards.
+Phase 5.3 marks replay delivery explicitly and ignores replay for current UI output. Each current request can have multiple chronological semantic bubbles, but not one bubble per microscopic event. Every bubble is independently expandable and contains only its own sanitized details. Running rounds update no faster than the configured 750 ms minimum edit interval; new/waiting/failed/terminal rounds flush immediately. Every send/edit revalidates the paired identity, selected session and current workspace scope. Permission and user-input requests are individual correlated rounds, not generic activity output.
 
 The session-lifetime hook is distinct from native request-scoped listeners, which are disposed after each request. Its disposable belongs to the registry session binding.
 

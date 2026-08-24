@@ -15,10 +15,13 @@ import {
 	TelegramAnswerCallbackQueryOptions,
 	TelegramBotApiError,
 	TelegramEditMessageTextOptions,
+	TelegramEditRichMessageOptions,
+	TelegramInputRichMessage,
 	TelegramMessage,
 	TelegramPollingFailureKind,
 	TelegramPollingStatus,
 	TelegramSendMessageOptions,
+	TelegramSendRichMessageOptions,
 	TelegramUpdate,
 	TelegramUser,
 } from '../common/telegramTypes';
@@ -157,12 +160,36 @@ export class TelegramService extends Disposable {
 		return client.sendMessage(chatId, text, options);
 	}
 
+	async sendRichMessage(chatId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
+		const client = this.activeRun?.client ?? this.deliveryClient;
+		if (!client) {
+			throw new TelegramBotApiError('api', 'Telegram Remote is not connected.');
+		}
+		return client.sendRichMessage(chatId, richMessage, options);
+	}
+
+	async sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
+		const client = this.activeRun?.client ?? this.deliveryClient;
+		if (!client) {
+			throw new TelegramBotApiError('api', 'Telegram Remote is not connected.');
+		}
+		return client.sendRichMessageDraft(chatId, draftId, richMessage);
+	}
+
 	async editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
 		const client = this.activeRun?.client ?? this.deliveryClient;
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
 		return client.editMessageText(chatId, messageId, text, options);
+	}
+
+	async editRichMessage(chatId: number, messageId: number, richMessage: TelegramInputRichMessage, options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true> {
+		const client = this.activeRun?.client ?? this.deliveryClient;
+		if (!client) {
+			throw new TelegramBotApiError('api', 'Telegram Remote is not connected.');
+		}
+		return client.editRichMessage(chatId, messageId, richMessage, options);
 	}
 
 	async editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramSendMessageOptions['replyMarkup']): Promise<TelegramMessage | true> {

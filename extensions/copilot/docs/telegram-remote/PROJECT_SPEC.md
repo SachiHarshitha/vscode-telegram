@@ -101,7 +101,9 @@ The extension SHALL project useful SDK session events through an explicit sessio
 - usage/context information,
 - errors.
 
-The native renderer's request-scoped listeners SHALL NOT be treated as a reusable persistent session feed. The Telegram UI SHALL avoid flooding Telegram; high-frequency events SHALL be coalesced into an editable activity/status message where practical.
+The native renderer's request-scoped listeners SHALL NOT be treated as a reusable persistent session feed. Raw events SHALL first become transport-neutral semantic activity rounds. One meaningful activity round SHALL map to one Telegram Rich Message bubble; related read/search bursts SHALL aggregate, while command, edit, permission, question, subagent and meaningful direction changes SHALL remain distinct. A running round SHALL be edited in place, with throttling only where semantic boundaries do not already provide a natural limit.
+
+Each activity message SHALL be correlated by chat/message ID to its session, request and round. A reply to a still-steerable bubble SHALL travel through the normal native Copilot remote-prompt path and steer the active session. Stale replies SHALL fail visibly without creating a second session.
 
 Remote projection SHALL publish each supported SDK event exactly once within the session process. Attaching to an existing session SHALL use filtered `sdkSession.getEvents()` replay through the session bridge, with buffered live events and event-ID deduplication across the replay/live boundary.
 
@@ -118,6 +120,8 @@ Transport origin SHALL be created by the registry and carried as a discriminated
 ### FR-6 User questions and plan approval
 
 Agent questions, plan-exit/approval requests and other supported interactive inputs SHALL be representable remotely where the underlying SDK/session exposes a response API.
+
+The implemented question path supports callback choices and a freeform reply to the correlated question bubble. Plan-exit/approval remains separate follow-up work.
 
 ### FR-7 Models
 

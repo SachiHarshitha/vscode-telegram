@@ -154,6 +154,49 @@ describe('TelegramBotClient', () => {
 		});
 	});
 
+	it('uses the Bot API 10.2 Rich Message methods and rich edit parameter', async () => {
+		const message = telegramMessage('');
+		const richMessage = {
+			blocks: [{
+				type: 'details' as const,
+				summary: ['⌘ ', { type: 'bold' as const, text: 'npm test' }],
+				blocks: [{ type: 'pre' as const, text: 'npm test', language: 'shell' }],
+			}],
+			skip_entity_detection: true,
+		};
+		const replyMarkup = { inline_keyboard: [[{ text: 'Stop', callback_data: 'tr1:stop' }]] } as const;
+		responses.push(ok(message), ok(true), ok(true));
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+
+		await client.sendRichMessage(99, richMessage, { disableNotification: true, replyMarkup, replyParameters: { message_id: 6, allow_sending_without_reply: true } });
+		await client.sendRichMessageDraft(99, 12, { blocks: [{ type: 'thinking', text: 'Working' }] });
+		await client.editRichMessage(99, 7, richMessage, { replyMarkup });
+
+		expect(requests).toEqual([
+			{ method: 'sendRichMessage', body: { chat_id: 99, rich_message: richMessage, reply_markup: replyMarkup, disable_notification: true, reply_parameters: { message_id: 6, allow_sending_without_reply: true } } },
+			{ method: 'sendRichMessageDraft', body: { chat_id: 99, draft_id: 12, rich_message: { blocks: [{ type: 'thinking', text: 'Working' }] } } },
+			{ method: 'editMessageText', body: { chat_id: 99, message_id: 7, rich_message: richMessage, reply_markup: replyMarkup } },
+		]);
+	});
+
+	it('rejects Rich Message drafts outside a private chat', async () => {
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+
+		await expect(client.sendRichMessageDraft(-99, 12, { blocks: [{ type: 'thinking', text: 'Working' }] })).rejects.toMatchObject({ kind: 'api' });
+		expect(requests).toEqual([]);
+	});
+
+	it('parses the original message referenced by a Telegram reply', async () => {
+		const repliedTo = telegramMessage('activity');
+		const reply = { ...telegramMessage('steer this'), message_id: 8, reply_to_message: repliedTo };
+		responses.push(ok([{ update_id: 17, message: reply }]));
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+
+		const updates = await client.getUpdates({ timeoutSeconds: 0 });
+
+		expect(updates[0].message?.reply_to_message).toMatchObject({ message_id: 7, text: 'activity' });
+	});
+
 	it.each([
 		{ status: 401, errorCode: 401, expectedKind: 'authentication' },
 		{ status: 429, errorCode: 429, expectedKind: 'rate-limit' },

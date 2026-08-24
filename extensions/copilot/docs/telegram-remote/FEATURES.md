@@ -28,18 +28,18 @@ The **Target** column records current implementation status, not only the eventu
 | Session list | P0 | Upstream + Glue | Implemented | Reuse `getAllSessions()`, then authorize each session working directory against the current consented window roots |
 | Session metadata | P0 | Upstream + Glue | Required | Title, ID, working directory, status |
 | Select active remote session | P0 | Telegram | Required | Telegram-side routing state only |
-| Create session | P0 | Upstream + Glue | Planned | Current Telegram UI selects existing sessions only |
+| Create session | P0 | Upstream + Glue | Implemented | `/new [prompt]` stages a controller session in an authorized open workspace; the first native prompt materializes it |
 | Resume session | P0 | Upstream + Glue | Implemented for existing session metadata | Reuse persistent Copilot session; never acquire a wrapper only to list/select |
 | Send prompt | P0 | Upstream + Glue | Implemented | Fire-and-forget native command; create the editable activity card immediately; no direct SDK send |
 | Mid-turn steering | P0 | Upstream + Glue | Implemented | Same native request path; upstream busy handling uses SDK `mode: immediate` |
 | Queue follow-up prompt | P1 | Upstream + Glue | Planned | SDK enqueue/default behavior |
 | Abort active work | P0 | Upstream + Glue | Required | Registry safe-control binding; not exposed on `ICopilotCLISession` today |
-| Live assistant output | P0 | Upstream + Telegram | Required | Session-lifetime registry hook; coalesce deltas into Telegram edits |
-| Agent intent/status | P0 | Upstream + Telegram | Required when exposed | Render current activity |
-| Tool start/progress/complete | P0 | Upstream + Telegram | Required | Compact event renderer |
-| Permission request | P0 | Upstream + Glue | Planned (Phase 6) | Current Telegram capability is false; prompts must be answered locally |
-| Permission approve/deny | P0 | Upstream + Glue | Planned (Phase 6) | Registry design permits approve-once/deny only; current Telegram transport registers no responder |
-| Agent user-question request | P0 | Upstream + Glue | Planned (Phase 6) | Telegram choices/freeform reply |
+| Live assistant output | P0 | Upstream + Telegram | Implemented | SDK-visible deltas/full messages become semantic Rich Message rounds with bounded edits |
+| Agent intent/status | P0 | Upstream + Telegram | Implemented when exposed | Separate progress/reasoning-summary rounds; no hidden chain-of-thought |
+| Tool start/progress/complete | P0 | Upstream + Telegram | Implemented | Tool-call correlation; semantic read/search grouping; command/edit start-to-completion updates |
+| Permission request | P0 | Upstream + Glue | Implemented | Individual Rich Message bubble, callback-correlated with the live SDK request |
+| Permission approve/deny | P0 | Upstream + Glue | Implemented | Approve-once/deny only; first-valid-response-wins; replay/stale controls fail closed |
+| Agent user-question request | P0 | Upstream + Glue | Implemented | Individual bubble with callback choices and correlated freeform reply |
 | Plan approval/exit-plan response | P1 | Upstream + Glue | Planned | Reuse SDK/session plan interaction |
 | Subagent activity | P1 | Upstream + Telegram | Implemented | Compact semantic start/complete/failure summaries |
 | Session errors | P0 | Upstream + Telegram | Required | Visible remote failure state |
@@ -70,13 +70,14 @@ The **Target** column records current implementation status, not only the eventu
 | Inline model picker | P1 | Planned | Dynamic list |
 | Inline mode picker | P1 | Planned | Dynamic list |
 | Stop button | P0 | Required | Guard against stale callback/session mismatch |
-| Permission buttons | P0 | Planned (Phase 6) | Current permissions remain local |
-| User question buttons | P0 | Planned (Phase 6) | Choice buttons + freeform route |
-| Editable live activity message | P0 | Implemented | One activity message per current request; at most one edit per second |
-| Compact activity mode | P0 | Implemented | Semantic default; no raw successful tool output, diffs or reasoning |
-| Detailed activity mode | P1 | Implemented | Adds only the current tool summary in an expandable blockquote |
-| Debug activity mode | P2 | Implemented, opt-in | Bounded redacted diagnostic labels and SDK-exposed reasoning; not hidden chain-of-thought |
-| Slash command shortcuts | P1 | Partially implemented | `/sessions`, `/deselect`, `/stop`, `/status`, `/start`; model commands remain planned |
+| Permission buttons | P0 | Implemented | Approve once / deny; opaque callback correlation and first-valid-response-wins |
+| User question buttons | P0 | Implemented | Choice buttons + reply-to-question freeform route |
+| Granular activity timeline | P0 | Implemented | One semantic `ActivityRound` per meaningful bubble; read/search bursts aggregate without collapsing the whole turn |
+| Expandable Rich activity bubble | P0 | Implemented | Each round uses `InputRichBlockDetails`; only that round's sanitized details appear inside |
+| Running-round in-place update | P0 | Implemented | Command/tool completion edits its original Rich Message; a reply-linked replacement is sent if editing fails |
+| Reply-to-bubble steering | P0 | Implemented | Message correlation resolves the activity, then uses the normal native prompt/steering dispatcher |
+| Rich draft streaming | P1 | Adapter implemented, intentionally unused in V1 timeline | Drafts are 30-second ephemeral previews with no persistent reply target; persistent send/edit is used for steerable rounds |
+| Slash command shortcuts | P1 | Partially implemented | `/new`, `/sessions`, `/deselect`, `/stop`, `/status`, `/start`; model commands remain planned |
 | Images/files from Telegram | P1 | Planned | Controlled download + SDK attachment path |
 | Notifications on completion | P1 | Planned | Completion/failure/approval-needed |
 | Telegram Mini App | P2 | Optional | Rich dashboard only if bot UI becomes limiting |
@@ -152,7 +153,7 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | Modal consent before first enable | P0 | Required; cancel is the default action |
 | Persistent local indicator while attached | P0 | Session list + status bar |
 | Current-workspace session authorization | P0 | Implemented; URI-identity containment against current consented roots, fail closed for empty/missing/foreign working directories |
-| Remote permission escalation prevention | P0 | Implemented today by local-only permission handling; future Telegram response is approve-once/deny only |
+| Remote permission escalation prevention | P0 | Implemented; Telegram can resolve only a correlated request with approve-once/deny and cannot mutate permission policy |
 | Non-E2E confidentiality disclosure | P0 | Required before enabling bot transport |
 | Singleton poller lease | P0 | One `getUpdates` consumer per bot token; competing consumer fails visibly |
 | Rate limiting | P1 | Planned |

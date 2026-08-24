@@ -16,9 +16,12 @@ import {
 	TelegramBotApiError,
 	TelegramChatId,
 	TelegramEditMessageTextOptions,
+	TelegramEditRichMessageOptions,
 	TelegramGetUpdatesOptions,
+	TelegramInputRichMessage,
 	TelegramMessage,
 	TelegramSendMessageOptions,
+	TelegramSendRichMessageOptions,
 	TelegramUpdate,
 	TelegramUser,
 } from '../../common/telegramTypes';
@@ -41,7 +44,16 @@ class TestClient implements ITelegramBotClient {
 	sendMessage(_chatId: TelegramChatId, _text: string, _options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
 		throw new Error('Not used in polling tests.');
 	}
+	sendRichMessage(_chatId: TelegramChatId, _richMessage: TelegramInputRichMessage, _options?: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
+		throw new Error('Not used in polling tests.');
+	}
+	sendRichMessageDraft(_chatId: number, _draftId: number, _richMessage: TelegramInputRichMessage): Promise<true> {
+		throw new Error('Not used in polling tests.');
+	}
 	editMessageText(_chatId: TelegramChatId, _messageId: number, _text: string, _options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
+		throw new Error('Not used in polling tests.');
+	}
+	editRichMessage(_chatId: TelegramChatId, _messageId: number, _richMessage: TelegramInputRichMessage, _options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true> {
 		throw new Error('Not used in polling tests.');
 	}
 	editMessageReplyMarkup(_chatId: TelegramChatId, _messageId: number): Promise<TelegramMessage | true> {

@@ -4,7 +4,7 @@
 >
 > Baseline validated against VS Code/Copilot source commit `58af001e0c7b342016db51cef2a026c7791f5d58` (August 2026).
 
-Phases 0-5 plus the Phase 4.1 security and Phase 5.1 UX/lifecycle corrections are implemented. Telegram networking is gated by versioned token-and-workspace consent, private-chat numeric authorization and native setup/enable/reconnect/kill-switch controls. An authorized chat can list and select only controller sessions whose working directory is inside a root of the currently consented VS Code window, send native prompts/steering, stop its current Telegram-started task, and receive one editable activity card plus a separately rendered final answer.
+Phases 0-5.3 are implemented. Telegram networking is gated by versioned token-and-workspace consent, private-chat numeric authorization and native setup/enable/reconnect/kill-switch controls. An authorized chat can list, create and select controller sessions whose working directory is inside a root of the currently consented VS Code window; send native prompts and steering; stop its current Telegram-started task; answer per-request permissions/questions; and follow a granular Rich Message activity timeline. Each meaningful activity round owns one expandable Telegram bubble, and running rounds are edited in place.
 
 For the Phase 2 mock and opt-in real-bot tests, see [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md#real-bot-smoke-test) or run `script/telegram-remote/test-phase2.ps1` from the Copilot extension directory.
 
@@ -14,7 +14,7 @@ For the complete consent, visibility and Phase 4 routing regression suite, run `
 
 For the complete Phase 5 event projection/activity suite, run `script/telegram-remote/test-phase5.ps1` from the Copilot extension directory. It includes all Phase 4 regressions and uses deterministic in-memory Telegram activity tests only.
 
-For the current Phase 4.1/5.1 security, renderer, capability and lifecycle regression suite, run `script/telegram-remote/test-phase5.1.ps1`. The current record is 25 files / 232 tests. It is deterministic, does not read `.env`, and does not contact Telegram.
+For the current deterministic Telegram regression suite, run `npx vitest run src/extension/telegramRemote` from the Copilot extension directory. The Phase 5.3 source-level record is 26 files / 148 tests. It does not read `.env` or contact Telegram.
 
 ## Purpose
 
@@ -56,7 +56,8 @@ This keeps the downstream patch small and allows upstream bug fixes and new Copi
 flowchart LR
     TG[Telegram Client] <-->|Bot API / long polling| TA[TelegramTransport]
     GH[GitHub web/mobile] <--> MC[MissionControlTransport]
-    TA <--> RC[RemoteControlRegistry]
+    TA <--> TL[ActivityAggregator / Rich timeline]
+    TL <--> RC[RemoteControlRegistry]
     MC <--> RC
     RC <--> CS[CopilotCLISession]
     CS <--> S[Copilot SDK Session]
@@ -91,7 +92,7 @@ V1 targets **VS Code Desktop with a local extension host** and Telegram long pol
 - Session discovery, selection, creation and resume.
 - Prompting and mid-turn steering.
 - Live agent activity projection.
-- Permission and user-question responses from Telegram (planned for Phase 6; permission prompts remain local in the current build).
+- Approve-once/deny permission responses and choice/freeform user-question responses from Telegram, raced with the existing local/Mission Control paths.
 - Abort/stop.
 - Mode and model selection where the underlying session supports it.
 - Workspace/session metadata.
@@ -125,13 +126,13 @@ Tailscale may be added later for an optional rich local web dashboard, but it is
 - Remote events have one session-lifetime publication point. Use filtered `sdkSession.getEvents()` replay plus buffered live-event deduplication when attaching to an existing session.
 - `getSession()`/`createSession()` return disposable session references; every remote binding must release them deterministically.
 - Only one long poller may consume a bot token. Competing VS Code hosts must coordinate or the later consumer must fail visibly.
-- Phase 6 may add approve-once/deny responses, but Telegram must never raise the session permission level to `autoApprove`/`autopilot`. In the current build, permission prompts must be answered locally.
+- Telegram permission controls can answer only a correlated pending request with approve-once or deny. They never raise the session permission level to `autoApprove`/`autopilot`.
 - Enabling the transport requires an explicit modal consent gate; cancel is the default and declining persists nothing.
 - A remotely attached session must always carry a local indicator in the session list and status bar, with the kill switch one click away. Mission Control today shows only a one-time chat banner, which is not sufficient.
 - After a configured integration is disabled, a muted `Telegram: Off` status item remains visible when status-bar visibility is enabled; the Command Palette Enable action remains available regardless. Re-enable reuses SecretStorage only when token, consent, pairing and current scope all match.
 - Native indicators render transport-neutral registry state. Telegram labels, icons and identities never enter upstream files.
-- Telegram bot chats are not end-to-end encrypted. Selected prompts, final answers, paths and the locally configured activity detail transit Telegram infrastructure.
-- Do not promise access to hidden chain-of-thought. Compact and detailed modes expose semantic activity only. Debug mode can show a bounded, redacted diagnostic field only when the SDK explicitly supplies it.
+- Telegram bot chats are not end-to-end encrypted. Selected prompts, assistant output, paths and sanitized activity details transit Telegram infrastructure.
+- Do not promise access to hidden chain-of-thought. The timeline renders only SDK-visible intent, progress, assistant output, tool activity and reasoning summaries that Copilot intentionally emits.
 - Do not patch the `@github/copilot` CLI runtime. Keep third-party runtime dependencies unmodified.
 
 ## External references

@@ -79,6 +79,8 @@ All downstream-authored remote-control and Telegram code remains isolated in the
 extensions/copilot/src/extension/telegramRemote/
     common/
         remoteControlTypes.ts
+        remoteAgentEvent.ts
+        activityRound.ts
         telegramTypes.ts
     node/
         remoteControlRegistry.ts
@@ -86,10 +88,12 @@ extensions/copilot/src/extension/telegramRemote/
         telegramService.ts
         telegramBotClient.ts
         telegramPairingService.ts
+        telegramCallbackRegistry.ts
         telegramCommandRouter.ts
-        telegramEventRenderer.ts
-        telegramSettings.ts
-        proposedApiSetup.ts
+        activityAggregator.ts
+        telegramActivityTimeline.ts
+        telegramRichRenderer.ts
+        telegramSessionState.ts
         test/
     vscode-node/
         remotePromptDispatcher.ts
@@ -98,6 +102,8 @@ extensions/copilot/src/extension/telegramRemote/
         telegramRemoteContribution.ts
         test/
 ```
+
+The older `telegramEventRenderer.ts` / `telegramActivityCoalescer.ts` remain only as a tested compatibility implementation and are no longer selected by the composition root. New activity work targets the Rich Message timeline above.
 
 Telegram-specific classes MUST NOT be added to `copilotcliSession.ts` or imported by the shared registry. That upstream file receives only the narrow hooks required to publish session events, race interactive responses and expose safe session actions.
 
@@ -131,7 +137,7 @@ Relevant source:
 
 Important capabilities already exposed by the service include session lifecycle events and methods for session discovery, creation, loading, history and forking.
 
-`getSession()` and `createSession()` return `IReference<ICopilotCLISession>`. Every caller MUST explicitly own and dispose that reference. A short operation uses `try/finally`; a long-lived remote attachment keeps one reference in its disposable session binding and releases it when the binding, session or extension ends. Leaking a reference can keep the SDK session and its resources alive; disposing it too early can invalidate remote control.
+`getSession()` and `createSession()` return `IReference<ICopilotCLISession>`. Every caller MUST explicitly own and dispose that reference. The implemented Telegram selection, status, activity timeline and correlation paths deliberately use metadata methods only and never call either reference-returning method. `/new` stages provisional controller metadata and lets the first native request materialize the wrapper. The registry binding is installed and disposed by the normally owned `CopilotCLISession` wrapper; Telegram does not pin that wrapper. Any future feature that does acquire a reference must use deterministic `try/finally` or an explicit disposable lifetime.
 
 The Telegram layer stores only remote UI routing state such as:
 
@@ -248,7 +254,7 @@ TelegramTransport
 
 This internal command is high-risk as an external extension contract, but it is a **required integration path inside the current fork** because it preserves native rendering and supplies the tool-invocation token. Feature-detect it, test it on every upstream rebase and fail visibly if it changes; do not fall back to direct SDK `send()` in V1.
 
-The command implementation awaits the session's `responseCompletePromise`, so its returned promise may remain pending for the entire agent turn. Telegram dispatches it fire-and-forget, creates the request's single editable activity card immediately, and lets SDK/registry events report progress/completion. Failure cleanup clears only the matching pending request context; it must not erase a newer request for the same session.
+The command implementation awaits the session's `responseCompletePromise`, so its returned promise may remain pending for the entire agent turn. Telegram dispatches it fire-and-forget, creates an initial request-progress round immediately, and lets SDK/registry events report later rounds and completion. Failure cleanup clears only the matching pending request context; it must not erase a newer request for the same session.
 
 ## 8. Event projection
 
@@ -258,27 +264,46 @@ The remote-control seam therefore needs its own explicit session-lifetime subscr
 
 Current Mission Control can observe an SDK event twice while a request is active: once through the request-scoped wildcard listener and once through its persistent wildcard listener. Phase 1 MUST collapse remote forwarding to exactly one registry publication point per SDK event. Preserve upstream event IDs/timestamps where present, suppress duplicate IDs before transport fan-out, and reject/repair any event whose `parentId` equals its own ID. Semantic Mission Control compatibility does not require preserving duplicate delivery.
 
-Events are normalized into a transport-neutral remote event model:
+Events are first projected into the verified transport-neutral `RemoteAgentEvent` subset. Tool arguments/results are bounded at this boundary; malformed and unknown events are dropped. A second transport-neutral layer performs semantic aggregation:
 
 ```ts
-type RemoteAgentEvent =
-    | { kind: 'assistantText'; text: string; final: boolean }
-    | { kind: 'intent'; text: string }
-    | { kind: 'reasoning'; text: string; final: boolean }
-    | { kind: 'toolStart'; toolCallId: string; name: string; summary?: string }
-    | { kind: 'toolProgress'; toolCallId: string; text: string }
-    | { kind: 'toolComplete'; toolCallId: string; success: boolean; summary?: string }
-    | { kind: 'permission'; requestId: string; data: unknown }
-    | { kind: 'question'; requestId: string; data: unknown }
-    | { kind: 'sessionState'; state: string }
-    | { kind: 'subagent'; state: string; name?: string }
-    | { kind: 'usage'; data: unknown }
-    | { kind: 'error'; message: string };
+interface ActivityRound {
+    id: string;
+    sessionId: string;
+    requestId?: string;
+    toolCallId?: string;
+    type: 'reasoning' | 'progress' | 'search' | 'read' | 'edit' | 'command' | 'permission' | 'question' | 'subagent' | 'other';
+    summary: string;
+    status: 'running' | 'completed' | 'failed' | 'waiting';
+    details?: ActivityRoundDetail[];
+    steerable: boolean;
+    startedAt?: number;
+    completedAt?: number;
+}
 ```
 
-Telegram rendering then becomes a pure adapter over these events.
+The implemented data path is:
 
-Phase 5.1 separates activity from answer rendering. Each current request owns at most one editable HTML activity card with its request-bound Stop button. Compact mode shows semantic state only; detailed mode adds the current tool summary in an expandable blockquote; debug mode may add bounded, redacted diagnostic labels and explicitly exposed reasoning. Successful raw tool output, raw diffs, progress payloads and reasoning are absent from compact/detailed activity. The assistant answer is accumulated internally and sent once as separate, independently valid Telegram-safe HTML chunks when the turn ends. Unsupported Markdown constructs degrade to escaped plain text, raw HTML is escaped, unsafe link schemes are removed, and every chunk is balanced and no longer than 4,096 characters.
+```text
+SDK SessionEvent
+  -> projectRemoteAgentEvent
+  -> ActivityAggregator
+  -> ActivityRound
+  -> TelegramRichRenderer
+  -> Telegram Rich Message
+```
+
+`ActivityAggregator` groups a consecutive read/search burst until a semantic boundary. Commands, edits, permissions, questions, subagents, progress/direction changes and terminal results remain distinct. `toolCallId` updates a running tool round rather than opening separate start/progress/complete messages.
+
+### Granular Activity Timeline
+
+`TelegramActivityTimeline` owns delivery and correlation, not Copilot execution. Each meaningful round becomes one persistent `sendRichMessage` bubble containing one collapsed `InputRichBlockDetails`. Later mutations use `editMessageText` with the `rich_message` parameter. Edits are coalesced to a 750 ms minimum interval; new, failed, waiting and terminal rounds flush immediately. If editing fails because the message was deleted, expired or otherwise unavailable, the timeline sends a replacement Rich Message with `ReplyParameters` pointing to the former message when possible.
+
+For every sent bubble, the timeline stores `(chatId, messageId) -> (sessionId, requestId, activityRoundId, generation)`. A Telegram reply to a live steerable bubble is resolved against that bounded, expiring map and then submitted through the same native prompt path described in section 7. The normal busy-session path produces SDK `mode: 'immediate'`; no second Copilot session is created. Completed, replaced-generation, wrong-identity, wrong-session and expired correlations return a stale response.
+
+The renderer sanitizes each round before presentation. It exposes only event data the SDK deliberately supplies: intent, progress, assistant-visible messages, reasoning summaries, tool activity, subagent state and terminal results. It does not inspect logs or reconstruct hidden model chain-of-thought. The local `activityDetail` setting remains effective: compact omits successful raw tool progress/output, detailed adds those bounded/redacted details, and debug additionally shows bounded correlation identifiers. Correlation stores metadata only and never acquires `IReference<ICopilotCLISession>`; listing/selection/timeline delivery therefore cannot pin a wrapper, worktree or MCP host.
+
+`sendRichMessageDraft` is available in the narrow Bot API adapter but is intentionally not used by the V1 activity timeline. Telegram drafts are ephemeral 30-second previews and return no persistent message ID, so a running draft cannot provide the stable reply target required for bubble-specific steering. Persistent send/edit is chosen independently for activity and assistant output.
 
 ### Existing-session replay
 
@@ -324,9 +349,9 @@ The generalization is the first implementation milestone, not a later cleanup. E
 
 The first registry test uses Mission Control plus an in-memory second transport. Telegram work starts only after Mission Control behavior remains semantically unchanged and each SDK event is published exactly once.
 
-## 10. Permissions and interactive requests (Phase 6 target)
+## 10. Permissions and interactive requests
 
-The upstream session currently supports local UI responses and Mission Control responses. Telegram does **not** register a permission or user-input responder in the current build, so those prompts must be answered locally. Phase 6 may add Telegram responses using the following semantics.
+The registry races the existing local UI, Mission Control and Telegram responders. Telegram publishes permission and question requests as individual waiting Rich Message rounds. Permission controls are approve-once/deny callbacks; question controls are bounded choice callbacks, with a reply to that question bubble used for freeform input when allowed.
 
 Conceptually:
 
@@ -353,6 +378,8 @@ Rules:
 - cancellation resolves safely to deny where appropriate.
 - Telegram exposes only approve-once and deny in V1.
 - Telegram may never set or raise the session permission level to `autoApprove` or `autopilot`, directly or through a mode change.
+- a callback registration is one-shot; replay cannot resolve the request twice,
+- local or Mission Control resolution cancels Telegram's pending responder and removes its active controls.
 
 ## 11. Telegram networking
 
@@ -367,7 +394,7 @@ sequenceDiagram
     PC->>T: getUpdates(timeout=N)
     P->>T: send message/button
     T-->>PC: Update
-    PC->>T: sendMessage/editMessageText
+    PC->>T: sendRichMessage / editMessageText(rich_message)
     T-->>P: result
 ```
 
@@ -586,7 +613,8 @@ Default is cancel. Declining leaves the feature disabled and does not persist a 
 - pairing and Telegram authorization,
 - Telegram UI renderer,
 - remote routing/selection state,
-- event projection/coalescing,
+- transport-neutral event projection and semantic activity aggregation,
+- Telegram Rich Message rendering and message-to-activity correlation,
 - callback/request correlation,
 - proposed-API onboarding helper,
 - downstream build/release metadata.

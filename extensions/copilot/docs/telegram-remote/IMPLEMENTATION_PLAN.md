@@ -11,7 +11,7 @@ This plan was revalidated against the repository at:
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Phases 0 through 5 implemented and validated; consent-gated setup, native visibility, session routing and bounded Telegram activity projection are active; interactive permission/question workflows remain deferred to Phase 6 |
+| Implementation status | Phases 0 through 5.3 implemented; consent-gated setup, native visibility, `/new`, native prompt/steering, granular Rich Message activity, per-bubble steering and permission/question responses are active; plan-exit/model controls remain follow-up work |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -496,7 +496,7 @@ extensions/copilot/script/telegram-remote/test-phase4.ps1                       
 
 ## 9. Phase 5 — event projection and Telegram activity UI
 
-**Status:** Implemented and validated on 2026-08-23, then superseded by the Phase 5.1 disclosure/rendering/consolidation pass below. Permission and question events remain Phase 6 work.
+**Status:** Historical Phase 5 implementation, validated on 2026-08-23 and superseded first by Phase 5.1 and now by the Phase 5.3 Rich Message timeline below.
 
 ### Implementation record
 
@@ -554,7 +554,7 @@ extensions/copilot/script/telegram-remote/test-phase5.ps1                       
 
 ## 9.1 Phase 5.1 — activity disclosure, Telegram formatting and lifecycle recovery
 
-**Status:** Implemented and validated on 2026-08-23.
+**Status:** Historical implementation validated on 2026-08-23 and superseded by Phase 5.3. The record below explains the former single-card behavior; it is not the current renderer contract.
 
 ### Implementation record
 
@@ -563,7 +563,7 @@ extensions/copilot/script/telegram-remote/test-phase5.ps1                       
 - Persisted replay seeds bounded internal state only. A new Telegram prompt creates a fresh request generation; historical tool output and answers are not emitted as current work.
 - One tracked picker/status message is edited on selection. One activity message is created immediately with its request-bound Stop button, edited at most once per second, and stripped of reply markup on completion, failure, cancellation, supersession or stale scope. The final answer is sent separately exactly once.
 - Final assistant Markdown is parsed through the repository's existing `markdown-it` dependency and converted to a strict Telegram-safe HTML subset. Raw HTML is escaped, images are neutralized, unsafe URL schemes are removed, and balanced chunks stay within 4,096 characters.
-- Permission claims are capability-driven across setup, status bar, `/status` and the native in-chat warning. Telegram registers no responder in this build, so permission prompts are accurately described as local-only.
+- At this historical phase, Telegram registered no responder and permission copy was local-only. Phase 5.3 replaces that capability state with correlated approve-once/deny and question responses.
 - Lifecycle recovery now has explicit **Enable Remote Access**, **Reconnect**, and **Forget Configuration** commands. A configured disabled instance keeps a muted `Telegram: Off` item when status visibility is enabled. Exact-scope token/consent/token-bound pairing state reconnects without token entry; Phase 5.2 separates changed-workspace consent from missing token/pairing recovery.
 - Enable/Setup/Reconnect share one generation-bound operation. Disable still blocks dispatch and invalidates callbacks synchronously before cleanup, cancels the generation, and cannot be undone by a late startup completion. Contribution-level resume deduplication preserves the singleton poller invariant.
 
@@ -634,31 +634,85 @@ extensions/copilot/src/extension/telegramRemote/vscode-node/telegramSetupWizard.
 extensions/copilot/src/extension/telegramRemote/vscode-node/telegramStatusBar.ts           (modify)
 ```
 
-## 10. Phase 6 — permissions, questions and plan-exit responses
+## 9.3 Phase 5.3 — granular Rich Message activity and bubble steering
+
+**Status:** Implemented on 2026-08-24. Source and deterministic validation are authoritative; a real-bot Bot API 10.2 smoke remains manual.
+
+### Source-verified architecture
+
+```text
+SDK SessionEvent
+  -> projectRemoteAgentEvent
+  -> ActivityAggregator
+  -> ActivityRound
+  -> TelegramRichRenderer
+  -> Telegram sendRichMessage / editMessageText(rich_message)
+```
+
+- `ActivityRound` is transport-neutral and records semantic type, summary, running/completed/failed/waiting status, bounded details, timestamps and steerability.
+- Consecutive reads/searches share an inspection round until a semantic boundary. Commands, edits, progress/reasoning summaries, permissions, questions, subagents and terminal results remain distinct.
+- `toolCallId` binds start/progress/completion to one round. `TelegramActivityTimeline` stores the Rich Message `message_id` and edits that same message. Edit failure sends a reply-linked replacement and updates correlation to the replacement.
+- Every sent bubble records `(chatId,messageId) -> (sessionId,requestId,activityRoundId,generation)`. A Telegram reply to a live steerable round goes back through `setPendingCopilotCLIRequestContext` and `workbench.action.chat.openSessionWithPrompt.copilotcli`, preserving native immediate steering. Stale replies do not dispatch.
+- Permission and question requests are individual waiting rounds. Opaque callback nonces are one-shot; only approve-once/deny is exposed for permissions, and question choices/freeform replies stay request-bound. The registry continues to enforce first-valid-response-wins across local UI, Mission Control and Telegram.
+- Rendering is sanitized independently of aggregation and uses only SDK-visible intent/progress/assistant/reasoning-summary/tool/subagent data. It does not expose hidden chain-of-thought.
+- The existing local `activityDetail` setting controls round disclosure: compact hides successful raw tool progress/output, detailed includes bounded/redacted details, and debug also includes correlation identifiers.
+- Timeline selection/activity uses session metadata only. It never calls `getSession()` and therefore never owns an `IReference<ICopilotCLISession>`.
+
+### Telegram Bot API compatibility
+
+The official Bot API 10.2 contract was rechecked before implementation. The narrow typed client adds `InputRichMessage`, outgoing paragraph/heading/pre/list/details/thinking blocks, `sendRichMessage`, `sendRichMessageDraft`, `editMessageText` with `rich_message`, incoming `reply_to_message`, `InlineKeyboardMarkup`, `CallbackQuery` and `ReplyParameters`.
+
+`sendRichMessageDraft` is implemented in the adapter but intentionally unused by the V1 timeline. Telegram drafts are ephemeral 30-second previews and return no persistent message ID; persistent send/edit is required for reply-to-bubble steering.
 
 ### Files
 
 ```text
-extensions/copilot/src/extension/telegramRemote/node/telegramPermissionBridge.ts (new)
-extensions/copilot/src/extension/telegramRemote/node/telegramUserInputBridge.ts  (new)
+extensions/copilot/src/extension/telegramRemote/common/activityRound.ts                    (new)
+extensions/copilot/src/extension/telegramRemote/common/remoteAgentEvent.ts                 (modify)
+extensions/copilot/src/extension/telegramRemote/common/telegramTypes.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/activityAggregator.ts                 (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramActivityTimeline.ts            (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramRichRenderer.ts                (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramBotClient.ts                   (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramCommandRouter.ts               (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts                     (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts                   (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts  (modify)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts                   (modify)
+```
+
+### Validation
+
+| Check | Result |
+| --- | --- |
+| Telegram deterministic suite | Passed: 26 files / 148 tests |
+| New control-flow coverage | Aggregation, same-message command completion, command failure, Rich details, redaction, reply correlation/staleness/native dispatch, callback replay, local cancellation, edit fallback and no session-reference acquisition |
+| TypeScript | Passed: `npx tsc --noEmit --project tsconfig.json` |
+| Targeted lint / extension compile | Passed: zero lint warnings; `npm run compile` completed |
+| Controller / Mission Control regression | Passed: 3 files / 29 tests plus 3 focused `CopilotCLISession` origin/attachment tests |
+| Real Bot API 10.2 Rich Message smoke | Not run; requires the user's configured bot/client and remains a manual acceptance step |
+
+## 10. Phase 6 — remaining plan-exit responses
+
+Permission and normal user-question responses moved into Phase 5.3 because the existing registry already provided the correct transport-neutral response race. Phase 6 now covers only plan-exit/approval interaction types not included in the implemented request interfaces.
+
+### Files
+
+```text
 extensions/copilot/src/extension/telegramRemote/node/telegramPlanBridge.ts       (new)
 extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts (response-race modify)
 ```
 
 ### Implement
 
-- Race the existing local permission UI with all attached remote responders; exactly one valid response reaches `respondToPermission()`.
-- Telegram exposes only `approve-once` and `denied-interactively-by-user`. It cannot call `setPermissionLevel()`.
-- Race local and remote `user_input.requested` responses, supporting validated choices and a state-bound freeform next reply.
-- Invalidate Telegram buttons/reply state when any responder wins or the request/token is cancelled.
 - Add the same registry race to `exit_plan_mode.requested`. Telegram may select only SDK actions that do not elevate permission (`interactive` or `exit_only`) or deny/provide feedback; never expose `autopilot` or `autopilot_fleet`.
-- Support concurrent requests by session ID + SDK request ID + tool-call ID where present; never use display text as correlation.
+- Correlate plan responses by session ID + SDK request ID + tool-call ID where present; never use display text as correlation.
 
 ### Exit criteria
 
-- Local, Mission Control, and Telegram race tests prove one SDK response per request.
-- Wrong-session/user/nonce/expired callbacks cannot resolve a request.
-- A Telegram-origin prompt remains interactive even while Mission Control is in autopilot.
+- Local, Mission Control, and Telegram plan-response race tests prove one SDK response per request.
+- Wrong-session/user/nonce/expired plan callbacks cannot resolve a request.
+- No plan response can select `autopilot` or `autopilot_fleet`.
 
 ## 11. Phase 7 — models, reasoning effort and safe modes
 

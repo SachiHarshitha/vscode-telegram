@@ -31,6 +31,7 @@ export interface TelegramMessage {
 	readonly chat: TelegramChat;
 	readonly from?: TelegramUser;
 	readonly text?: string;
+	readonly reply_to_message?: TelegramMessage;
 }
 
 export interface TelegramCallbackQuery {
@@ -57,6 +58,37 @@ export interface TelegramInlineKeyboardMarkup {
 	readonly inline_keyboard: readonly (readonly TelegramInlineKeyboardButton[])[];
 }
 
+export type TelegramRichText = string | readonly TelegramRichText[] | TelegramRichTextStyle;
+
+export interface TelegramRichTextStyle {
+	readonly type: 'bold' | 'italic' | 'code';
+	readonly text: TelegramRichText;
+}
+
+export type TelegramInputRichBlock =
+	| { readonly type: 'paragraph'; readonly text: TelegramRichText }
+	| { readonly type: 'heading'; readonly text: TelegramRichText; readonly size: 1 | 2 | 3 | 4 | 5 | 6 }
+	| { readonly type: 'pre'; readonly text: TelegramRichText; readonly language?: string }
+	| { readonly type: 'divider' }
+	| { readonly type: 'list'; readonly items: readonly TelegramInputRichBlockListItem[] }
+	| { readonly type: 'details'; readonly summary: TelegramRichText; readonly blocks: readonly TelegramInputRichBlock[]; readonly is_open?: true }
+	| { readonly type: 'thinking'; readonly text: TelegramRichText };
+
+export interface TelegramInputRichBlockListItem {
+	readonly blocks: readonly TelegramInputRichBlock[];
+}
+
+export interface TelegramInputRichMessage {
+	readonly blocks: readonly TelegramInputRichBlock[];
+	readonly is_rtl?: boolean;
+	readonly skip_entity_detection?: boolean;
+}
+
+export interface TelegramReplyParameters {
+	readonly message_id: number;
+	readonly allow_sending_without_reply?: boolean;
+}
+
 export interface TelegramGetUpdatesOptions {
 	readonly offset?: number;
 	readonly limit?: number;
@@ -69,11 +101,22 @@ export interface TelegramSendMessageOptions {
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
 	readonly disableNotification?: boolean;
 	readonly parseMode?: 'MarkdownV2' | 'HTML';
+	readonly replyParameters?: TelegramReplyParameters;
 }
 
 export interface TelegramEditMessageTextOptions {
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
 	readonly parseMode?: 'MarkdownV2' | 'HTML';
+}
+
+export interface TelegramSendRichMessageOptions {
+	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+	readonly disableNotification?: boolean;
+	readonly replyParameters?: TelegramReplyParameters;
+}
+
+export interface TelegramEditRichMessageOptions {
+	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
 }
 
 export interface TelegramAnswerCallbackQueryOptions {
@@ -86,7 +129,10 @@ export interface ITelegramBotClient {
 	getMe(signal?: IAbortSignal): Promise<TelegramUser>;
 	getUpdates(options?: TelegramGetUpdatesOptions): Promise<readonly TelegramUpdate[]>;
 	sendMessage(chatId: TelegramChatId, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage>;
+	sendRichMessage(chatId: TelegramChatId, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage>;
+	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true>;
 	editMessageText(chatId: TelegramChatId, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true>;
+	editRichMessage(chatId: TelegramChatId, messageId: number, richMessage: TelegramInputRichMessage, options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true>;
 	editMessageReplyMarkup(chatId: TelegramChatId, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage | true>;
 	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<true>;
 }
@@ -139,14 +185,16 @@ export function validateTelegramBotToken(botToken: string): void {
 	}
 }
 
-export function parseTelegramMessage(value: unknown): TelegramMessage {
+export function parseTelegramMessage(value: unknown, includeReply = true): TelegramMessage {
 	const record = asRecord(value, 'Telegram message');
+	const reply = includeReply && record.reply_to_message !== undefined ? parseTelegramMessage(record.reply_to_message, false) : undefined;
 	return {
 		message_id: asSafeInteger(record.message_id, 'Telegram message id'),
 		date: asSafeInteger(record.date, 'Telegram message date'),
 		chat: parseTelegramChat(record.chat),
 		from: record.from === undefined ? undefined : parseTelegramUser(record.from),
 		text: asOptionalString(record.text, 'Telegram message text'),
+		...(reply ? { reply_to_message: reply } : {}),
 	};
 }
 

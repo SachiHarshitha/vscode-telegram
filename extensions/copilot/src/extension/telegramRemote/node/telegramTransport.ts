@@ -6,10 +6,11 @@
 import * as l10n from '@vscode/l10n';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
+import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
-import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport } from '../common/remoteControlTypes';
-import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
+import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport, type IRemotePermissionRequest, type IRemoteUserInputRequest, type IRemoteUserInputResponse, type RemotePermissionResult } from '../common/remoteControlTypes';
+import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
 import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHandler } from './telegramService';
 
 /** Telegram Bot API transport; the contribution owns Phase 3 authorization and lifecycle policy. */
@@ -19,7 +20,7 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 	readonly themeIcon = 'radio-tower';
 
 	private readonly service: TelegramService;
-	private eventPublisher: Pick<IRemoteControlTransport, 'publish'> | undefined;
+	private eventPublisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput'> | undefined;
 	readonly onDidChangeStatus: Event<TelegramPollingStatus>;
 
 	constructor(
@@ -46,8 +47,20 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		return this.service.sendMessage(chatId, text, options);
 	}
 
+	sendRichMessage(chatId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
+		return this.service.sendRichMessage(chatId, richMessage, options);
+	}
+
+	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
+		return this.service.sendRichMessageDraft(chatId, draftId, richMessage);
+	}
+
 	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
 		return this.service.editMessageText(chatId, messageId, text, options);
+	}
+
+	editRichMessage(chatId: number, messageId: number, richMessage: TelegramInputRichMessage, options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true> {
+		return this.service.editRichMessage(chatId, messageId, richMessage, options);
 	}
 
 	editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramSendMessageOptions['replyMarkup']): Promise<TelegramMessage | true> {
@@ -70,7 +83,7 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		this.service.clearDeliveryClient();
 	}
 
-	setEventPublisher(publisher: Pick<IRemoteControlTransport, 'publish'>): IDisposable {
+	setEventPublisher(publisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput'>): IDisposable {
 		if (this.eventPublisher) {
 			throw new Error('A Telegram event publisher is already registered.');
 		}
@@ -84,5 +97,13 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 
 	publish(sessionId: string, event: IRemoteControlSessionEvent): void | Promise<void> {
 		return this.eventPublisher?.publish(sessionId, event);
+	}
+
+	requestPermission(sessionId: string, request: IRemotePermissionRequest, token: CancellationToken): Promise<RemotePermissionResult | undefined> {
+		return this.eventPublisher?.requestPermission?.(sessionId, request, token) ?? Promise.resolve(undefined);
+	}
+
+	requestUserInput(sessionId: string, request: IRemoteUserInputRequest, token: CancellationToken): Promise<IRemoteUserInputResponse | undefined> {
+		return this.eventPublisher?.requestUserInput?.(sessionId, request, token) ?? Promise.resolve(undefined);
 	}
 }

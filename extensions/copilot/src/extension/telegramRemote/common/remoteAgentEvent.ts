@@ -44,7 +44,14 @@ export type PersistedRemoteAgentEvent =
 	| RemoteAgentEventBase & { readonly kind: 'assistant.turn_start' | 'assistant.turn_end'; readonly turnId: string; readonly model?: string }
 	| RemoteAgentEventBase & { readonly kind: 'assistant.message'; readonly messageId: string; readonly content: string; readonly reasoning?: string }
 	| RemoteAgentEventBase & { readonly kind: 'assistant.reasoning'; readonly reasoningId: string; readonly content: string }
-	| RemoteAgentEventBase & { readonly kind: 'tool.execution_start'; readonly toolCallId: string; readonly toolName: string }
+	| RemoteAgentEventBase & {
+		readonly kind: 'tool.execution_start';
+		readonly toolCallId: string;
+		readonly toolName: string;
+		readonly arguments?: unknown;
+		readonly mcpServerName?: string;
+		readonly mcpToolName?: string;
+	}
 	| RemoteAgentEventBase & { readonly kind: 'tool.execution_complete'; readonly toolCallId: string; readonly toolName?: string; readonly success: boolean; readonly output?: string; readonly error?: string }
 	| RemoteAgentEventBase & { readonly kind: 'subagent.started'; readonly toolCallId: string; readonly name: string; readonly description?: string }
 	| RemoteAgentEventBase & { readonly kind: 'subagent.completed'; readonly toolCallId: string; readonly name: string; readonly durationMs?: number; readonly totalToolCalls?: number }
@@ -140,7 +147,15 @@ export function projectRemoteAgentEvent(event: IRemoteControlSessionEvent): Remo
 		case 'tool.execution_start': {
 			const toolCallId = readRequiredString(data, 'toolCallId', maximumLabelLength);
 			const toolName = readRequiredString(data, 'toolName', maximumLabelLength);
-			return toolCallId && toolName ? { ...base, kind: event.type, toolCallId, toolName } : undefined;
+			return toolCallId && toolName ? {
+				...base,
+				kind: event.type,
+				toolCallId,
+				toolName,
+				arguments: projectBoundedValue(data.arguments),
+				mcpServerName: readString(data, 'mcpServerName', maximumLabelLength),
+				mcpToolName: readString(data, 'mcpToolName', maximumLabelLength),
+			} : undefined;
 		}
 		case 'tool.execution_progress': {
 			const toolCallId = readRequiredString(data, 'toolCallId', maximumLabelLength);
@@ -164,7 +179,7 @@ export function projectRemoteAgentEvent(event: IRemoteControlSessionEvent): Remo
 				...base,
 				kind: event.type,
 				toolCallId,
-				toolName: readString(asRecord(data.toolDescription), 'name', maximumLabelLength),
+				toolName: readString(data, 'toolName', maximumLabelLength) ?? readString(asRecord(data.toolDescription), 'name', maximumLabelLength),
 				success,
 				output: result ? readString(result, 'detailedContent', maximumDetailLength) ?? readString(result, 'content', maximumDetailLength) : undefined,
 				error: error ? readString(error, 'message', maximumDetailLength) : undefined,
@@ -245,4 +260,24 @@ function readNonNegativeNumber(record: Readonly<Record<string, unknown>>, key: s
 
 function truncate(value: string, maximumLength: number): string {
 	return value.length <= maximumLength ? value : `${value.slice(0, maximumLength - 1)}…`;
+}
+
+function projectBoundedValue(value: unknown, depth = 0): unknown {
+	if (typeof value === 'string') {
+		return truncate(value, maximumDetailLength);
+	}
+	if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+		return value;
+	}
+	if (depth >= 4) {
+		return '[nested value omitted]';
+	}
+	if (Array.isArray(value)) {
+		return value.slice(0, 32).map(item => projectBoundedValue(item, depth + 1));
+	}
+	const record = asRecord(value);
+	if (!record) {
+		return undefined;
+	}
+	return Object.fromEntries(Object.entries(record).slice(0, 32).map(([key, item]) => [truncate(key, maximumLabelLength), projectBoundedValue(item, depth + 1)]));
 }
