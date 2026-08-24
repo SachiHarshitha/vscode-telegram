@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, it } from 'vitest';
-import { renderTelegramMarkdownAnswer, telegramMaximumMessageLength } from '../telegramMarkdown';
+import { renderTelegramMarkdownAnswer, renderTelegramMarkdownRichText, telegramMaximumMessageLength } from '../telegramMarkdown';
 
 describe('TelegramMarkdown', () => {
 	it('converts supported CommonMark to a strict Telegram HTML subset', () => {
@@ -56,5 +56,16 @@ describe('TelegramMarkdown', () => {
 		expect(chunks.every(chunk => (chunk.match(/<b>/g)?.length ?? 0) === (chunk.match(/<\/b>/g)?.length ?? 0))).toBe(true);
 		expect(chunks.every(chunk => !/&(?:a|am|amp|l|lt|g|gt|q|quo|quot)?$/.test(chunk))).toBe(true);
 		expect(chunks.at(-1)).toContain('Response truncated');
+	});
+
+	it('preserves final-answer paragraph and list boundaries in RichText summaries', () => {
+		const richText = renderTelegramMarkdownRichText('The result is:\n\n- first\n- **second** with `code`\n\nDone.');
+		const serialized = JSON.stringify(richText);
+
+		expect(serialized).toContain('The result is:\\n\\n• first\\n• ');
+		expect(serialized).toContain('bold');
+		expect(serialized).toContain('second');
+		expect(serialized).toContain('code');
+		expect(serialized).toContain('Done.');
 	});
 });

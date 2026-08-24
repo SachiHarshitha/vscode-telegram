@@ -75,6 +75,7 @@ interface TimelineState {
 	readonly rounds: Map<string, RoundDelivery>;
 	requestId?: string;
 	startRoundId?: string;
+	requestStarted: boolean;
 	complete: boolean;
 	connectionClosed: boolean;
 	terminalOutcome?: 'completed' | 'failed' | 'cancelled';
@@ -200,6 +201,18 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			this.reset();
 			state = this.createState(authorized, undefined);
 			this.activeState = state;
+		}
+		if (!state.requestStarted) {
+			if (isRequestActivityEvent(event)) {
+				state.requestStarted = true;
+			} else if (event.kind === 'session.idle' || event.kind === 'session.task_complete' || event.kind === 'abort') {
+				// A selected SDK session can still emit the previous turn's idle/terminal
+				// edge while the native remote prompt is being opened. It must not retire
+				// the new request's Stop control before that request actually starts.
+				return;
+			} else if (isTerminalEvent(event)) {
+				state.requestStarted = true;
+			}
 		}
 		for (const mutation of state.aggregator.accept(event)) {
 			await this.publishMutation(state, mutation, undefined, isUrgent(event, mutation.round));
@@ -374,6 +387,7 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			aggregator: new ActivityAggregator(authorized.item.id, requestId, () => this.scheduler.now()),
 			rounds: new Map(),
 			requestId,
+			requestStarted: requestId === undefined,
 			complete: false,
 			connectionClosed: false,
 			terminalNotified: false,
@@ -392,6 +406,12 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			delivery.round = mutation.round;
 			delivery.replyMarkup = replyMarkup ?? delivery.replyMarkup;
 			delivery.dirty = true;
+		}
+		// Assistant text is provisional until a tool boundary or terminal event tells
+		// us whether it was a tool preface or the final answer. Holding it here avoids
+		// a short-lived, content-free "Agent response" bubble.
+		if (mutation.isNew && mutation.round.type === 'answer' && mutation.round.status === 'running') {
+			return;
 		}
 		if (mutation.isNew || urgent) {
 			await this.enqueueFlush(state, delivery);
@@ -626,6 +646,22 @@ function sameIdentity(left: TelegramPairedIdentity, right: TelegramPairedIdentit
 
 function isTerminalEvent(event: RemoteAgentEvent): boolean {
 	return event.kind === 'session.task_complete' || event.kind === 'session.shutdown' || event.kind === 'session.error' || event.kind === 'abort' || event.kind === 'session.idle';
+}
+
+function isRequestActivityEvent(event: RemoteAgentEvent): boolean {
+	return event.kind === 'assistant.turn_start'
+		|| event.kind === 'assistant.intent'
+		|| event.kind === 'assistant.reasoning'
+		|| event.kind === 'assistant.reasoning_delta'
+		|| event.kind === 'assistant.message'
+		|| event.kind === 'assistant.message_delta'
+		|| event.kind === 'tool.execution_start'
+		|| event.kind === 'tool.execution_progress'
+		|| event.kind === 'tool.execution_partial_result'
+		|| event.kind === 'tool.execution_complete'
+		|| event.kind === 'subagent.started'
+		|| event.kind === 'subagent.completed'
+		|| event.kind === 'subagent.failed';
 }
 
 function terminalOutcome(event: RemoteAgentEvent): 'completed' | 'failed' | 'cancelled' {

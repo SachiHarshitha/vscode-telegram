@@ -203,6 +203,7 @@ describe('TelegramRemoteContribution', () => {
 		await contribution.consent.commit(tokenFingerprint);
 		await contribution.authorization.pair({ userId: 101, chatId: 202, firstName: 'Operator' }, tokenFingerprint);
 		const transport = mockTransportStartup(contribution);
+		const discardPending = vi.spyOn(contribution.transport, 'discardPendingUpdatesOnNextStart');
 
 		const [first, duplicate] = await Promise.all([
 			contribution.resumeStoredConnection(consentScopeFingerprint),
@@ -210,6 +211,7 @@ describe('TelegramRemoteContribution', () => {
 		]);
 		expect({ first, duplicate, starts: transport.start.mock.calls.length }).toEqual({ first: bot, duplicate: bot, starts: 1 });
 		await contribution.disableRemoteAccess();
+		expect(discardPending).toHaveBeenCalledWith(botToken);
 		await expect(contribution.resumeStoredConnection(consentScopeFingerprint)).resolves.toBe(bot);
 		expect(transport.start).toHaveBeenCalledTimes(2);
 		contribution.dispose();

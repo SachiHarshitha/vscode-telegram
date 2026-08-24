@@ -6,7 +6,7 @@
 import * as l10n from '@vscode/l10n';
 import type { ActivityRound, ActivityRoundDetail } from '../common/activityRound';
 import type { TelegramInputRichBlock, TelegramInputRichMessage, TelegramRichText } from '../common/telegramTypes';
-import { redactTelegramSecrets, renderTelegramMarkdownAnswer } from './telegramMarkdown';
+import { redactTelegramSecrets, renderTelegramMarkdownRichText } from './telegramMarkdown';
 
 const maximumRichDetailLength = 3_500;
 const maximumRichListItems = 24;
@@ -15,7 +15,7 @@ export type TelegramRichActivityDetail = 'compact' | 'detailed' | 'debug';
 /** Renders one semantic activity round without forcing every round into an expander. */
 export function renderTelegramActivityRound(round: ActivityRound, disclosure: TelegramRichActivityDetail = 'compact'): TelegramInputRichMessage {
 	if (round.type === 'answer') {
-		return renderTelegramAssistantAnswer(round.details?.[0]?.value ?? round.summary);
+		return renderTelegramAssistantAnswer(round);
 	}
 	const visibleDetails = round.details?.filter(detail =>
 		(disclosure !== 'compact' || detail.visibility !== 'detailed') && !duplicatesSummary(round, detail)
@@ -50,13 +50,18 @@ export function renderTelegramActivityRound(round: ActivityRound, disclosure: Te
 	};
 }
 
-export function renderTelegramAssistantAnswer(content: string): TelegramInputRichMessage {
-	const html = renderTelegramMarkdownAnswer(content).join('\n');
-	if (html) {
-		return { html, skip_entity_detection: true };
-	}
+export function renderTelegramAssistantAnswer(round: ActivityRound): TelegramInputRichMessage {
+	const content = round.details?.[0]?.value ?? round.summary;
+	const summary = content.trim()
+		? renderTelegramMarkdownRichText(content)
+		: l10n.t('Copilot returned an empty response.');
+	const metadata = round.details?.slice(1).flatMap(renderDetail).slice(0, maximumRichListItems) ?? [];
 	return {
-		blocks: [{ type: 'paragraph', text: l10n.t('Copilot returned an empty response.') }],
+		blocks: [{
+			type: 'details',
+			summary,
+			blocks: metadata.length > 0 ? metadata : [{ type: 'paragraph', text: l10n.t('Response complete.') }],
+		}],
 		skip_entity_detection: true,
 	};
 }

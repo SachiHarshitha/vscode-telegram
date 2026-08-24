@@ -126,7 +126,7 @@ export function projectRemoteAgentEvent(event: IRemoteControlSessionEvent): Remo
 				kind: event.type,
 				messageId,
 				content,
-				reasoning: readString(data, 'reasoningText', maximumDetailLength),
+				reasoning: readString(data, 'reasoningText', maximumAssistantTextLength),
 			} : undefined;
 		}
 		case 'assistant.message_delta': {

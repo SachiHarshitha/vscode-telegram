@@ -87,16 +87,23 @@ describe('TelegramRichRenderer', () => {
 		expect(serialized).not.toContain('This activity');
 	});
 
-	it('renders the final assistant answer as sanitized rich HTML instead of literal Markdown', () => {
+	it('renders the final assistant answer in the expander summary with metadata inside', () => {
 		const message = renderTelegramActivityRound(round({
 			type: 'answer', summary: 'The result', status: 'completed',
-			details: [{ value: '**Result**: `c77774e`\n\n- first\n- second' }],
+			details: [
+				{ value: '**Result**: `c77774e`\n\n- first\n- second' },
+				{ label: 'Duration', value: '1.2s' },
+			],
 		}));
+		const serialized = JSON.stringify(message);
 
-		expect(message).toMatchObject({ html: expect.stringContaining('<b>Result</b>') });
-		expect(message.html).toContain('<code>c77774e</code>');
-		expect(message.html).toContain('• first');
-		expect(message.html).not.toContain('**Result**');
+		expect(message.blocks?.[0]).toMatchObject({ type: 'details' });
+		expect(serialized).toContain('Result');
+		expect(serialized).toContain('c77774e');
+		expect(serialized).toContain('• first');
+		expect(serialized).toContain('Duration');
+		expect(serialized).toContain('1.2s');
+		expect(serialized).not.toContain('**Result**');
 	});
 });
 

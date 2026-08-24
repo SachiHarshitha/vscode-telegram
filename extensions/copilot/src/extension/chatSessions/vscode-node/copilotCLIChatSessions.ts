@@ -461,7 +461,9 @@ export class CopilotCLIChatSessionContentProvider extends Disposable implements 
 		item.metadata = metadata;
 		const attachments = this._remoteControlRegistry.getAttachments(session.id);
 		if (attachments.length > 0) {
-			const description = new vscode.MarkdownString(attachments.map(attachment => `$(${attachment.themeIcon})`).join(' '));
+			// The sessions view is transport-neutral. Keep provider branding in its own
+			// controls and use one generic marker even when several transports attach.
+			const description = new vscode.MarkdownString('$(remote)');
 			description.supportThemeIcons = true;
 			item.description = description;
 			item.tooltip = buildRemoteAttachmentTooltip(attachments);

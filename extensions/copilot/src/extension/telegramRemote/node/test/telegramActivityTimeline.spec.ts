@@ -103,6 +103,42 @@ describe('TelegramActivityTimeline', () => {
 		expect(richMessage).toContain('The routing marker must stay internal.');
 	});
 
+	it('keeps Stop attached when a stale idle event arrives before the new turn starts', async () => {
+		const test = await createTimeline();
+		const request = await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+
+		await test.timeline.publish(session.id, event('old-idle', 'session.idle', { aborted: false }));
+		expect(test.timeline.isStopControl(session.id, 'request-1', request!.generation, request!.messageId)).toBe(true);
+		expect(test.host.editMessageReplyMarkup).not.toHaveBeenCalled();
+
+		await test.timeline.publish(session.id, event('turn', 'assistant.turn_start', { turnId: 'turn-1' }));
+		await test.timeline.publish(session.id, event('idle', 'session.idle', { aborted: false }));
+		expect(test.timeline.isStopControl(session.id, 'request-1', request!.generation, request!.messageId)).toBe(false);
+		expect(test.host.editMessageReplyMarkup).toHaveBeenCalled();
+	});
+
+	it('holds provisional assistant text and publishes one expandable final answer with usage', async () => {
+		const test = await createTimeline();
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		const sendsAfterStart = test.host.sendRichMessage.mock.calls.length;
+
+		await test.timeline.publish(session.id, event('answer', 'assistant.message', {
+			messageId: 'answer-1', content: 'Result:\n\n- first\n- second',
+		}));
+		expect(test.host.sendRichMessage).toHaveBeenCalledTimes(sendsAfterStart);
+		await test.timeline.publish(session.id, event('usage', 'assistant.usage', {
+			model: 'gpt-test', inputTokens: 12, outputTokens: 8,
+		}));
+		await test.timeline.publish(session.id, event('idle', 'session.idle', { aborted: false }));
+
+		const finalMessage = JSON.stringify(test.host.sendRichMessage.mock.calls.at(-1)?.[1]);
+		expect(finalMessage).toContain('details');
+		expect(finalMessage).toContain('• first');
+		expect(finalMessage).toContain('Token usage');
+		expect(finalMessage).toContain('20 total');
+		expect(finalMessage).not.toContain('Agent response');
+	});
+
 	it('correlates permission callbacks, accepts one response, and rejects replay', async () => {
 		const test = await createTimeline();
 		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);

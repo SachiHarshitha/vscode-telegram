@@ -5,10 +5,12 @@
 
 import MarkdownIt = require('markdown-it');
 import * as l10n from '@vscode/l10n';
+import type { TelegramRichText, TelegramRichTextStyle } from '../common/telegramTypes';
 
 export const telegramMaximumMessageLength = 4_096;
 const maximumFinalAnswerChunks = 4;
 const maximumLinkLength = 2_048;
+const maximumRichSummaryLength = 3_500;
 
 interface ListState {
 	readonly ordered: boolean;
@@ -23,8 +25,7 @@ interface OpenTelegramHtmlTag {
 
 /** Converts CommonMark-style assistant output into Telegram's strict, regular-message HTML subset. */
 export function renderTelegramMarkdownAnswer(markdown: string): readonly string[] {
-	const parser = createTelegramMarkdownParser();
-	const html = parser.render(neutralizeUnsupportedLinks(redactTelegramSecrets(markdown)), {}).trim();
+	const html = renderTelegramMarkdownHtml(markdown);
 	if (!html) {
 		return [];
 	}
@@ -36,6 +37,83 @@ export function renderTelegramMarkdownAnswer(markdown: string): readonly string[
 		...chunks.slice(0, maximumFinalAnswerChunks - 1),
 		`<i>${escapeTelegramHtml(l10n.t('Response truncated'))}</i>`,
 	];
+}
+
+/** Converts assistant Markdown to block-summary RichText while preserving paragraph/list newlines. */
+export function renderTelegramMarkdownRichText(markdown: string): TelegramRichText {
+	const redacted = redactTelegramSecrets(markdown);
+	const bounded = redacted.length <= maximumRichSummaryLength
+		? redacted
+		: `${redacted.slice(0, maximumRichSummaryLength - 1)}…`;
+	const html = createTelegramMarkdownParser().render(neutralizeUnsupportedLinks(bounded), {}).trim();
+	return telegramHtmlToRichText(html);
+}
+
+function renderTelegramMarkdownHtml(markdown: string): string {
+	return createTelegramMarkdownParser().render(neutralizeUnsupportedLinks(redactTelegramSecrets(markdown)), {}).trim();
+}
+
+interface RichTextFrame {
+	readonly tag: 'root' | TelegramRichTextStyle['type'];
+	readonly parts: TelegramRichText[];
+}
+
+function telegramHtmlToRichText(html: string): TelegramRichText {
+	const frames: RichTextFrame[] = [{ tag: 'root', parts: [] }];
+	const append = (part: TelegramRichText) => {
+		if (typeof part === 'string' && !part) {
+			return;
+		}
+		const parts = frames.at(-1)!.parts;
+		if (typeof part === 'string' && typeof parts.at(-1) === 'string') {
+			parts[parts.length - 1] = `${parts.at(-1)}${part}`;
+		} else {
+			parts.push(part);
+		}
+	};
+
+	for (const token of html.match(/<[^>]+>|[^<]+/g) ?? []) {
+		const opening = /^<(b|i|code)(?:\s[^>]*)?>$/i.exec(token)?.[1].toLocaleLowerCase();
+		if (opening) {
+			frames.push({ tag: opening === 'b' ? 'bold' : opening === 'i' ? 'italic' : 'code', parts: [] });
+			continue;
+		}
+		const closing = /^<\/(b|i|code)>$/i.exec(token)?.[1].toLocaleLowerCase();
+		if (closing && frames.length > 1) {
+			const expected = closing === 'b' ? 'bold' : closing === 'i' ? 'italic' : 'code';
+			const frame = frames.at(-1)!;
+			if (frame.tag === expected) {
+				frames.pop();
+				append({ type: frame.tag, text: frame.parts });
+			}
+			continue;
+		}
+		if (/^<blockquote>$/i.test(token)) {
+			append('> ');
+			continue;
+		}
+		if (/^<\/blockquote>$/i.test(token)) {
+			append('\n');
+			continue;
+		}
+		if (token.startsWith('<')) {
+			continue;
+		}
+		append(decodeTelegramHtml(token));
+	}
+	while (frames.length > 1) {
+		const frame = frames.pop()!;
+		append({ type: frame.tag as TelegramRichTextStyle['type'], text: frame.parts });
+	}
+	return frames[0].parts.length === 1 ? frames[0].parts[0] : frames[0].parts;
+}
+
+function decodeTelegramHtml(value: string): string {
+	return value
+		.replace(/&quot;/g, '"')
+		.replace(/&gt;/g, '>')
+		.replace(/&lt;/g, '<')
+		.replace(/&amp;/g, '&');
 }
 
 function neutralizeUnsupportedLinks(markdown: string): string {

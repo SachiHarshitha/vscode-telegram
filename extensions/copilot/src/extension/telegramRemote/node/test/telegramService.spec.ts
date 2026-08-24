@@ -134,6 +134,46 @@ describe('TelegramService', () => {
 		});
 	});
 
+	it('discards the durable Telegram backlog after an explicit disable but accepts later updates', async () => {
+		const initialClient = new TestClient();
+		initialClient.getUpdates
+			.mockResolvedValueOnce([update(5)])
+			.mockImplementation(options => waitForAbort(options?.signal));
+		const initialService = new TelegramService(storageRoot, new TestRuntime(initialClient), new TestFetcher(), logService);
+		await initialService.start(botToken, async () => { });
+		await waitUntil(() => initialClient.getUpdates.mock.calls.length === 2);
+		await initialService.stop();
+		await initialService.discardPendingUpdatesOnNextStart(botToken);
+
+		const resumedClient = new TestClient();
+		resumedClient.getUpdates
+			.mockResolvedValueOnce([update(7)])
+			.mockResolvedValueOnce([update(8)])
+			.mockImplementation(options => waitForAbort(options?.signal));
+		const handled: number[] = [];
+		const resumedService = new TelegramService(storageRoot, new TestRuntime(resumedClient), new TestFetcher(), logService);
+		await resumedService.start(botToken, async item => { handled.push(item.update_id); });
+		await waitUntil(() => handled.length === 1);
+		await resumedService.stop();
+
+		const persisted = JSON.parse(await readFile(getTelegramPollingStatePath(storageRoot, botToken), 'utf8')) as {
+			version: number;
+			nextOffset: number;
+			discardPendingOnNextStart: boolean;
+		};
+		expect({
+			discardCall: resumedClient.getUpdates.mock.calls[0][0],
+			resumeOffset: resumedClient.getUpdates.mock.calls[1][0]?.offset,
+			handled,
+			persisted,
+		}).toEqual({
+			discardCall: expect.objectContaining({ offset: -1, limit: 1, timeoutSeconds: 0 }),
+			resumeOffset: 8,
+			handled: [8],
+			persisted: expect.objectContaining({ version: 2, nextOffset: 9, discardPendingOnNextStart: false }),
+		});
+	});
+
 	it('bounds the configured long-poll timeout before sending it to Telegram', async () => {
 		const client = new TestClient();
 		client.getUpdates.mockImplementation(options => waitForAbort(options?.signal));

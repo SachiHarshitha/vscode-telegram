@@ -37,10 +37,16 @@ const maximumRecentUpdateIds = 1_000;
 const takeoverHandoffDelayMs = 6_000;
 
 interface TelegramPollingStateFile {
-	readonly version: 1;
+	readonly version: 2;
 	readonly tokenFingerprint: string;
-	readonly nextOffset: number;
+	readonly nextOffset?: number;
+	readonly discardPendingOnNextStart: boolean;
 	readonly updatedAt: number;
+}
+
+interface TelegramPollingState {
+	readonly nextOffset?: number;
+	readonly discardPendingOnNextStart: boolean;
 }
 
 interface TelegramPollingRun {
@@ -84,6 +90,7 @@ export class TelegramService extends Disposable {
 	private activeRun: TelegramPollingRun | undefined;
 	private deliveryClient: ITelegramBotClient | undefined;
 	private preserveDeliveryClientAfterStop = false;
+	private readonly discardPendingTokenFingerprints = new Set<string>();
 
 	constructor(
 		private readonly storageRoot: string,
@@ -134,9 +141,17 @@ export class TelegramService extends Disposable {
 				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
 			}
 
+			const pollingState = await this.loadState(lease.tokenFingerprint);
+			const nextOffset = pollingState.discardPendingOnNextStart || this.discardPendingTokenFingerprints.has(lease.tokenFingerprint)
+				? await this.discardPendingUpdates(client, lease.tokenFingerprint, pollingState.nextOffset, controller.signal)
+				: pollingState.nextOffset;
+			if (generation !== this.generation || controller.signal.aborted) {
+				await lease.release();
+				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
+			}
+
 			this.deliveryClient = client;
 			const leaseLossListener = lease.onDidLose(() => this.handleLeaseLoss(generation, controller));
-			const nextOffset = await this.loadOffset(lease.tokenFingerprint);
 			if (generation !== this.generation || controller.signal.aborted) {
 				leaseLossListener.dispose();
 				await lease.release();
@@ -239,6 +254,17 @@ export class TelegramService extends Disposable {
 		this.preserveDeliveryClientAfterStop = false;
 	}
 
+	/** Marks updates received after an explicit local disable to be skipped on the next start. */
+	async discardPendingUpdatesOnNextStart(botToken: string): Promise<void> {
+		const tokenFingerprint = getTelegramBotTokenFingerprint(botToken);
+		this.discardPendingTokenFingerprints.add(tokenFingerprint);
+		const state = await this.loadState(tokenFingerprint);
+		await this.saveState(tokenFingerprint, {
+			nextOffset: state.nextOffset,
+			discardPendingOnNextStart: true,
+		});
+	}
+
 	async stop(): Promise<void> {
 		this.generation++;
 		this.startingController?.abort();
@@ -281,7 +307,10 @@ export class TelegramService extends Disposable {
 					}
 					await handleUpdate(update);
 					const nextOffset = Math.max(run.nextOffset ?? 0, update.update_id + 1);
-					await this.saveOffset(run.lease.tokenFingerprint, nextOffset);
+					await this.saveState(run.lease.tokenFingerprint, {
+						nextOffset,
+						discardPendingOnNextStart: this.discardPendingTokenFingerprints.has(run.lease.tokenFingerprint),
+					});
 					rememberUpdateId(run, update.update_id);
 					run.nextOffset = nextOffset;
 				}
@@ -329,36 +358,61 @@ export class TelegramService extends Disposable {
 		return this.activeRun === run && run.generation === this.generation && !run.controller.signal.aborted;
 	}
 
-	private async loadOffset(tokenFingerprint: string): Promise<number | undefined> {
+	private async loadState(tokenFingerprint: string): Promise<TelegramPollingState> {
 		try {
-			const parsed = JSON.parse(await readFile(getStatePath(this.storageRoot, tokenFingerprint), 'utf8')) as Partial<TelegramPollingStateFile>;
-			const offset = parsed.version === 1 && parsed.tokenFingerprint === tokenFingerprint && Number.isSafeInteger(parsed.nextOffset) && (parsed.nextOffset ?? -1) >= 0
-				? parsed.nextOffset
-				: undefined;
-			if (offset === undefined) {
-				this.logService.warn('[TelegramRemote] Ignoring an invalid Telegram polling offset file.');
+			const parsed = JSON.parse(await readFile(getStatePath(this.storageRoot, tokenFingerprint), 'utf8')) as {
+				readonly version?: unknown;
+				readonly tokenFingerprint?: unknown;
+				readonly nextOffset?: unknown;
+				readonly discardPendingOnNextStart?: unknown;
+			};
+			const nextOffset = readPollingOffset(parsed.nextOffset);
+			if (parsed.version === 1 && parsed.tokenFingerprint === tokenFingerprint && nextOffset !== undefined) {
+				return { nextOffset, discardPendingOnNextStart: false };
 			}
-			return offset;
+			if (parsed.version === 2 && parsed.tokenFingerprint === tokenFingerprint
+				&& (parsed.nextOffset === undefined || nextOffset !== undefined)
+				&& typeof parsed.discardPendingOnNextStart === 'boolean') {
+				return { nextOffset, discardPendingOnNextStart: parsed.discardPendingOnNextStart };
+			}
+			this.logService.warn('[TelegramRemote] Ignoring an invalid Telegram polling state file.');
+			return { discardPendingOnNextStart: false };
 		} catch (error) {
 			if (!hasErrorCode(error, 'ENOENT')) {
 				this.logService.warn('[TelegramRemote] Unable to read the Telegram polling offset file; updates may be replayed.');
 			}
-			return undefined;
+			return { discardPendingOnNextStart: false };
 		}
 	}
 
-	private async saveOffset(tokenFingerprint: string, nextOffset: number): Promise<void> {
+	private async saveState(tokenFingerprint: string, state: TelegramPollingState): Promise<void> {
 		const statePath = getStatePath(this.storageRoot, tokenFingerprint);
 		const temporaryPath = `${statePath}.${process.pid}-${randomUUID()}.tmp`;
 		try {
 			await mkdir(dirname(statePath), { recursive: true });
-			const state: TelegramPollingStateFile = { version: 1, tokenFingerprint, nextOffset, updatedAt: Date.now() };
-			await writeFile(temporaryPath, JSON.stringify(state), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+			const persisted: TelegramPollingStateFile = { version: 2, tokenFingerprint, ...state, updatedAt: Date.now() };
+			await writeFile(temporaryPath, JSON.stringify(persisted), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
 			await rename(temporaryPath, statePath);
 		} catch {
 			await unlink(temporaryPath).catch(() => { });
 			throw new TelegramPollingStorageError();
 		}
+	}
+
+	private async discardPendingUpdates(client: ITelegramBotClient, tokenFingerprint: string, currentOffset: number | undefined, signal: IAbortSignal): Promise<number | undefined> {
+		const pending = await client.getUpdates({
+			offset: -1,
+			limit: 1,
+			timeoutSeconds: 0,
+			allowedUpdates: ['message', 'callback_query'],
+			signal,
+		});
+		const latestUpdateId = pending.reduce<number | undefined>((latest, update) => latest === undefined ? update.update_id : Math.max(latest, update.update_id), undefined);
+		const nextOffset = latestUpdateId === undefined ? currentOffset : Math.max(currentOffset ?? 0, latestUpdateId + 1);
+		await this.saveState(tokenFingerprint, { nextOffset, discardPendingOnNextStart: false });
+		this.discardPendingTokenFingerprints.delete(tokenFingerprint);
+		this.logService.info('[TelegramRemote] Pending updates queued while remote access was explicitly disabled were discarded.');
+		return nextOffset;
 	}
 
 	private setStatus(status: TelegramPollingStatus): void {
@@ -422,6 +476,10 @@ function normalizeLongPollTimeout(value: number | undefined): number {
 		return defaultLongPollTimeoutSeconds;
 	}
 	return Math.min(maximumLongPollTimeoutSeconds, Math.max(minimumLongPollTimeoutSeconds, Math.trunc(value)));
+}
+
+function readPollingOffset(value: unknown): number | undefined {
+	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function getRetryDelay(error: unknown, failureCount: number): number {

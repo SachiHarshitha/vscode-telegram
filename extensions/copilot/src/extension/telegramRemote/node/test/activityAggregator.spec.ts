@@ -69,15 +69,40 @@ describe('ActivityAggregator', () => {
 		expect(third.round.details?.[0]?.value).toBe('Inspect the request path.\n\nThe marker is internal routing state.');
 	});
 
-	it('keeps turn lifecycle noise out of the timeline and omits a redundant success terminal after an answer', () => {
+	it('keeps turn lifecycle noise out and finalizes the answer with request metadata', () => {
 		const aggregator = new ActivityAggregator('session-1', 'request-1');
 
 		expect(aggregator.beginRequest().round).toMatchObject({ summary: 'Prompt accepted', status: 'completed' });
 		expect(aggregator.accept(event('assistant.turn_start', {}))).toEqual([]);
 		const answer = aggregator.accept(event('assistant.message', { messageId: 'answer-1', content: '**Done** with `code`.' }))[0];
 
-		expect(answer.round).toMatchObject({ type: 'answer', status: 'completed' });
-		expect(aggregator.completeRequest('completed')).toBeUndefined();
+		expect(answer.round).toMatchObject({ type: 'answer', status: 'running' });
+		const completed = aggregator.completeRequest('completed');
+		expect(completed).toMatchObject({ isNew: false, round: { id: answer.round.id, type: 'answer', status: 'completed' } });
+		expect(completed?.round.details?.some(detail => detail.label === 'Duration')).toBe(true);
+	});
+
+	it('projects readable reasoning embedded in an assistant message before its answer', () => {
+		const aggregator = new ActivityAggregator('session-1', 'request-1');
+		const mutations = aggregator.accept(event('assistant.message', {
+			messageId: 'answer-1', content: 'Final answer', reasoning: 'Checking the previous commit first.',
+		}));
+
+		expect(mutations).toHaveLength(2);
+		expect(mutations[0].round).toMatchObject({ type: 'reasoning', summary: 'Thinking…' });
+		expect(mutations[0].round.details?.[0]?.value).toBe('Checking the previous commit first.');
+		expect(mutations[1].round).toMatchObject({ type: 'answer', status: 'running' });
+	});
+
+	it('suppresses empty assistant deltas and turns a tool preface into Thinking', () => {
+		const aggregator = new ActivityAggregator('session-1', 'request-1');
+		expect(aggregator.accept(event('assistant.message_delta', { messageId: 'answer-1', delta: '\n\n' }))).toEqual([]);
+		const preface = aggregator.accept(event('assistant.message', { messageId: 'answer-1', content: 'I will inspect the history.' }))[0];
+		const toolMutations = aggregator.accept(event('tool.execution_start', { toolCallId: 'read-1', toolName: 'read_file', arguments: { path: '.git/HEAD' } }));
+
+		expect(preface.round).toMatchObject({ type: 'answer', status: 'running' });
+		expect(toolMutations[0]).toMatchObject({ isNew: false, round: { id: preface.round.id, type: 'reasoning', summary: 'Thinking…', status: 'completed' } });
+		expect(toolMutations[1].round).toMatchObject({ type: 'read' });
 	});
 });
 

@@ -298,15 +298,23 @@ export class TelegramRemoteContribution extends Disposable {
 		const startCompletion = this.startCompletion;
 		this.blockIncomingUpdates('disabled', 'user-disabled');
 		this.registry.suspendTransport(this.transport.id);
-		let stopError: unknown;
+		let disableError: unknown;
+		try {
+			const botToken = await this.authorization.getBotToken();
+			if (botToken) {
+				await this.transport.discardPendingUpdatesOnNextStart(botToken);
+			}
+		} catch (error) {
+			disableError = error;
+		}
 		try {
 			await this.transport.stop();
 		} catch (error) {
-			stopError = error;
+			disableError ??= error;
 		}
 		await startCompletion;
-		if (stopError) {
-			throw stopError;
+		if (disableError) {
+			throw disableError;
 		}
 	}
 

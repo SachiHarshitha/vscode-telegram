@@ -558,7 +558,7 @@ describe('CopilotCLIChatSessionContentProvider (additional)', () => {
 			description: (item.description as vscode.MarkdownString).value,
 			tooltip: (item.tooltip as vscode.MarkdownString).value,
 		}).toEqual({
-			description: '$(radio-tower)',
+			description: '$(remote)',
 			tooltip: 'Remotely controllable from: Test Remote. Use the transport controls to disable remote access.',
 		});
 	});

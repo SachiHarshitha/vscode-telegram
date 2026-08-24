@@ -17,7 +17,7 @@ import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHan
 export class TelegramTransport extends Disposable implements IRemoteControlTransport {
 	readonly id = 'telegram';
 	readonly label = l10n.t('Telegram');
-	readonly themeIcon = 'radio-tower';
+	readonly themeIcon = 'copilot-telegram-logo';
 
 	private readonly service: TelegramService;
 	private eventPublisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput'> | undefined;
@@ -73,6 +73,10 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 
 	stop(): Promise<void> {
 		return this.service.stop();
+	}
+
+	discardPendingUpdatesOnNextStart(botToken: string): Promise<void> {
+		return this.service.discardPendingUpdatesOnNextStart(botToken);
 	}
 
 	preserveDeliveryClient(): void {

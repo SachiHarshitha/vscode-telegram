@@ -19,6 +19,8 @@ interface TelegramStatusBarPresentation {
 	readonly background?: 'warning' | 'error';
 }
 
+const telegramThemeIcon = '$(copilot-telegram-logo)';
+
 export interface TelegramStatusQuickPickItem extends vscode.QuickPickItem {
 	readonly command: string;
 }
@@ -113,7 +115,7 @@ export function getTelegramStatusBarPresentation(input: {
 			: l10n.t('{0} (+{1})', input.sessionTitles[0], input.sessionTitles.length - 1);
 		return {
 			visible: true,
-			text: l10n.t('$(radio-tower) Telegram: {0}', sessionLabel),
+			text: l10n.t('{0} Telegram: {1}', telegramThemeIcon, sessionLabel),
 			tooltip: input.pairedUser
 				? input.remotePermissionResponses
 					? l10n.t('Telegram user {0} can remotely control {1} and answer supported permission prompts. Select for controls.', input.pairedUser, sessionLabel)
@@ -128,7 +130,7 @@ export function getTelegramStatusBarPresentation(input: {
 	if (input.authorizationState === 'needs-consent') {
 		return {
 			visible: true,
-			text: l10n.t('$(shield) Telegram: Workspace authorization required'),
+			text: l10n.t('{0} Telegram: Workspace authorization required', telegramThemeIcon),
 			tooltip: l10n.t('The current workspace has not been authorized for Telegram Remote. Remote commands are blocked. Select for controls.'),
 			background: 'warning',
 		};
@@ -137,7 +139,7 @@ export function getTelegramStatusBarPresentation(input: {
 		return input.configured
 			? {
 				visible: true,
-				text: l10n.t('$(circle-slash) Telegram: Off'),
+				text: l10n.t('{0} Telegram: Off', telegramThemeIcon),
 				tooltip: l10n.t('Telegram Remote is disabled. Select to enable remote access using the saved configuration.'),
 			}
 			: { visible: false };
@@ -145,7 +147,7 @@ export function getTelegramStatusBarPresentation(input: {
 	if (input.status.state === 'starting' || input.status.state === 'retrying') {
 		return {
 			visible: true,
-			text: l10n.t('$(sync~spin) Telegram'),
+			text: l10n.t('{0} Telegram', telegramThemeIcon),
 			tooltip: input.status.state === 'retrying'
 				? l10n.t('Telegram Remote is reconnecting. Select for controls, including Disable Remote Access.')
 				: l10n.t('Telegram Remote is connecting. Select for controls, including Disable Remote Access.'),
@@ -154,7 +156,7 @@ export function getTelegramStatusBarPresentation(input: {
 	if (input.status.state === 'failed') {
 		return {
 			visible: true,
-			text: l10n.t('$(alert) Telegram'),
+			text: l10n.t('{0} Telegram', telegramThemeIcon),
 			tooltip: l10n.t('Telegram Remote connection error ({0}). Remote prompts are blocked. Select for controls.', input.status.reason),
 			background: 'error',
 		};
@@ -162,7 +164,7 @@ export function getTelegramStatusBarPresentation(input: {
 	if (input.status.state === 'connected' && !input.pairedUser) {
 		return {
 			visible: true,
-			text: l10n.t('$(alert) Telegram'),
+			text: l10n.t('{0} Telegram', telegramThemeIcon),
 			tooltip: l10n.t('Telegram is connected, but no private-chat user is paired. Select for controls.'),
 			background: 'error',
 		};
@@ -170,13 +172,13 @@ export function getTelegramStatusBarPresentation(input: {
 	if (input.status.state === 'connected') {
 		return {
 			visible: true,
-			text: l10n.t('$(radio-tower) Telegram'),
+			text: l10n.t('{0} Telegram', telegramThemeIcon),
 			tooltip: l10n.t('Telegram Remote is connected and paired with {0}. No session is attached. Select for controls.', input.pairedUser!),
 		};
 	}
 	return {
 		visible: true,
-		text: l10n.t('$(alert) Telegram'),
+		text: l10n.t('{0} Telegram', telegramThemeIcon),
 		tooltip: l10n.t('Telegram Remote is stopped unexpectedly. Remote prompts are blocked. Select for controls.'),
 		background: 'error',
 	};

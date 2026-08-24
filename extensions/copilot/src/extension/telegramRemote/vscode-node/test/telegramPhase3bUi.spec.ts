@@ -64,11 +64,11 @@ describe('Telegram Phase 3b UI', () => {
 			getTelegramStatusBarPresentation({ enabled: true, statusBarEnabled: true, status: { state: 'failed', reason: 'network' }, sessionTitles: [] }),
 		]).toEqual([
 			{ visible: false },
-			expect.objectContaining({ visible: true, text: '$(sync~spin) Telegram' }),
-			expect.objectContaining({ visible: true, text: '$(alert) Telegram', background: 'error' }),
-			expect.objectContaining({ visible: true, text: '$(radio-tower) Telegram: Session A', background: 'warning' }),
-			expect.objectContaining({ visible: true, text: '$(radio-tower) Telegram: Session A', background: 'warning' }),
-			expect.objectContaining({ visible: true, text: '$(alert) Telegram', background: 'error' }),
+			expect.objectContaining({ visible: true, text: '$(copilot-telegram-logo) Telegram' }),
+			expect.objectContaining({ visible: true, text: '$(copilot-telegram-logo) Telegram', background: 'error' }),
+			expect.objectContaining({ visible: true, text: '$(copilot-telegram-logo) Telegram: Session A', background: 'warning' }),
+			expect.objectContaining({ visible: true, text: '$(copilot-telegram-logo) Telegram: Session A', background: 'warning' }),
+			expect.objectContaining({ visible: true, text: '$(copilot-telegram-logo) Telegram', background: 'error' }),
 		]);
 		expect(getTelegramStatusBarPresentation({
 			enabled: true,
@@ -92,7 +92,7 @@ describe('Telegram Phase 3b UI', () => {
 			hiddenBySetting: getTelegramStatusBarPresentation({ enabled: false, configured: true, statusBarEnabled: false, status: { state: 'stopped' }, sessionTitles: [] }),
 			neverConfigured: getTelegramStatusBarPresentation({ enabled: false, configured: false, statusBarEnabled: true, status: { state: 'stopped' }, sessionTitles: [] }),
 		}).toEqual({
-			configuredOff: expect.objectContaining({ visible: true, text: '$(circle-slash) Telegram: Off' }),
+			configuredOff: expect.objectContaining({ visible: true, text: '$(copilot-telegram-logo) Telegram: Off' }),
 			hiddenBySetting: { visible: false },
 			neverConfigured: { visible: false },
 		});
@@ -122,7 +122,7 @@ describe('Telegram Phase 3b UI', () => {
 
 		expect(presentation).toEqual(expect.objectContaining({
 			visible: true,
-			text: '$(shield) Telegram: Workspace authorization required',
+			text: '$(copilot-telegram-logo) Telegram: Workspace authorization required',
 			background: 'warning',
 		}));
 		expect(commands).toEqual([

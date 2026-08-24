@@ -36,17 +36,26 @@ export class ActivityAggregator {
 	private currentInspectionRoundId: string | undefined;
 	private currentReasoningRoundId: string | undefined;
 	private readonly currentReasoningSegments = new Map<string, string>();
+	private currentAssistantRoundId: string | undefined;
+	private readonly currentAssistantSegments = new Map<string, string>();
+	private requestStartedAt: number;
+	private totalInputTokens = 0;
+	private totalOutputTokens = 0;
+	private readonly models = new Set<string>();
+	private contextUsage: string | undefined;
 	private sequence = 0;
 	private terminal = false;
-	private hasAssistantAnswer = false;
 
 	constructor(
 		private readonly sessionId: string,
 		private readonly requestId: string | undefined,
 		private readonly now: () => number = Date.now,
-	) { }
+	) {
+		this.requestStartedAt = this.now();
+	}
 
 	beginRequest(): ActivityRoundMutation {
+		this.requestStartedAt = this.now();
 		return this.create({
 			id: this.id('request'),
 			type: 'progress',
@@ -74,14 +83,31 @@ export class ActivityAggregator {
 			case 'assistant.reasoning_delta':
 				this.closeInspectionBoundary();
 				return [this.upsertReasoning(event.reasoningId, event.delta, true, timestamp)];
-			case 'assistant.message':
+			case 'assistant.message': {
+				const mutations: ActivityRoundMutation[] = [];
+				if (event.reasoning?.trim()) {
+					this.closeInspectionBoundary();
+					mutations.push(this.upsertReasoning(`message:${event.messageId}`, event.reasoning, false, timestamp));
+				}
+				const assistant = this.upsertAssistantMessage(event.messageId, event.content, false, timestamp);
+				if (assistant) {
+					this.closeReasoningBoundary();
+					mutations.push(assistant);
+				}
+				return mutations;
+			}
+			case 'assistant.message_delta': {
+				const assistant = this.upsertAssistantMessage(event.messageId, event.delta, true, timestamp);
+				if (!assistant) {
+					return [];
+				}
 				this.closeSemanticBoundary();
-				return [this.upsertAssistantMessage(event.messageId, event.content, false, timestamp)];
-			case 'assistant.message_delta':
-				this.closeSemanticBoundary();
-				return [this.upsertAssistantMessage(event.messageId, event.delta, true, timestamp)];
-			case 'tool.execution_start':
-				return [this.startTool(event, timestamp)];
+				return [assistant];
+			}
+			case 'tool.execution_start': {
+				const assistantPreface = this.completeAssistantPreface(timestamp);
+				return [...(assistantPreface ? [assistantPreface] : []), this.startTool(event, timestamp)];
+			}
 			case 'tool.execution_progress':
 				return this.updateTool(event.toolCallId, event.message, undefined, timestamp);
 			case 'tool.execution_partial_result':
@@ -117,8 +143,14 @@ export class ActivityAggregator {
 				return [];
 			case 'session.start':
 			case 'session.resume':
+				return [];
 			case 'session.usage_info':
+				this.contextUsage = l10n.t('{0} / {1} tokens ({2}%)', event.currentTokens, event.tokenLimit, Math.min(100, Math.round(event.currentTokens / event.tokenLimit * 100)));
+				return [];
 			case 'assistant.usage':
+				this.models.add(event.model);
+				this.totalInputTokens += event.inputTokens ?? 0;
+				this.totalOutputTokens += event.outputTokens ?? 0;
 				return [];
 		}
 	}
@@ -271,45 +303,102 @@ export class ActivityAggregator {
 			this.currentReasoningRoundId = round.id;
 		}
 		const current = this.currentReasoningSegments.get(sourceId) ?? '';
-		this.currentReasoningSegments.set(sourceId, appendBounded(append ? `${current}${value}` : value));
+		const next = appendBounded(append ? `${current}${value}` : value);
+		if (append || current || ![...this.currentReasoningSegments.values()].some(segment => normalizeText(segment) === normalizeText(next))) {
+			this.currentReasoningSegments.set(sourceId, next);
+		}
 		round.details = [{ value: appendBounded([...this.currentReasoningSegments.values()].filter(Boolean).join('\n\n')) }];
 		round.status = 'running';
 		return { round: snapshot(round), isNew };
 	}
 
-	private upsertAssistantMessage(messageId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation {
-		if (value) {
-			this.hasAssistantAnswer = true;
-		}
+	private upsertAssistantMessage(messageId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation | undefined {
 		const existingId = this.messageRoundIds.get(messageId);
 		const existing = existingId ? this.rounds.get(existingId) : undefined;
+		if (!existing && !hasVisibleAssistantText(value)) {
+			return undefined;
+		}
 		if (existing) {
-			const current = existing.details[0]?.value ?? '';
-			existing.details = [{ value: appendBounded(append ? `${current}${value}` : value) }];
-			existing.summary = summaryFromText(existing.details[0].value, l10n.t('Agent progress'));
-			existing.status = append ? 'running' : 'completed';
-			existing.completedAt = append ? undefined : timestamp;
+			const current = this.currentAssistantSegments.get(messageId) ?? '';
+			this.currentAssistantSegments.set(messageId, appendBounded(append ? `${current}${value}` : value));
+			existing.details = [{ value: appendBounded([...this.currentAssistantSegments.values()].filter(Boolean).join('\n\n')) }];
+			existing.summary = summaryFromText(existing.details[0].value, l10n.t('Thinking…'));
+			existing.status = 'running';
+			existing.completedAt = undefined;
 			return { round: snapshot(existing), isNew: false };
 		}
+		let round = this.currentAssistantRoundId ? this.rounds.get(this.currentAssistantRoundId) : undefined;
+		if (round) {
+			this.currentAssistantSegments.set(messageId, value);
+			round.details = [{ value: appendBounded([...this.currentAssistantSegments.values()].filter(Boolean).join('\n\n')) }];
+			round.summary = summaryFromText(round.details[0].value, l10n.t('Thinking…'));
+			this.messageRoundIds.set(messageId, round.id);
+			return { round: snapshot(round), isNew: false };
+		}
 		const mutation = this.create({
-			id: this.id(`message:${messageId}`), type: 'answer', summary: summaryFromText(value, l10n.t('Agent response')),
-			status: append ? 'running' : 'completed', steerable: true, details: value ? [{ value }] : [], startedAt: timestamp,
-			completedAt: append ? undefined : timestamp,
+			id: this.id(`message:${messageId}`), type: 'answer', summary: summaryFromText(value, l10n.t('Thinking…')),
+			status: 'running', steerable: true, details: [{ value }], startedAt: timestamp,
 		});
+		this.currentAssistantRoundId = mutation.round.id;
+		this.currentAssistantSegments.set(messageId, value);
 		this.messageRoundIds.set(messageId, mutation.round.id);
 		return mutation;
 	}
 
 	private completeTimeline(status: 'completed' | 'failed', summary: string, detail: string | undefined, timestamp: number): readonly ActivityRoundMutation[] {
-		this.closeSemanticBoundary();
 		this.terminal = true;
-		if (status === 'completed' && this.hasAssistantAnswer && !detail) {
-			return [];
+		const answer = this.currentAssistantRoundId ? this.rounds.get(this.currentAssistantRoundId) : undefined;
+		this.closeSemanticBoundary();
+		if (status === 'completed' && answer) {
+			answer.type = 'answer';
+			answer.status = 'completed';
+			answer.completedAt = timestamp;
+			appendDetails(answer, this.finalMetadata(timestamp));
+			this.clearCurrentAssistant();
+			return [{ round: snapshot(answer), isNew: false }];
 		}
+		this.clearCurrentAssistant();
 		return [this.create({
 			id: this.id(`terminal:${++this.sequence}`), type: 'other', summary, status, steerable: false,
 			details: detail ? [{ value: detail }] : [], startedAt: timestamp, completedAt: timestamp,
 		})];
+	}
+
+	private completeAssistantPreface(timestamp: number): ActivityRoundMutation | undefined {
+		const round = this.currentAssistantRoundId ? this.rounds.get(this.currentAssistantRoundId) : undefined;
+		if (!round) {
+			return undefined;
+		}
+		round.type = 'reasoning';
+		round.summary = l10n.t('Thinking…');
+		round.status = 'completed';
+		round.completedAt = timestamp;
+		const mutation = { round: snapshot(round), isNew: false };
+		this.clearCurrentAssistant();
+		return mutation;
+	}
+
+	private finalMetadata(timestamp: number): ActivityRoundDetail[] {
+		const details: ActivityRoundDetail[] = [{ label: l10n.t('Duration'), value: formatDuration(Math.max(0, timestamp - this.requestStartedAt)) }];
+		const tokens = this.totalInputTokens + this.totalOutputTokens;
+		if (tokens > 0 || this.models.size > 0) {
+			details.push({
+				label: l10n.t('Token usage'),
+				value: [
+					this.models.size > 0 ? [...this.models].join(', ') : undefined,
+					tokens > 0 ? l10n.t('{0} input · {1} output · {2} total', this.totalInputTokens, this.totalOutputTokens, tokens) : undefined,
+				].filter((value): value is string => !!value).join(' · '),
+			});
+		}
+		if (this.contextUsage) {
+			details.push({ label: l10n.t('Context'), value: this.contextUsage });
+		}
+		return details;
+	}
+
+	private clearCurrentAssistant(): void {
+		this.currentAssistantRoundId = undefined;
+		this.currentAssistantSegments.clear();
 	}
 
 	private create(input: Omit<MutableActivityRound, 'sessionId' | 'requestId'>): ActivityRoundMutation {
@@ -464,6 +553,14 @@ function snapshot(round: MutableActivityRound): ActivityRound {
 function summaryFromText(value: string, fallback: string): string {
 	const line = value.replace(/^[#>*\-\s]+/, '').split(/\r?\n/, 1)[0]?.replace(/\s+/g, ' ').trim();
 	return boundedLine(line || fallback);
+}
+
+function hasVisibleAssistantText(value: string): boolean {
+	return value.replace(/[\s#>*_`~\-]+/g, '').length > 0;
+}
+
+function normalizeText(value: string): string {
+	return value.replace(/\s+/g, ' ').trim();
 }
 
 function boundedLine(value: string): string {
