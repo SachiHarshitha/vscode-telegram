@@ -8,7 +8,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IAbortController, IAbortSignal, IFetcherService } from '../../../platform/networking/common/fetcherService';
-import { Disposable } from '../../../util/vs/base/common/lifecycle';
+import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import {
 	ITelegramBotClient,
@@ -34,6 +34,7 @@ const maximumLongPollTimeoutSeconds = 50;
 const maximumBackoffMs = 30_000;
 const initialBackoffMs = 1_000;
 const maximumRecentUpdateIds = 1_000;
+const takeoverHandoffDelayMs = 6_000;
 
 interface TelegramPollingStateFile {
 	readonly version: 1;
@@ -50,6 +51,7 @@ interface TelegramPollingRun {
 	readonly bot: TelegramUser;
 	readonly recentUpdateIds: Set<number>;
 	readonly recentUpdateIdOrder: number[];
+	readonly leaseLossListener: IDisposable;
 	readonly longPollTimeoutSeconds: number;
 	requestedStop: boolean;
 	nextOffset: number | undefined;
@@ -58,7 +60,7 @@ interface TelegramPollingRun {
 
 export interface ITelegramPollingRuntime {
 	createClient(botToken: string): ITelegramBotClient;
-	acquireLease(storageRoot: string, botToken: string): Promise<ITelegramPollerLease>;
+	acquireLease(storageRoot: string, botToken: string, forceTakeover?: boolean): Promise<ITelegramPollerLease>;
 	delay(milliseconds: number, signal: IAbortSignal): Promise<void>;
 }
 
@@ -67,6 +69,7 @@ export type TelegramValidatedHandler = (bot: TelegramUser) => Promise<void>;
 
 export interface TelegramPollingOptions {
 	readonly timeoutSeconds?: number;
+	readonly forceLeaseTakeover?: boolean;
 }
 
 /** Owns one abortable, durable Telegram getUpdates loop. */
@@ -106,10 +109,18 @@ export class TelegramService extends Disposable {
 
 		let lease: ITelegramPollerLease | undefined;
 		try {
-			lease = await this.runtime.acquireLease(this.storageRoot, botToken);
+			lease = await this.runtime.acquireLease(this.storageRoot, botToken, options?.forceLeaseTakeover);
 			if (generation !== this.generation) {
 				await lease.release();
 				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
+			}
+			if (lease.takeoverOccurred) {
+				this.logService.info('[TelegramRemote] Explicit reconnect took ownership of the Telegram poller; waiting for the previous owner to stop.');
+				await this.runtime.delay(takeoverHandoffDelayMs, controller.signal);
+				if (generation !== this.generation || controller.signal.aborted) {
+					await lease.release();
+					throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
+				}
 			}
 			const client = this.runtime.createClient(botToken);
 			const bot = await client.getMe(controller.signal);
@@ -124,6 +135,13 @@ export class TelegramService extends Disposable {
 			}
 
 			this.deliveryClient = client;
+			const leaseLossListener = lease.onDidLose(() => this.handleLeaseLoss(generation, controller));
+			const nextOffset = await this.loadOffset(lease.tokenFingerprint);
+			if (generation !== this.generation || controller.signal.aborted) {
+				leaseLossListener.dispose();
+				await lease.release();
+				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
+			}
 			const run: TelegramPollingRun = {
 				generation,
 				client,
@@ -132,9 +150,10 @@ export class TelegramService extends Disposable {
 				bot,
 				recentUpdateIds: new Set(),
 				recentUpdateIdOrder: [],
+				leaseLossListener,
 				longPollTimeoutSeconds: normalizeLongPollTimeout(options?.timeoutSeconds),
 				requestedStop: false,
-				nextOffset: await this.loadOffset(lease.tokenFingerprint),
+				nextOffset,
 				promise: Promise.resolve(),
 			};
 			this.startingController = undefined;
@@ -285,6 +304,7 @@ export class TelegramService extends Disposable {
 	}
 
 	private async finishRun(run: TelegramPollingRun): Promise<void> {
+		run.leaseLossListener.dispose();
 		await run.lease.release().catch(() => {
 			this.logService.warn('[TelegramRemote] Failed to release the Telegram poller lease.');
 		});
@@ -294,6 +314,15 @@ export class TelegramService extends Disposable {
 				this.setStatus({ state: 'stopped' });
 			}
 		}
+	}
+
+	private handleLeaseLoss(generation: number, controller: IAbortController): void {
+		if (generation !== this.generation) {
+			return;
+		}
+		this.logService.warn('[TelegramRemote] Telegram poller ownership was transferred to another VS Code window.');
+		this.setStatus({ state: 'failed', reason: 'lease' });
+		controller.abort();
 	}
 
 	private isActive(run: TelegramPollingRun): boolean {
@@ -350,8 +379,8 @@ class DefaultTelegramPollingRuntime implements ITelegramPollingRuntime {
 		return new TelegramBotClient(botToken, undefined, this.fetcherService);
 	}
 
-	acquireLease(storageRoot: string, botToken: string): Promise<ITelegramPollerLease> {
-		return acquireTelegramPollerLease(storageRoot, botToken);
+	acquireLease(storageRoot: string, botToken: string, forceTakeover?: boolean): Promise<ITelegramPollerLease> {
+		return acquireTelegramPollerLease(storageRoot, botToken, { forceTakeover });
 	}
 
 	delay(milliseconds: number, signal: IAbortSignal): Promise<void> {

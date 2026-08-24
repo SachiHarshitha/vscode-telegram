@@ -23,14 +23,30 @@ describe('TelegramRichRenderer', () => {
 
 	it('labels reasoning as SDK-visible agent activity and redacts secrets', () => {
 		const message = renderTelegramActivityRound(round({
-			type: 'reasoning', summary: 'Reviewing permission routing', status: 'running',
+			type: 'reasoning', summary: 'Thinking…', status: 'running',
 			details: [{ value: 'authorization=secret-value' }],
 		}));
 		const serialized = JSON.stringify(message);
 
 		expect(serialized).toContain('🧠');
+		expect(serialized).toContain('Thinking…');
 		expect(serialized).toContain('authorization=redacted');
 		expect(serialized).not.toContain('secret-value');
+		expect(serialized).not.toContain('running');
+		expect(serialized).not.toContain('Started');
+	});
+
+	it('preserves expandable tool details and timing', () => {
+		const message = renderTelegramActivityRound(round({
+			type: 'search', summary: 'Inspected 2 items', status: 'running',
+			details: [{ label: 'Path', value: 'src/a.ts', format: 'code' }],
+		}));
+		const serialized = JSON.stringify(message);
+
+		expect(message.blocks?.[0]).toMatchObject({ type: 'details' });
+		expect(serialized).toContain('running');
+		expect(serialized).toContain('Started');
+		expect(serialized).toContain('src/a.ts');
 	});
 
 	it('keeps raw successful output behind the local detailed disclosure setting', () => {

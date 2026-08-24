@@ -32,9 +32,10 @@ export class ActivityAggregator {
 	private readonly rounds = new Map<string, MutableActivityRound>();
 	private readonly toolRoundIds = new Map<string, string>();
 	private readonly messageRoundIds = new Map<string, string>();
-	private readonly reasoningRoundIds = new Map<string, string>();
 	private readonly inspectionTools = new Set<string>();
 	private currentInspectionRoundId: string | undefined;
+	private currentReasoningRoundId: string | undefined;
+	private readonly currentReasoningSegments = new Map<string, string>();
 	private sequence = 0;
 	private terminal = false;
 	private hasAssistantAnswer = false;
@@ -66,18 +67,18 @@ export class ActivityAggregator {
 				return [];
 			case 'assistant.intent':
 				this.closeInspectionBoundary();
-				return [this.createTextRound('reasoning', event.id, event.intent, timestamp)];
+				return [this.upsertReasoning(event.id, event.intent, false, timestamp)];
 			case 'assistant.reasoning':
 				this.closeInspectionBoundary();
-				return [this.upsertStreamingText('reasoning', event.reasoningId, event.content, false, timestamp)];
+				return [this.upsertReasoning(event.reasoningId, event.content, false, timestamp)];
 			case 'assistant.reasoning_delta':
 				this.closeInspectionBoundary();
-				return [this.upsertStreamingText('reasoning', event.reasoningId, event.delta, true, timestamp)];
+				return [this.upsertReasoning(event.reasoningId, event.delta, true, timestamp)];
 			case 'assistant.message':
-				this.closeInspectionBoundary();
+				this.closeSemanticBoundary();
 				return [this.upsertAssistantMessage(event.messageId, event.content, false, timestamp)];
 			case 'assistant.message_delta':
-				this.closeInspectionBoundary();
+				this.closeSemanticBoundary();
 				return [this.upsertAssistantMessage(event.messageId, event.delta, true, timestamp)];
 			case 'tool.execution_start':
 				return [this.startTool(event, timestamp)];
@@ -88,7 +89,7 @@ export class ActivityAggregator {
 			case 'tool.execution_complete':
 				return this.completeTool(event.toolCallId, event.success, event.output, event.error, timestamp);
 			case 'subagent.started': {
-				this.closeInspectionBoundary();
+				this.closeSemanticBoundary();
 				const mutation = this.create({
 					id: this.id(`subagent:${event.toolCallId}`), type: 'subagent', toolCallId: event.toolCallId,
 					summary: l10n.t('Subagent {0} started', event.name), status: 'running', steerable: true,
@@ -112,7 +113,7 @@ export class ActivityAggregator {
 			case 'session.idle':
 				return this.completeTimeline(event.aborted ? 'failed' : 'completed', event.aborted ? l10n.t('Request cancelled') : l10n.t('Request complete'), undefined, timestamp);
 			case 'assistant.turn_end':
-				this.closeInspectionBoundary();
+				this.closeSemanticBoundary();
 				return [];
 			case 'session.start':
 			case 'session.resume':
@@ -123,7 +124,7 @@ export class ActivityAggregator {
 	}
 
 	createPermission(request: IRemotePermissionRequest): ActivityRoundMutation {
-		this.closeInspectionBoundary();
+		this.closeSemanticBoundary();
 		return this.create({
 			id: this.id(`permission:${request.requestId}`), type: 'permission', toolCallId: request.permissionRequest.toolCallId,
 			summary: permissionSummary(request.permissionRequest.kind), status: 'waiting', steerable: false,
@@ -132,7 +133,7 @@ export class ActivityAggregator {
 	}
 
 	createQuestion(request: IRemoteUserInputRequest): ActivityRoundMutation {
-		this.closeInspectionBoundary();
+		this.closeSemanticBoundary();
 		return this.create({
 			id: this.id(`question:${request.requestId}`), type: 'question', toolCallId: request.toolCallId,
 			summary: boundedLine(request.question), status: 'waiting', steerable: false,
@@ -160,6 +161,7 @@ export class ActivityAggregator {
 	}
 
 	private startTool(event: Extract<RemoteAgentEvent, { kind: 'tool.execution_start' }>, timestamp: number): ActivityRoundMutation {
+		this.closeReasoningBoundary();
 		const type = classifyTool(event.toolName);
 		const details = describeTool(event.toolName, event.arguments, event.mcpServerName, event.mcpToolName);
 		if (type === 'read' || type === 'search') {
@@ -256,19 +258,23 @@ export class ActivityAggregator {
 		return [{ round: snapshot(round), isNew: false }];
 	}
 
-	private upsertStreamingText(type: 'reasoning', streamId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation {
-		const existingId = this.reasoningRoundIds.get(streamId);
-		const existing = existingId ? this.rounds.get(existingId) : undefined;
-		if (existing) {
-			const current = existing.details[0]?.value ?? '';
-			existing.details = [{ value: appendBounded(append ? `${current}${value}` : value) }];
-			existing.summary = summaryFromText(existing.details[0].value, l10n.t('Reviewing next steps'));
-			existing.status = 'running';
-			return { round: snapshot(existing), isNew: false };
+	private upsertReasoning(sourceId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation {
+		let round = this.currentReasoningRoundId ? this.rounds.get(this.currentReasoningRoundId) : undefined;
+		let isNew = false;
+		if (!round) {
+			isNew = true;
+			round = this.mutable({
+				id: this.id(`reasoning:${++this.sequence}`), type: 'reasoning', summary: l10n.t('Thinking…'),
+				status: 'running', steerable: true, details: [], startedAt: timestamp,
+			});
+			this.rounds.set(round.id, round);
+			this.currentReasoningRoundId = round.id;
 		}
-		const mutation = this.createTextRound(type, streamId, value, timestamp);
-		this.reasoningRoundIds.set(streamId, mutation.round.id);
-		return mutation;
+		const current = this.currentReasoningSegments.get(sourceId) ?? '';
+		this.currentReasoningSegments.set(sourceId, appendBounded(append ? `${current}${value}` : value));
+		round.details = [{ value: appendBounded([...this.currentReasoningSegments.values()].filter(Boolean).join('\n\n')) }];
+		round.status = 'running';
+		return { round: snapshot(round), isNew };
 	}
 
 	private upsertAssistantMessage(messageId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation {
@@ -294,15 +300,8 @@ export class ActivityAggregator {
 		return mutation;
 	}
 
-	private createTextRound(type: 'reasoning', sourceId: string, value: string, timestamp: number): ActivityRoundMutation {
-		return this.create({
-			id: this.id(`${type}:${sourceId}`), type, summary: summaryFromText(value, l10n.t('Reviewing next steps')),
-			status: 'running', steerable: true, details: value ? [{ value }] : [], startedAt: timestamp,
-		});
-	}
-
 	private completeTimeline(status: 'completed' | 'failed', summary: string, detail: string | undefined, timestamp: number): readonly ActivityRoundMutation[] {
-		this.closeInspectionBoundary();
+		this.closeSemanticBoundary();
 		this.terminal = true;
 		if (status === 'completed' && this.hasAssistantAnswer && !detail) {
 			return [];
@@ -329,6 +328,16 @@ export class ActivityAggregator {
 
 	private closeInspectionBoundary(): void {
 		this.currentInspectionRoundId = undefined;
+	}
+
+	private closeReasoningBoundary(): void {
+		this.currentReasoningRoundId = undefined;
+		this.currentReasoningSegments.clear();
+	}
+
+	private closeSemanticBoundary(): void {
+		this.closeInspectionBoundary();
+		this.closeReasoningBoundary();
 	}
 }
 

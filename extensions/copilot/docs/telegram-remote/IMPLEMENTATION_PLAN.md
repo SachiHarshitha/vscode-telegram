@@ -222,7 +222,7 @@ The Mission Control adapter is in `vscode-node`, not `node`, because it invokes 
 - `TelegramBotClient` uses `IFetcherService`, JSON POST requests and the fetcher's abort signal. It validates every envelope and method result before returning typed users, updates or messages.
 - The supported API subset is `getMe`, `getUpdates`, `sendMessage`, `editMessageText`, `editMessageReplyMarkup` and `answerCallbackQuery`; no Bot framework dependency was added.
 - `TelegramService` owns one abortable long poll, ordered update handling, in-process deduplication, durable per-token offsets, `retry_after` handling and bounded exponential backoff.
-- `telegramPollerLease.ts` uses an atomic `wx` lease file keyed by a truncated SHA-256 token fingerprint. The file contains only the fingerprint, PID, random nonce and timestamps; stale recovery requires both expiry and a dead owner process.
+- `telegramPollerLease.ts` uses an atomic `wx` lease file keyed by a truncated SHA-256 token fingerprint. The file contains only the fingerprint, PID, random nonce and timestamps; automatic stale recovery requires both expiry and a dead owner process. Explicit local Reconnect can atomically transfer ownership; the old nonce holder aborts when its heartbeat detects replacement, and the new owner delays polling for the handoff interval.
 - Offset advancement occurs only after the update handler succeeds and the new offset has been persisted. A failed handler is retried without confirming the update.
 - `TelegramRemoteContribution` registers the transport only in the supported controller host. Registration remains network-dormant; Phase 3 added explicit lifecycle entry points, and Phase 3b will be their first production caller after consent.
 - All new Telegram TypeScript files live under `src/extension/telegramRemote` with downstream copyright ownership.
@@ -650,7 +650,7 @@ SDK SessionEvent
 ```
 
 - `ActivityRound` is transport-neutral and records semantic type, summary, running/completed/failed/waiting status, bounded details, timestamps and steerability.
-- Consecutive reads/searches share an inspection round until a semantic boundary. Commands, edits, progress/reasoning summaries, permissions, questions, subagents and terminal results remain distinct.
+- Consecutive reads/searches share an inspection round until a semantic boundary. Consecutive SDK-visible intent/reasoning updates share one **Thinking…** round until a non-reasoning boundary. Commands, edits, compact progress updates, permissions, questions, subagents and final answers remain distinct.
 - `toolCallId` binds start/progress/completion to one round. `TelegramActivityTimeline` stores the Rich Message `message_id` and edits that same message. Edit failure sends a reply-linked replacement and updates correlation to the replacement.
 - Short lifecycle/progress rounds render as compact paragraphs, detail-bearing tool/interaction rounds remain expandable, final assistant Markdown is sanitized into rich HTML, and a successful answer suppresses the redundant terminal-completion bubble.
 - Every sent bubble records `(chatId,messageId) -> (sessionId,requestId,activityRoundId,generation)`. A Telegram reply to a live steerable round goes back through `setPendingCopilotCLIRequestContext` and `workbench.action.chat.openSessionWithPrompt.copilotcli`, preserving native immediate steering. Stale replies do not dispatch.

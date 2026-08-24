@@ -35,7 +35,7 @@ The **Target** column records current implementation status, not only the eventu
 | Queue follow-up prompt | P1 | Upstream + Glue | Planned | SDK enqueue/default behavior |
 | Abort active work | P0 | Upstream + Glue | Required | Registry safe-control binding; not exposed on `ICopilotCLISession` today |
 | Live assistant output | P0 | Upstream + Telegram | Implemented | SDK-visible deltas/full messages become semantic Rich Message rounds with bounded edits |
-| Agent intent/status | P0 | Upstream + Telegram | Implemented when exposed | Separate progress/reasoning-summary rounds; no hidden chain-of-thought |
+| Agent intent/status | P0 | Upstream + Telegram | Implemented when exposed | Consecutive SDK-visible intent/reasoning summaries update one expandable **Thinking…** round until a semantic boundary; no hidden chain-of-thought |
 | Tool start/progress/complete | P0 | Upstream + Telegram | Implemented | Tool-call correlation; semantic read/search grouping; command/edit start-to-completion updates |
 | Permission request | P0 | Upstream + Glue | Implemented | Individual Rich Message bubble, callback-correlated with the live SDK request |
 | Permission approve/deny | P0 | Upstream + Glue | Implemented | Approve-once/deny only; first-valid-response-wins; replay/stale controls fail closed |
@@ -155,7 +155,7 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | Current-workspace session authorization | P0 | Implemented; URI-identity containment against current consented roots, fail closed for empty/missing/foreign working directories |
 | Remote permission escalation prevention | P0 | Implemented; Telegram can resolve only a correlated request with approve-once/deny and cannot mutate permission policy |
 | Non-E2E confidentiality disclosure | P0 | Required before enabling bot transport |
-| Singleton poller lease | P0 | One `getUpdates` consumer per bot token; competing consumer fails visibly |
+| Singleton poller lease | P0 | Automatic competing consumer fails visibly; explicit Reconnect performs a nonce-checked ownership handoff before the new poll starts |
 | Rate limiting | P1 | Planned |
 | Audit trail | P1 | Planned |
 | Configurable permission policy | P1 | Planned |

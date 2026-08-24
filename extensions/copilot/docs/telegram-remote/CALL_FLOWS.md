@@ -95,7 +95,7 @@ sequenceDiagram
     W->>W: persist enabled=false; keep configured marker
 ```
 
-Setup, Enable and Reconnect share one in-flight operation. Concurrent commands cannot start a second poller. Disable invokes the contribution before its first asynchronous wait, so dispatch is blocked even if network cleanup stalls; any later completion from the cancelled generation cannot revive access. A configured disabled state exposes only Enable in the status menu. Workspace-consent recovery is amber and local-only, without token entry or pairing. Authentication/API failures use Set Up Again, while retryable failures and unexpected stopped state expose Reconnect.
+Setup, Enable and Reconnect share one in-flight operation. Concurrent commands cannot start a second poller. Automatic Enable remains conservative when another healthy owner exists; explicit Reconnect transfers the token-fingerprinted lease, gives the former owner one heartbeat window to abort, and only then starts the new poll. Disable invokes the contribution before its first asynchronous wait, so dispatch is blocked even if network cleanup stalls; any later completion from the cancelled generation cannot revive access. A configured disabled state exposes only Enable in the status menu. Workspace-consent recovery is amber and local-only, without token entry or pairing. Authentication/API failures use Set Up Again, while retryable failures and unexpected stopped state expose Reconnect.
 
 During pairing, the contribution is `pairing-only`: all commands, callbacks, and prompts are ignored except the exact pending `/pair` command. It becomes `authorized` only after token validation, paired identity persistence, and current workspace consent are all active.
 
@@ -271,7 +271,7 @@ sequenceDiagram
     TL-->>T: edit original Rich Message
 ```
 
-Consecutive read/search tools share a semantic inspection round until a reasoning, progress, command, edit, subagent, interaction or terminal boundary. Commands and file edits remain separate rounds. An edit failure falls back to a new Rich Message linked to the former one with `ReplyParameters`.
+Consecutive read/search tools share a semantic inspection round until a reasoning, progress, command, edit, subagent, interaction or terminal boundary. Consecutive SDK-visible intent/reasoning events append to one **Thinking…** Rich Message until one of those non-reasoning boundaries occurs. Commands and file edits remain separate rounds. An edit failure falls back to a new Rich Message linked to the former one with `ReplyParameters`.
 
 ## 8. Permission request
 

@@ -272,7 +272,7 @@ interface ActivityRound {
     sessionId: string;
     requestId?: string;
     toolCallId?: string;
-    type: 'reasoning' | 'progress' | 'search' | 'read' | 'edit' | 'command' | 'permission' | 'question' | 'subagent' | 'other';
+    type: 'reasoning' | 'progress' | 'answer' | 'search' | 'read' | 'edit' | 'command' | 'permission' | 'question' | 'subagent' | 'other';
     summary: string;
     status: 'running' | 'completed' | 'failed' | 'waiting';
     details?: ActivityRoundDetail[];
@@ -293,7 +293,7 @@ SDK SessionEvent
   -> Telegram Rich Message
 ```
 
-`ActivityAggregator` groups a consecutive read/search burst until a semantic boundary. Commands, edits, permissions, questions, subagents, progress/direction changes and terminal results remain distinct. `toolCallId` updates a running tool round rather than opening separate start/progress/complete messages.
+`ActivityAggregator` groups a consecutive read/search burst until a semantic boundary. Consecutive SDK-visible intent/reasoning updates similarly append to one expandable **Thinking…** round until a tool, answer, interaction, subagent or terminal event changes direction. Commands, edits, permissions, questions, subagents, compact lifecycle updates and final answers remain distinct. `toolCallId` updates a running tool round rather than opening separate start/progress/complete messages.
 
 ### Granular Activity Timeline
 
@@ -400,7 +400,7 @@ sequenceDiagram
 
 The workstation initiates all network connections. No inbound service is required.
 
-Only one active `getUpdates` consumer may exist for a bot token. The contribution owns a singleton poller/lease and releases it on disable/deactivation. If multiple VS Code extension hosts can load the same configuration, V1 must either coordinate the lease across them or explicitly reject the second consumer; two pollers must never silently compete.
+Only one active `getUpdates` consumer may exist for a bot token. The contribution owns a singleton poller/lease and releases it on disable/deactivation. Automatic startup rejects a healthy competing owner. An explicit user **Reconnect** may transfer the lease: it atomically replaces ownership, the former owner detects the nonce change and aborts, and the new owner waits through the heartbeat handoff before polling. This provides recovery from a reload/orphaned window without silently letting two pollers compete.
 
 ## 12. Telegram UI state
 

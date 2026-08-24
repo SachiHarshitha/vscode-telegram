@@ -30,6 +30,10 @@ export function renderTelegramActivityRound(round: ActivityRound, disclosure: Te
 			round.toolCallId ? `tool=${round.toolCallId}` : undefined,
 		].filter(Boolean).join('\n')) });
 	}
+	if (isToolRound(round) && round.startedAt !== undefined) {
+		detailBlocks.push({ type: 'divider' });
+		detailBlocks.push({ type: 'paragraph', text: timingText(round) });
+	}
 	if (detailBlocks.length === 0) {
 		return {
 			blocks: [{ type: 'paragraph', text: summaryText(round) }],
@@ -58,7 +62,7 @@ export function renderTelegramAssistantAnswer(content: string): TelegramInputRic
 }
 
 function summaryText(round: ActivityRound): TelegramRichText {
-	return [icon(round), ' ', { type: 'bold', text: bounded(round.summary) }];
+	return [icon(round), ' ', { type: 'bold', text: bounded(round.summary) }, isToolRound(round) ? statusSuffix(round) : ''];
 }
 
 function renderDetail(detail: ActivityRoundDetail): readonly TelegramInputRichBlock[] {
@@ -108,6 +112,26 @@ function icon(round: ActivityRound): string {
 
 function duplicatesSummary(round: ActivityRound, detail: ActivityRoundDetail): boolean {
 	return !detail.label && normalize(detail.value) === normalize(round.summary);
+}
+
+function isToolRound(round: ActivityRound): boolean {
+	return round.type === 'read' || round.type === 'search' || round.type === 'edit' || round.type === 'command' || round.type === 'subagent';
+}
+
+function statusSuffix(round: ActivityRound): string {
+	return round.status === 'running' ? l10n.t(' · running…')
+		: round.status === 'waiting' ? l10n.t(' · waiting')
+			: '';
+}
+
+function timingText(round: ActivityRound): string {
+	const startedAt = round.startedAt;
+	if (startedAt === undefined) {
+		return '';
+	}
+	const duration = round.completedAt === undefined ? undefined : Math.max(0, round.completedAt - startedAt);
+	return duration === undefined ? l10n.t('Started {0}', new Date(startedAt).toLocaleTimeString())
+		: l10n.t('Duration: {0}', duration < 1_000 ? `${duration}ms` : `${(duration / 1_000).toFixed(duration < 10_000 ? 1 : 0)}s`);
 }
 
 function normalize(value: string): string {

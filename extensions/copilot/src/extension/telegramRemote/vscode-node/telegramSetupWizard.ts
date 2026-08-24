@@ -159,7 +159,7 @@ export class TelegramSetupWizard extends Disposable {
 		return this.runConnectionOperation(generation => this.enableRemoteAccessCore(source, generation));
 	}
 
-	private async enableRemoteAccessCore(source: 'command' | 'setting', generation: number): Promise<void> {
+	private async enableRemoteAccessCore(source: 'command' | 'setting', generation: number, forceLeaseTakeover = false): Promise<void> {
 		const scope = this.getConsentScope();
 		const readiness = await this.contribution.getStoredConnectionReadiness(scope.fingerprint);
 		if (generation !== this.lifecycleGeneration) {
@@ -169,33 +169,33 @@ export class TelegramSetupWizard extends Disposable {
 			case 'ready': {
 				await this.setConfigured(true);
 				await this.setEnabled(true);
-				const restored = await this.contribution.resumeStoredConnection(scope.fingerprint, this.getPollingOptions());
+				const restored = await this.contribution.resumeStoredConnection(scope.fingerprint, this.getPollingOptions(forceLeaseTakeover));
 				if (generation !== this.lifecycleGeneration || restored) {
 					return;
 				}
 				break;
 			}
 			case 'needs-workspace-consent':
-				await this.authorizeCurrentWorkspace(scope, generation);
+				await this.authorizeCurrentWorkspace(scope, generation, forceLeaseTakeover);
 				return;
 			case 'missing-pairing':
-				await this.runPairingRecovery(scope, generation);
+				await this.runPairingRecovery(scope, generation, forceLeaseTakeover);
 				return;
 			case 'missing-token':
-				await this.runSetupCore(source === 'setting' ? 'setting' : 'recovery', generation, true);
+				await this.runSetupCore(source === 'setting' ? 'setting' : 'recovery', generation, true, forceLeaseTakeover);
 				return;
 		}
-		await this.runSetupCore(source === 'setting' ? 'setting' : 'recovery', generation, false);
+		await this.runSetupCore(source === 'setting' ? 'setting' : 'recovery', generation, false, forceLeaseTakeover);
 	}
 
 	private reconnect(): Promise<void> {
 		return this.runConnectionOperation(async generation => {
 			const status = this.contribution.currentStatus;
 			if (status.state === 'failed' && (status.reason === 'authentication' || status.reason === 'api')) {
-				await this.runSetupCore('command', generation, false);
+				await this.runSetupCore('command', generation, false, true);
 				return;
 			}
-			await this.enableRemoteAccessCore('command', generation);
+			await this.enableRemoteAccessCore('command', generation, true);
 		});
 	}
 
@@ -225,7 +225,7 @@ export class TelegramSetupWizard extends Disposable {
 		return promise;
 	}
 
-	private async runSetupCore(source: SetupSource, generation: number, initialSetup: boolean): Promise<void> {
+	private async runSetupCore(source: SetupSource, generation: number, initialSetup: boolean, forceLeaseTakeover = false): Promise<void> {
 		const scope = this.getConsentScope();
 		const accepted = await this.requestConsent(scope);
 		if (generation !== this.lifecycleGeneration) {
@@ -253,7 +253,7 @@ export class TelegramSetupWizard extends Disposable {
 				location: vscode.ProgressLocation.Notification,
 				title: l10n.t('Validating the Telegram bot token...'),
 				cancellable: false,
-			}, () => this.contribution.startPairing(botToken, scope.fingerprint, this.getPollingOptions()));
+			}, () => this.contribution.startPairing(botToken, scope.fingerprint, this.getPollingOptions(forceLeaseTakeover)));
 			if (generation !== this.lifecycleGeneration) {
 				await this.cancelSetup(initialSetup, stagedTokenFingerprint, false);
 				return;
@@ -279,7 +279,7 @@ export class TelegramSetupWizard extends Disposable {
 		}
 	}
 
-	private async authorizeCurrentWorkspace(scope: TelegramConsentScope, generation: number): Promise<void> {
+	private async authorizeCurrentWorkspace(scope: TelegramConsentScope, generation: number, forceLeaseTakeover = false): Promise<void> {
 		this.contribution.requireWorkspaceConsent();
 		await this.setConfigured(true);
 		if (!await this.requestConsent(scope) || generation !== this.lifecycleGeneration) {
@@ -293,7 +293,7 @@ export class TelegramSetupWizard extends Disposable {
 				return;
 			}
 			await this.setEnabled(true);
-			const restored = await this.contribution.resumeStoredConnection(scope.fingerprint, this.getPollingOptions());
+			const restored = await this.contribution.resumeStoredConnection(scope.fingerprint, this.getPollingOptions(forceLeaseTakeover));
 			if (!restored && generation === this.lifecycleGeneration) {
 				throw new TelegramBotApiError('api', 'Telegram authorization state changed during workspace recovery.');
 			}
@@ -303,14 +303,14 @@ export class TelegramSetupWizard extends Disposable {
 		}
 	}
 
-	private async runPairingRecovery(scope: TelegramConsentScope, generation: number): Promise<void> {
+	private async runPairingRecovery(scope: TelegramConsentScope, generation: number, forceLeaseTakeover = false): Promise<void> {
 		if (!await this.requestConsent(scope) || generation !== this.lifecycleGeneration) {
 			await this.cancelSetup(false, undefined, false);
 			return;
 		}
 		const botToken = await this.contribution.authorization.getBotToken();
 		if (!botToken) {
-			await this.runSetupCore('recovery', generation, true);
+			await this.runSetupCore('recovery', generation, true, forceLeaseTakeover);
 			return;
 		}
 		try {
@@ -319,7 +319,7 @@ export class TelegramSetupWizard extends Disposable {
 				location: vscode.ProgressLocation.Notification,
 				title: l10n.t('Validating the saved Telegram bot configuration...'),
 				cancellable: false,
-			}, () => this.contribution.startPairing(botToken, scope.fingerprint, this.getPollingOptions()));
+			}, () => this.contribution.startPairing(botToken, scope.fingerprint, this.getPollingOptions(forceLeaseTakeover)));
 			if (generation !== this.lifecycleGeneration || !await this.presentPairingChallenge(result.challenge)) {
 				await this.cancelSetup(false, undefined, false);
 				return;
@@ -505,8 +505,11 @@ export class TelegramSetupWizard extends Disposable {
 		};
 	}
 
-	private getPollingOptions(): { timeoutSeconds: number } {
-		return { timeoutSeconds: this.configurationService.getConfig(ConfigKey.Advanced.CLITelegramPollTimeout) };
+	private getPollingOptions(forceLeaseTakeover = false): { timeoutSeconds: number; forceLeaseTakeover: boolean } {
+		return {
+			timeoutSeconds: this.configurationService.getConfig(ConfigKey.Advanced.CLITelegramPollTimeout),
+			forceLeaseTakeover,
+		};
 	}
 
 	private async setEnabled(enabled: boolean): Promise<void> {

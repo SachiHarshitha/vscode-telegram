@@ -48,10 +48,25 @@ describe('ActivityAggregator', () => {
 		const aggregator = new ActivityAggregator('session-1', 'request-1');
 		const reasoning = aggregator.accept(event('assistant.reasoning', { reasoningId: 'reason-1', content: 'Need to verify the native request path.' }))[0];
 		const edit = aggregator.accept(event('tool.execution_start', { toolCallId: 'edit-1', toolName: 'apply_patch', arguments: { path: 'telegram.ts' } }))[0];
+		const laterReasoning = aggregator.accept(event('assistant.reasoning', { reasoningId: 'reason-2', content: 'The edit exposed a new constraint.' }))[0];
 
-		expect(reasoning.round).toMatchObject({ type: 'reasoning', steerable: true });
+		expect(reasoning.round).toMatchObject({ type: 'reasoning', summary: 'Thinking…', steerable: true });
 		expect(edit.round).toMatchObject({ type: 'edit', steerable: true });
 		expect(edit.round.id).not.toBe(reasoning.round.id);
+		expect(laterReasoning).toMatchObject({ isNew: true, round: { type: 'reasoning' } });
+		expect(laterReasoning.round.id).not.toBe(reasoning.round.id);
+	});
+
+	it('appends consecutive reasoning events to one Thinking round', () => {
+		const aggregator = new ActivityAggregator('session-1', 'request-1');
+		const first = aggregator.accept(event('assistant.intent', { intent: 'Inspect the request path.' }))[0];
+		const second = aggregator.accept(event('assistant.reasoning_delta', { reasoningId: 'reason-1', delta: 'The marker is ' }))[0];
+		const third = aggregator.accept(event('assistant.reasoning_delta', { reasoningId: 'reason-1', delta: 'internal routing state.' }))[0];
+
+		expect(first).toMatchObject({ isNew: true, round: { summary: 'Thinking…' } });
+		expect(second).toMatchObject({ isNew: false, round: { id: first.round.id } });
+		expect(third).toMatchObject({ isNew: false, round: { id: first.round.id } });
+		expect(third.round.details?.[0]?.value).toBe('Inspect the request path.\n\nThe marker is internal routing state.');
 	});
 
 	it('keeps turn lifecycle noise out of the timeline and omits a redundant success terminal after an answer', () => {

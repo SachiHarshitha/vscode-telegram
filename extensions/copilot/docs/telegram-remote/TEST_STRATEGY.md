@@ -76,7 +76,7 @@ Snapshot/test rendering for:
 - read/search burst grouping and semantic-boundary separation,
 - command/edit `toolCallId` start-to-completion lifecycle,
 - failed command rendering,
-- SDK-visible reasoning/progress rounds without hidden chain-of-thought reconstruction,
+- consecutive SDK-visible reasoning/progress aggregation into one **Thinking…** round without hidden chain-of-thought reconstruction,
 - compact lifecycle paragraphs, `InputRichBlockDetails` generation with only round-local details, and formatted direct final-answer HTML,
 - redaction and hard bounds before Telegram presentation,
 - compact/detailed/debug disclosure of successful tool output and correlation metadata,
@@ -131,7 +131,7 @@ Cover:
 - pairing timeout/cancellation preserves saved recovery configuration,
 - concurrent Enable/Setup/Reconnect share one operation/start,
 - concurrent Disable blocks dispatch immediately and a late startup completion cannot revive the cancelled generation,
-- existing cross-process singleton lease tests still reject a second host.
+- automatic cross-process singleton lease acquisition still rejects a second host, while explicit Reconnect transfers ownership and causes the displaced poller to abort before replacement polling.
 
 ### Optional V2 standalone `argv.json` updater
 
@@ -425,7 +425,7 @@ This default profile is intentionally persistent so iterative runs reuse GitHub/
 10. Start a longer task.
 11. While running, steer: `Do not modify files yet; only diagnose.`
 12. Trigger an operation that requires permission; verify an individual expandable bubble offers only **Approve once** and **Deny**, and that answering locally first makes Telegram's control stale.
-13. Verify the activity appears as chronological semantic Rich Message bubbles: read/search bursts aggregate, while commands, edits, progress/direction changes and the final result remain separate.
+13. Verify the activity appears as chronological semantic Rich Message bubbles: read/search bursts aggregate, consecutive reasoning summaries update one **Thinking…** bubble, while commands, edits, other direction changes and the final result remain separate.
 14. Expand several detail-bearing bubbles and verify each contains only its own bounded, redacted details. Verify short lifecycle updates are not empty expanders and the final assistant answer is directly visible with formatted Markdown. Confirm no hidden chain-of-thought claim or unrelated request history appears.
 15. Select another session and confirm the existing picker/status message is edited rather than duplicated; button labels remain concise while status shows the full authorized path.
 16. Start a long task, verify the initial request bubble owns Stop, press Stop, and verify its buttons disappear.

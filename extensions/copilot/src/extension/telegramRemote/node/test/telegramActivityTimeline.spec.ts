@@ -81,6 +81,28 @@ describe('TelegramActivityTimeline', () => {
 		expect(test.sessionService.getSession).not.toHaveBeenCalled();
 	});
 
+	it('edits consecutive reasoning into one Thinking Rich Message', async () => {
+		const test = await createTimeline();
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		await test.timeline.publish(session.id, event('intent', 'assistant.intent', {
+			intent: 'Inspect the native request path.',
+		}));
+		const reasoningMessageId = test.host.sendRichMessage.mock.calls.length;
+		const sendsAfterFirstReasoning = test.host.sendRichMessage.mock.calls.length;
+
+		await test.timeline.publish(session.id, event('reasoning', 'assistant.reasoning', {
+			reasoningId: 'reasoning-1', content: 'The routing marker must stay internal.',
+		}));
+		await test.scheduler.runAll();
+
+		expect(test.host.sendRichMessage).toHaveBeenCalledTimes(sendsAfterFirstReasoning);
+		expect(test.host.editRichMessage).toHaveBeenCalledWith(identity.chatId, reasoningMessageId, expect.anything(), expect.anything());
+		const richMessage = JSON.stringify(test.host.editRichMessage.mock.calls.at(-1)?.[2]);
+		expect(richMessage).toContain('Thinking');
+		expect(richMessage).toContain('Inspect the native request path.');
+		expect(richMessage).toContain('The routing marker must stay internal.');
+	});
+
 	it('correlates permission callbacks, accepts one response, and rejects replay', async () => {
 		const test = await createTimeline();
 		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);

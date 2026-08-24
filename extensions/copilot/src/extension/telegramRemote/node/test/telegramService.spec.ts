@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ILogService } from '../../../../platform/log/common/logService';
 import type { IAbortSignal, IFetcherService } from '../../../../platform/networking/common/fetcherService';
 import { mock } from '../../../../util/common/test/simpleMock';
+import { Event } from '../../../../util/vs/base/common/event';
 import {
 	ITelegramBotClient,
 	TelegramAnswerCallbackQueryOptions,
@@ -66,6 +67,8 @@ class TestClient implements ITelegramBotClient {
 
 class TestLease implements ITelegramPollerLease {
 	readonly tokenFingerprint = getTelegramBotTokenFingerprint(botToken);
+	readonly takeoverOccurred = false;
+	readonly onDidLose = Event.None;
 	readonly release = vi.fn(async () => { });
 	dispose(): void { void this.release(); }
 }

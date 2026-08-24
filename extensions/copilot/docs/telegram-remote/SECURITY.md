@@ -289,7 +289,7 @@ Implement bounded limits for:
 
 High-frequency SDK events must be aggregated into semantic rounds before Bot API calls. Running-round edits are throttled; read/search bursts share one round until an explicit semantic boundary.
 
-Only one `getUpdates` consumer may hold the poller lease for a bot token. Competing VS Code windows/processes must coordinate through a lock/lease or the later consumer must fail closed with a visible diagnostic. Silent competing pollers can lose or reorder control messages.
+Only one `getUpdates` consumer may hold the poller lease for a bot token. Automatic competing VS Code windows/processes fail closed with a visible diagnostic. Explicit local **Reconnect** is a deliberate takeover: ownership changes atomically, the displaced lease detects the nonce change and aborts its poll, and the replacement waits for that heartbeat handoff before calling `getUpdates`. Silent competing pollers can lose or reorder control messages and remain forbidden.
 
 ## 18. Future V2 own-ID proposed API setup security
 

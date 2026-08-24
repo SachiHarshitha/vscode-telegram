@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { FileHandle, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { clearInterval as clearNodeInterval, setInterval as setNodeInterval } from 'node:timers';
+import { Emitter, Event } from '../../../util/vs/base/common/event';
 import type { IDisposable } from '../../../util/vs/base/common/lifecycle';
 
 const telegramRemoteStateDirectory = 'telegram-remote';
@@ -28,10 +29,14 @@ export interface TelegramPollerLeaseOptions {
 	readonly processId?: number;
 	readonly now?: () => number;
 	readonly isProcessAlive?: (processId: number) => boolean;
+	/** Explicit user-requested ownership transfer. Automatic startup never sets this. */
+	readonly forceTakeover?: boolean;
 }
 
 export interface ITelegramPollerLease extends IDisposable {
 	readonly tokenFingerprint: string;
+	readonly takeoverOccurred: boolean;
+	readonly onDidLose: Event<void>;
 	release(): Promise<void>;
 }
 
@@ -60,6 +65,7 @@ export async function acquireTelegramPollerLease(storageRoot: string, botToken: 
 	const processId = options.processId ?? process.pid;
 	const staleAfterMs = options.staleAfterMs ?? defaultStaleAfterMs;
 	const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+	let takeoverOccurred = false;
 	await mkdir(leaseDirectory, { recursive: true });
 
 	for (let attempt = 0; attempt < 3; attempt++) {
@@ -81,7 +87,7 @@ export async function acquireTelegramPollerLease(storageRoot: string, botToken: 
 				await unlink(leasePath).catch(() => { });
 				throw error;
 			}
-			return new TelegramPollerLease(leasePath, record, options);
+			return new TelegramPollerLease(leasePath, record, takeoverOccurred, options);
 		} catch (error) {
 			if (!hasErrorCode(error, 'EEXIST')) {
 				throw error;
@@ -92,7 +98,7 @@ export async function acquireTelegramPollerLease(storageRoot: string, botToken: 
 		const ageMs = now() - existing.modifiedAt;
 		const ownerProcessId = existing.record?.processId;
 		const ownerIsAlive = ownerProcessId !== undefined && isProcessAlive(ownerProcessId);
-		if (ownerIsAlive || (ownerProcessId === undefined && ageMs <= staleAfterMs)) {
+		if (!options.forceTakeover && (ownerIsAlive || (ownerProcessId === undefined && ageMs <= staleAfterMs))) {
 			throw new TelegramPollerLeaseHeldError(existing.record?.processId);
 		}
 
@@ -103,6 +109,7 @@ export async function acquireTelegramPollerLease(storageRoot: string, botToken: 
 		const stalePath = `${leasePath}.stale-${randomUUID()}`;
 		try {
 			await rename(leasePath, stalePath);
+			takeoverOccurred = options.forceTakeover === true;
 			await unlink(stalePath).catch(error => {
 				if (!hasErrorCode(error, 'ENOENT')) {
 					throw error;
@@ -121,6 +128,8 @@ export async function acquireTelegramPollerLease(storageRoot: string, botToken: 
 
 class TelegramPollerLease implements ITelegramPollerLease {
 	readonly tokenFingerprint: string;
+	private readonly lostEmitter = new Emitter<void>();
+	readonly onDidLose = this.lostEmitter.event;
 	private readonly now: () => number;
 	private readonly heartbeat: ReturnType<typeof setNodeInterval>;
 	private heartbeatUpdate: Promise<void> | undefined;
@@ -129,6 +138,7 @@ class TelegramPollerLease implements ITelegramPollerLease {
 	constructor(
 		private readonly leasePath: string,
 		private readonly record: TelegramPollerLeaseRecord,
+		readonly takeoverOccurred: boolean,
 		options: TelegramPollerLeaseOptions,
 	) {
 		this.tokenFingerprint = record.tokenFingerprint;
@@ -155,6 +165,7 @@ class TelegramPollerLease implements ITelegramPollerLease {
 		await this.heartbeatUpdate;
 		const existing = await readLeaseRecord(this.leasePath);
 		if (existing?.nonce !== this.record.nonce) {
+			this.lostEmitter.dispose();
 			return;
 		}
 		await unlink(this.leasePath).catch(error => {
@@ -162,6 +173,7 @@ class TelegramPollerLease implements ITelegramPollerLease {
 				throw error;
 			}
 		});
+		this.lostEmitter.dispose();
 	}
 
 	dispose(): void {
@@ -177,19 +189,27 @@ class TelegramPollerLease implements ITelegramPollerLease {
 			handle = await open(this.leasePath, 'r+');
 			const existing = parseLeaseRecord(await handle.readFile({ encoding: 'utf8' }));
 			if (existing?.nonce !== this.record.nonce) {
-				this.released = true;
-				clearNodeInterval(this.heartbeat);
+				this.markLost();
 				return;
 			}
 			await writeRecord(handle, { ...this.record, heartbeatAt: this.now() });
 		} catch (error) {
 			if (hasErrorCode(error, 'ENOENT')) {
-				this.released = true;
-				clearNodeInterval(this.heartbeat);
+				this.markLost();
 			}
 		} finally {
 			await handle?.close();
 		}
+	}
+
+	private markLost(): void {
+		if (this.released) {
+			return;
+		}
+		this.released = true;
+		clearNodeInterval(this.heartbeat);
+		this.lostEmitter.fire();
+		this.lostEmitter.dispose();
 	}
 }
 
