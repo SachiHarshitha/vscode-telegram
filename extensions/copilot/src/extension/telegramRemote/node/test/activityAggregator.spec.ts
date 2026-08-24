@@ -53,6 +53,17 @@ describe('ActivityAggregator', () => {
 		expect(edit.round).toMatchObject({ type: 'edit', steerable: true });
 		expect(edit.round.id).not.toBe(reasoning.round.id);
 	});
+
+	it('keeps turn lifecycle noise out of the timeline and omits a redundant success terminal after an answer', () => {
+		const aggregator = new ActivityAggregator('session-1', 'request-1');
+
+		expect(aggregator.beginRequest().round).toMatchObject({ summary: 'Prompt accepted', status: 'completed' });
+		expect(aggregator.accept(event('assistant.turn_start', {}))).toEqual([]);
+		const answer = aggregator.accept(event('assistant.message', { messageId: 'answer-1', content: '**Done** with `code`.' }))[0];
+
+		expect(answer.round).toMatchObject({ type: 'answer', status: 'completed' });
+		expect(aggregator.completeRequest('completed')).toBeUndefined();
+	});
 });
 
 function event<K extends RemoteAgentEvent['kind']>(kind: K, data: Omit<Extract<RemoteAgentEvent, { kind: K }>, 'kind' | 'id' | 'timestamp' | 'parentId' | 'source'>, timestamp = '1970-01-01T00:00:01.000Z'): Extract<RemoteAgentEvent, { kind: K }> {

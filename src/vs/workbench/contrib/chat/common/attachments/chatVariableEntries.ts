@@ -65,6 +65,11 @@ interface IBaseChatRequestVariableEntry {
 	readonly icon?: ThemeIcon;
 	readonly name: string;
 	readonly modelDescription?: string;
+	/**
+	 * Internal request context used for routing, but intentionally omitted from
+	 * the visible chat transcript attachment list.
+	 */
+	readonly isHidden?: boolean;
 
 	/**
 	 * The offset-range in the prompt. This means this entry has been explicitly typed out

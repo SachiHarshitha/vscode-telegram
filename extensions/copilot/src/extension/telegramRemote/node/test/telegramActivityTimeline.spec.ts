@@ -41,7 +41,7 @@ describe('TelegramActivityTimeline', () => {
 		await test.scheduler.runAll();
 
 		expect(test.host.editRichMessage).toHaveBeenCalledWith(identity.chatId, commandMessageId, expect.anything(), expect.anything());
-		expect(JSON.stringify(test.host.editRichMessage.mock.calls.at(-1)?.[2])).toContain('Command completed');
+		expect(JSON.stringify(test.host.editRichMessage.mock.calls.at(-1)?.[2])).toContain('npm test');
 		expect(JSON.stringify(test.host.editRichMessage.mock.calls.at(-1)?.[2])).toContain('347 passed');
 	});
 
@@ -61,7 +61,7 @@ describe('TelegramActivityTimeline', () => {
 
 		const replacementOptions = test.host.sendRichMessage.mock.calls.at(-1)?.[2];
 		expect(replacementOptions?.replyParameters).toEqual({ message_id: originalMessageId, allow_sending_without_reply: true });
-		expect(JSON.stringify(test.host.sendRichMessage.mock.calls.at(-1)?.[1])).toContain('Command failed');
+		expect(JSON.stringify(test.host.sendRichMessage.mock.calls.at(-1)?.[1])).toContain('npm test failed');
 	});
 
 	it('correlates a reply with a live round and makes it stale after completion', async () => {

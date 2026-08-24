@@ -6,15 +6,20 @@
 import * as l10n from '@vscode/l10n';
 import type { ActivityRound, ActivityRoundDetail } from '../common/activityRound';
 import type { TelegramInputRichBlock, TelegramInputRichMessage, TelegramRichText } from '../common/telegramTypes';
-import { redactTelegramSecrets } from './telegramMarkdown';
+import { redactTelegramSecrets, renderTelegramMarkdownAnswer } from './telegramMarkdown';
 
 const maximumRichDetailLength = 3_500;
 const maximumRichListItems = 24;
 export type TelegramRichActivityDetail = 'compact' | 'detailed' | 'debug';
 
-/** Renders exactly one semantic activity round as one expandable Telegram Rich Message. */
+/** Renders one semantic activity round without forcing every round into an expander. */
 export function renderTelegramActivityRound(round: ActivityRound, disclosure: TelegramRichActivityDetail = 'compact'): TelegramInputRichMessage {
-	const visibleDetails = round.details?.filter(detail => disclosure !== 'compact' || detail.visibility !== 'detailed') ?? [];
+	if (round.type === 'answer') {
+		return renderTelegramAssistantAnswer(round.details?.[0]?.value ?? round.summary);
+	}
+	const visibleDetails = round.details?.filter(detail =>
+		(disclosure !== 'compact' || detail.visibility !== 'detailed') && !duplicatesSummary(round, detail)
+	) ?? [];
 	const detailBlocks = visibleDetails.flatMap(renderDetail).slice(0, maximumRichListItems);
 	if (disclosure === 'debug') {
 		detailBlocks.push({ type: 'heading', size: 6, text: l10n.t('Correlation') });
@@ -26,11 +31,10 @@ export function renderTelegramActivityRound(round: ActivityRound, disclosure: Te
 		].filter(Boolean).join('\n')) });
 	}
 	if (detailBlocks.length === 0) {
-		detailBlocks.push({ type: 'paragraph', text: statusDescription(round) });
-	}
-	if (round.startedAt !== undefined) {
-		detailBlocks.push({ type: 'divider' });
-		detailBlocks.push({ type: 'paragraph', text: timingText(round) });
+		return {
+			blocks: [{ type: 'paragraph', text: summaryText(round) }],
+			skip_entity_detection: true,
+		};
 	}
 	return {
 		blocks: [{
@@ -43,14 +47,18 @@ export function renderTelegramActivityRound(round: ActivityRound, disclosure: Te
 }
 
 export function renderTelegramAssistantAnswer(content: string): TelegramInputRichMessage {
+	const html = renderTelegramMarkdownAnswer(content).join('\n');
+	if (html) {
+		return { html, skip_entity_detection: true };
+	}
 	return {
-		blocks: [{ type: 'paragraph', text: bounded(content) }],
+		blocks: [{ type: 'paragraph', text: l10n.t('Copilot returned an empty response.') }],
 		skip_entity_detection: true,
 	};
 }
 
 function summaryText(round: ActivityRound): TelegramRichText {
-	return [icon(round), ' ', { type: 'bold', text: bounded(round.summary) }, statusSuffix(round)];
+	return [icon(round), ' ', { type: 'bold', text: bounded(round.summary) }];
 }
 
 function renderDetail(detail: ActivityRoundDetail): readonly TelegramInputRichBlock[] {
@@ -85,37 +93,25 @@ function icon(round: ActivityRound): string {
 	}
 	switch (round.type) {
 		case 'reasoning': return '🧠';
-		case 'progress': return round.status === 'running' ? '◌' : '✓';
+		case 'progress': return round.status === 'running' ? '⏳' : '▶';
+		case 'answer': return '✓';
 		case 'search': return '🔎';
 		case 'read': return '🔎';
-		case 'edit': return '✎';
+		case 'edit': return '✏';
 		case 'command': return '⌘';
 		case 'permission': return '⚠';
-		case 'question': return '?';
+		case 'question': return '❓';
 		case 'subagent': return '↳';
 		case 'other': return '•';
 	}
 }
 
-function statusSuffix(round: ActivityRound): string {
-	return round.status === 'running' ? l10n.t(' · running…')
-		: round.status === 'waiting' ? l10n.t(' · waiting')
-			: '';
+function duplicatesSummary(round: ActivityRound, detail: ActivityRoundDetail): boolean {
+	return !detail.label && normalize(detail.value) === normalize(round.summary);
 }
 
-function statusDescription(round: ActivityRound): string {
-	return round.status === 'running' ? l10n.t('This activity is still running.')
-		: round.status === 'waiting' ? l10n.t('Copilot is waiting for a response.')
-			: round.status === 'failed' ? l10n.t('This activity failed.') : l10n.t('This activity completed.');
-}
-
-function timingText(round: ActivityRound): string {
-	if (round.startedAt === undefined) {
-		return '';
-	}
-	const duration = round.completedAt === undefined ? undefined : Math.max(0, round.completedAt - round.startedAt);
-	return duration === undefined ? l10n.t('Started {0}', new Date(round.startedAt).toLocaleTimeString())
-		: l10n.t('Duration: {0}', duration < 1_000 ? `${duration}ms` : `${(duration / 1_000).toFixed(duration < 10_000 ? 1 : 0)}s`);
+function normalize(value: string): string {
+	return value.replace(/^[#>*\-\s]+/, '').replace(/\s+/g, ' ').trim();
 }
 
 function bounded(value: string): string {

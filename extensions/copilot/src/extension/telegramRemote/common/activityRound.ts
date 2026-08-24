@@ -6,6 +6,7 @@
 export type ActivityRoundType =
 	| 'reasoning'
 	| 'progress'
+	| 'answer'
 	| 'search'
 	| 'read'
 	| 'edit'

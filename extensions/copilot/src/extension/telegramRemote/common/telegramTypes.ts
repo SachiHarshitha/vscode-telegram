@@ -78,11 +78,17 @@ export interface TelegramInputRichBlockListItem {
 	readonly blocks: readonly TelegramInputRichBlock[];
 }
 
-export interface TelegramInputRichMessage {
-	readonly blocks: readonly TelegramInputRichBlock[];
+interface TelegramInputRichMessageOptions {
 	readonly is_rtl?: boolean;
 	readonly skip_entity_detection?: boolean;
 }
+
+/** Bot API InputRichMessage requires exactly one of blocks, html, or markdown. */
+export type TelegramInputRichMessage = TelegramInputRichMessageOptions & (
+	| { readonly blocks: readonly TelegramInputRichBlock[]; readonly html?: never; readonly markdown?: never }
+	| { readonly html: string; readonly blocks?: never; readonly markdown?: never }
+	| { readonly markdown: string; readonly blocks?: never; readonly html?: never }
+);
 
 export interface TelegramReplyParameters {
 	readonly message_id: number;

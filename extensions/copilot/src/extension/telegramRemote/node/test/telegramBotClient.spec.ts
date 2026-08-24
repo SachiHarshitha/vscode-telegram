@@ -179,6 +179,18 @@ describe('TelegramBotClient', () => {
 		]);
 	});
 
+	it('accepts the Bot API rich HTML variant', async () => {
+		responses.push(ok(telegramMessage('')));
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+
+		await client.sendRichMessage(99, { html: '<b>Result</b>: <code>done</code>', skip_entity_detection: true });
+
+		expect(requests).toEqual([{
+			method: 'sendRichMessage',
+			body: { chat_id: 99, rich_message: { html: '<b>Result</b>: <code>done</code>', skip_entity_detection: true } },
+		}]);
+	});
+
 	it('rejects Rich Message drafts outside a private chat', async () => {
 		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
 

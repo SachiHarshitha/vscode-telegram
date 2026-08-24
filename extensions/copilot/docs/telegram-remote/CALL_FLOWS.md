@@ -258,7 +258,7 @@ sequenceDiagram
     S-->>C: publish SDK event
     C->>A: projected tool start
     A-->>TL: new command/edit/read/search round
-    TL-->>T: sendRichMessage(InputRichBlockDetails)
+    TL-->>T: sendRichMessage(details block when useful)
     SDK-->>S: tool.execution_progress / partial result
     S-->>C: publish SDK event
     C->>A: projected tool progress
@@ -391,7 +391,7 @@ flowchart LR
     N --> D[ActivityAggregator]
     D --> E[Semantic ActivityRounds]
     E --> F[TelegramRichRenderer]
-    F --> G[One InputRichBlockDetails bubble per round]
+    F --> G[One focused Rich Message bubble per round]
     G --> H[sendRichMessage / editMessageText rich_message]
     C --> I[Permission/question request race]
     I --> E
@@ -399,7 +399,7 @@ flowchart LR
 
 Persisted SDK events may be replayed when attaching Telegram to an existing session. Ephemeral deltas should not be expected to exist after the fact. Replay seeds bounded internal correlation/state only and is never presented as new current activity or a new answer.
 
-Phase 5.3 marks replay delivery explicitly and ignores replay for current UI output. Each current request can have multiple chronological semantic bubbles, but not one bubble per microscopic event. Every bubble is independently expandable and contains only its own sanitized details. Running rounds update no faster than the configured 750 ms minimum edit interval; new/waiting/failed/terminal rounds flush immediately. Every send/edit revalidates the paired identity, selected session and current workspace scope. Permission and user-input requests are individual correlated rounds, not generic activity output.
+Phase 5.3 marks replay delivery explicitly and ignores replay for current UI output. Each current request can have multiple chronological semantic bubbles, but not one bubble per microscopic event. Bubbles with useful round-local detail are independently expandable; short status/progress bubbles remain compact, while the final assistant answer is directly visible and formatted. Running rounds update no faster than the configured 750 ms minimum edit interval; new/waiting/failed/terminal rounds flush immediately. Every send/edit revalidates the paired identity, selected session and current workspace scope. Permission and user-input requests are individual correlated rounds, not generic activity output.
 
 The session-lifetime hook is distinct from native request-scoped listeners, which are disposed after each request. Its disposable belongs to the registry session binding.
 

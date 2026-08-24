@@ -13,6 +13,7 @@ import {
 	TelegramEditRichMessageOptions,
 	TelegramGetUpdatesOptions,
 	TelegramMessage,
+	TelegramInputRichBlock,
 	TelegramInputRichMessage,
 	TelegramSendRichMessageOptions,
 	TelegramSendMessageOptions,
@@ -279,15 +280,25 @@ function validateMessageText(text: string): void {
 }
 
 function validateRichMessage(message: TelegramInputRichMessage, allowThinking: boolean): void {
-	if (!Array.isArray(message.blocks) || message.blocks.length === 0 || message.blocks.length > 100) {
+	const variants = Number('blocks' in message) + Number('html' in message) + Number('markdown' in message);
+	if (variants !== 1) {
+		throw new TelegramBotApiError('api', 'Telegram rich message must use exactly one of blocks, html, or markdown.');
+	}
+	if (message.blocks !== undefined && (!Array.isArray(message.blocks) || message.blocks.length === 0 || message.blocks.length > 100)) {
 		throw new TelegramBotApiError('api', 'Telegram rich message must contain between 1 and 100 blocks.');
 	}
-	if (!allowThinking && containsThinkingBlock(message.blocks)) {
+	if (message.html !== undefined && !message.html) {
+		throw new TelegramBotApiError('api', 'Telegram rich HTML must not be empty.');
+	}
+	if (message.markdown !== undefined && !message.markdown) {
+		throw new TelegramBotApiError('api', 'Telegram rich Markdown must not be empty.');
+	}
+	if (message.blocks !== undefined && !allowThinking && containsThinkingBlock(message.blocks)) {
 		throw new TelegramBotApiError('api', 'Telegram thinking blocks may only be used in rich message drafts.');
 	}
 }
 
-function containsThinkingBlock(blocks: TelegramInputRichMessage['blocks']): boolean {
+function containsThinkingBlock(blocks: readonly TelegramInputRichBlock[]): boolean {
 	return blocks.some(block => block.type === 'thinking'
 		|| (block.type === 'details' && containsThinkingBlock(block.blocks))
 		|| (block.type === 'list' && block.items.some(item => containsThinkingBlock(item.blocks))));

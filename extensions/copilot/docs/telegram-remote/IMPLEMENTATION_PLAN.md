@@ -125,7 +125,7 @@ src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts 
 
 - Define a registry-created discriminated `RemoteRequestOrigin`; transport input cannot provide or overwrite it.
 - Store pending contexts by a random correlation ID and validate both correlation ID and session ID when taking one.
-- Put a non-model correlation marker in the command's `attachedContext`. `resolveInput()` finds the marker in `ChatRequest.references`, consumes exactly that context, and does not forward the marker to the prompt resolver or SDK.
+- Put a non-model correlation marker in the command's `attachedContext`. The marker is also flagged as hidden transcript context, so it reaches `ChatRequest.references` without rendering as a user-visible attachment pill. `resolveInput()` consumes exactly that context and does not forward the marker to the prompt resolver or SDK.
 - Make set/take/clear operations idempotent and correlation-specific. Expire abandoned contexts and bound the store.
 - Extend `workbench.action.chat.openSessionWithPrompt.<type>` options with `queue?: 'queued' | 'steering'`, forward it to `chatService.sendRequest()`, and surface `rejected` results as command failures.
 - The remote dispatcher uses `queue: 'steering'`. Core sends immediately when idle and requests the active handler to yield when busy; the next real `ChatRequest` then reaches the existing `CopilotCLISession` steering branch and SDK `mode: 'immediate'`.
@@ -652,6 +652,7 @@ SDK SessionEvent
 - `ActivityRound` is transport-neutral and records semantic type, summary, running/completed/failed/waiting status, bounded details, timestamps and steerability.
 - Consecutive reads/searches share an inspection round until a semantic boundary. Commands, edits, progress/reasoning summaries, permissions, questions, subagents and terminal results remain distinct.
 - `toolCallId` binds start/progress/completion to one round. `TelegramActivityTimeline` stores the Rich Message `message_id` and edits that same message. Edit failure sends a reply-linked replacement and updates correlation to the replacement.
+- Short lifecycle/progress rounds render as compact paragraphs, detail-bearing tool/interaction rounds remain expandable, final assistant Markdown is sanitized into rich HTML, and a successful answer suppresses the redundant terminal-completion bubble.
 - Every sent bubble records `(chatId,messageId) -> (sessionId,requestId,activityRoundId,generation)`. A Telegram reply to a live steerable round goes back through `setPendingCopilotCLIRequestContext` and `workbench.action.chat.openSessionWithPrompt.copilotcli`, preserving native immediate steering. Stale replies do not dispatch.
 - Permission and question requests are individual waiting rounds. Opaque callback nonces are one-shot; only approve-once/deny is exposed for permissions, and question choices/freeform replies stay request-bound. The registry continues to enforce first-valid-response-wins across local UI, Mission Control and Telegram.
 - Rendering is sanitized independently of aggregation and uses only SDK-visible intent/progress/assistant/reasoning-summary/tool/subagent data. It does not expose hidden chain-of-thought.

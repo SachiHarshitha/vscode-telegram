@@ -77,7 +77,7 @@ Snapshot/test rendering for:
 - command/edit `toolCallId` start-to-completion lifecycle,
 - failed command rendering,
 - SDK-visible reasoning/progress rounds without hidden chain-of-thought reconstruction,
-- `InputRichBlockDetails` generation with only round-local details,
+- compact lifecycle paragraphs, `InputRichBlockDetails` generation with only round-local details, and formatted direct final-answer HTML,
 - redaction and hard bounds before Telegram presentation,
 - compact/detailed/debug disclosure of successful tool output and correlation metadata,
 - subagent state,
@@ -426,7 +426,7 @@ This default profile is intentionally persistent so iterative runs reuse GitHub/
 11. While running, steer: `Do not modify files yet; only diagnose.`
 12. Trigger an operation that requires permission; verify an individual expandable bubble offers only **Approve once** and **Deny**, and that answering locally first makes Telegram's control stale.
 13. Verify the activity appears as chronological semantic Rich Message bubbles: read/search bursts aggregate, while commands, edits, progress/direction changes and the final result remain separate.
-14. Expand several bubbles and verify each contains only its own bounded, redacted details. Confirm no hidden chain-of-thought claim or unrelated request history appears.
+14. Expand several detail-bearing bubbles and verify each contains only its own bounded, redacted details. Verify short lifecycle updates are not empty expanders and the final assistant answer is directly visible with formatted Markdown. Confirm no hidden chain-of-thought claim or unrelated request history appears.
 15. Select another session and confirm the existing picker/status message is edited rather than duplicated; button labels remain concise while status shows the full authorized path.
 16. Start a long task, verify the initial request bubble owns Stop, press Stop, and verify its buttons disappear.
 17. Reply to a running reasoning/progress bubble and verify the text immediately steers the same native Copilot session; repeat after completion and verify a stale response with no dispatch.

@@ -95,7 +95,7 @@ export class ChatAttachmentsContentPart extends Disposable {
 	}
 
 	private getRenderableAttachments(): readonly IChatRequestVariableEntry[] {
-		return this._variables.filter(attachment => !isAgentHostCompletionVariableEntry(attachment));
+		return this._variables.filter(attachment => !attachment.isHidden && !isAgentHostCompletionVariableEntry(attachment));
 	}
 
 	private getVisibleAttachments(visibleAttachments: readonly IChatRequestVariableEntry[]): readonly IChatRequestVariableEntry[] {

@@ -30,6 +30,7 @@ export interface ICopilotCLIPendingRequestMarker {
 	readonly name: typeof COPILOT_CLI_PENDING_REQUEST_MARKER_ID;
 	readonly value: string;
 	readonly kind: 'generic';
+	readonly isHidden: true;
 }
 
 const pendingRequestContextByCorrelationId = new Map<string, IPendingEntry>();
@@ -63,6 +64,7 @@ export function createPendingCopilotCLIRequestMarker(correlationId: string): ICo
 		name: COPILOT_CLI_PENDING_REQUEST_MARKER_ID,
 		value: correlationId,
 		kind: 'generic',
+		isHidden: true,
 	};
 }
 

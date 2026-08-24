@@ -37,6 +37,7 @@ export class ActivityAggregator {
 	private currentInspectionRoundId: string | undefined;
 	private sequence = 0;
 	private terminal = false;
+	private hasAssistantAnswer = false;
 
 	constructor(
 		private readonly sessionId: string,
@@ -48,8 +49,8 @@ export class ActivityAggregator {
 		return this.create({
 			id: this.id('request'),
 			type: 'progress',
-			summary: l10n.t('Copilot is starting'),
-			status: 'running',
+			summary: l10n.t('Prompt accepted'),
+			status: 'completed',
 			steerable: true,
 			details: [],
 		});
@@ -62,9 +63,7 @@ export class ActivityAggregator {
 		const timestamp = parseTimestamp(event.timestamp) ?? this.now();
 		switch (event.kind) {
 			case 'assistant.turn_start':
-				return [this.updateOrCreate(this.id('request'), {
-					type: 'progress', summary: l10n.t('Copilot is working'), status: 'running', steerable: true, startedAt: timestamp,
-				})];
+				return [];
 			case 'assistant.intent':
 				this.closeInspectionBoundary();
 				return [this.createTextRound('reasoning', event.id, event.intent, timestamp)];
@@ -103,15 +102,15 @@ export class ActivityAggregator {
 			case 'subagent.failed':
 				return this.completeSubagent(event.toolCallId, l10n.t('Subagent {0} failed', event.name), event.error, timestamp);
 			case 'session.error':
-				return [this.completeTimeline('failed', l10n.t('Copilot session failed'), event.message, timestamp)];
+				return this.completeTimeline('failed', l10n.t('Copilot session failed'), event.message, timestamp);
 			case 'session.shutdown':
-				return [this.completeTimeline('failed', l10n.t('Copilot session stopped'), event.reason, timestamp)];
+				return this.completeTimeline('failed', l10n.t('Copilot session stopped'), event.reason, timestamp);
 			case 'abort':
-				return [this.completeTimeline('failed', l10n.t('Request cancelled'), event.reason, timestamp)];
+				return this.completeTimeline('failed', l10n.t('Request cancelled'), event.reason, timestamp);
 			case 'session.task_complete':
-				return [this.completeTimeline(event.success === false ? 'failed' : 'completed', event.success === false ? l10n.t('Implementation failed') : l10n.t('Implementation complete'), event.summary, timestamp)];
+				return this.completeTimeline(event.success === false ? 'failed' : 'completed', event.success === false ? l10n.t('Implementation failed') : l10n.t('Request complete'), event.summary, timestamp);
 			case 'session.idle':
-				return [this.completeTimeline(event.aborted ? 'failed' : 'completed', event.aborted ? l10n.t('Request cancelled') : l10n.t('Implementation complete'), undefined, timestamp)];
+				return this.completeTimeline(event.aborted ? 'failed' : 'completed', event.aborted ? l10n.t('Request cancelled') : l10n.t('Request complete'), undefined, timestamp);
 			case 'assistant.turn_end':
 				this.closeInspectionBoundary();
 				return [];
@@ -152,12 +151,12 @@ export class ActivityAggregator {
 		return { round: snapshot(round), isNew: false };
 	}
 
-	completeRequest(status: 'completed' | 'failed' | 'cancelled' | 'superseded'): ActivityRoundMutation {
+	completeRequest(status: 'completed' | 'failed' | 'cancelled' | 'superseded'): ActivityRoundMutation | undefined {
 		return this.completeTimeline(status === 'completed' ? 'completed' : 'failed',
-			status === 'completed' ? l10n.t('Implementation complete')
+			status === 'completed' ? l10n.t('Request complete')
 				: status === 'failed' ? l10n.t('Implementation failed')
 					: status === 'cancelled' ? l10n.t('Request cancelled') : l10n.t('Request superseded'),
-			undefined, this.now());
+			undefined, this.now())[0];
 	}
 
 	private startTool(event: Extract<RemoteAgentEvent, { kind: 'tool.execution_start' }>, timestamp: number): ActivityRoundMutation {
@@ -273,6 +272,9 @@ export class ActivityAggregator {
 	}
 
 	private upsertAssistantMessage(messageId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation {
+		if (value) {
+			this.hasAssistantAnswer = true;
+		}
 		const existingId = this.messageRoundIds.get(messageId);
 		const existing = existingId ? this.rounds.get(existingId) : undefined;
 		if (existing) {
@@ -284,7 +286,7 @@ export class ActivityAggregator {
 			return { round: snapshot(existing), isNew: false };
 		}
 		const mutation = this.create({
-			id: this.id(`message:${messageId}`), type: 'progress', summary: summaryFromText(value, l10n.t('Agent progress')),
+			id: this.id(`message:${messageId}`), type: 'answer', summary: summaryFromText(value, l10n.t('Agent response')),
 			status: append ? 'running' : 'completed', steerable: true, details: value ? [{ value }] : [], startedAt: timestamp,
 			completedAt: append ? undefined : timestamp,
 		});
@@ -299,22 +301,16 @@ export class ActivityAggregator {
 		});
 	}
 
-	private completeTimeline(status: 'completed' | 'failed', summary: string, detail: string | undefined, timestamp: number): ActivityRoundMutation {
+	private completeTimeline(status: 'completed' | 'failed', summary: string, detail: string | undefined, timestamp: number): readonly ActivityRoundMutation[] {
 		this.closeInspectionBoundary();
 		this.terminal = true;
-		return this.create({
+		if (status === 'completed' && this.hasAssistantAnswer && !detail) {
+			return [];
+		}
+		return [this.create({
 			id: this.id(`terminal:${++this.sequence}`), type: 'other', summary, status, steerable: false,
 			details: detail ? [{ value: detail }] : [], startedAt: timestamp, completedAt: timestamp,
-		});
-	}
-
-	private updateOrCreate(id: string, input: Omit<MutableActivityRound, 'id' | 'sessionId' | 'requestId' | 'details'> & { details?: ActivityRoundDetail[] }): ActivityRoundMutation {
-		const existing = this.rounds.get(id);
-		if (existing) {
-			Object.assign(existing, input);
-			return { round: snapshot(existing), isNew: false };
-		}
-		return this.create({ id, details: input.details ?? [], ...input });
+		})];
 	}
 
 	private create(input: Omit<MutableActivityRound, 'sessionId' | 'requestId'>): ActivityRoundMutation {
@@ -401,8 +397,14 @@ function runningToolSummary(type: ActivityRoundType, toolName: string, details: 
 
 function completedToolSummary(round: MutableActivityRound, success: boolean): string {
 	const duration = round.startedAt !== undefined && round.completedAt !== undefined ? formatDuration(Math.max(0, round.completedAt - round.startedAt)) : undefined;
-	const base = round.type === 'command' ? (success ? l10n.t('Command completed') : l10n.t('Command failed'))
-		: round.type === 'edit' ? (success ? l10n.t('Files modified') : l10n.t('File modification failed'))
+	const command = round.details.find(detail => detail.label === l10n.t('Command'))?.value;
+	const path = round.details.find(detail => detail.label === l10n.t('Path'))?.value;
+	const base = round.type === 'command' ? (command
+		? success ? boundedLine(command) : l10n.t('{0} failed', boundedLine(command))
+		: success ? l10n.t('Command completed') : l10n.t('Command failed'))
+		: round.type === 'edit' ? (path
+			? success ? l10n.t('Modified {0}', boundedLine(path)) : l10n.t('Failed to modify {0}', boundedLine(path))
+			: success ? l10n.t('Files modified') : l10n.t('File modification failed'))
 			: success ? l10n.t('Tool completed') : l10n.t('Tool failed');
 	return duration ? `${base} · ${duration}` : base;
 }

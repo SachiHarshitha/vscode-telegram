@@ -76,6 +76,23 @@ suite('ChatAttachmentsContentPart', () => {
 	}
 
 	suite('updateVariables', () => {
+		test('should omit hidden routing context from the transcript', () => {
+			const part = store.add(instantiationService.createInstance(
+				ChatAttachmentsContentPart,
+				{
+					variables: [{
+						kind: 'generic',
+						id: 'internal-routing-marker',
+						name: 'internal-routing-marker',
+						value: 'correlation-id',
+						isHidden: true,
+					}]
+				}
+			));
+
+			assert.strictEqual(part.domNode, undefined);
+		});
+
 		test('should update variables and re-render', () => {
 			const initialVariables: IChatRequestVariableEntry[] = [
 				createFileEntry('file1.ts'),

@@ -15,7 +15,7 @@ describe('TelegramRichRenderer', () => {
 		}));
 
 		expect(message.blocks).toHaveLength(1);
-		expect(message.blocks[0]).toMatchObject({
+		expect(message.blocks?.[0]).toMatchObject({
 			type: 'details',
 			blocks: expect.arrayContaining([expect.objectContaining({ type: 'pre', text: 'npm test', language: 'shell' })]),
 		});
@@ -57,6 +57,30 @@ describe('TelegramRichRenderer', () => {
 		expect(serialized).not.toContain('secret-value');
 		expect(serialized).not.toContain('hunter2');
 		expect(serialized.match(/redacted/g)).toHaveLength(2);
+	});
+
+	it('renders a short lifecycle update without an empty expandable body or timing noise', () => {
+		const message = renderTelegramActivityRound(round({
+			type: 'progress', summary: 'Prompt accepted', status: 'completed', details: [],
+		}));
+		const serialized = JSON.stringify(message);
+
+		expect(serialized).toContain('Prompt accepted');
+		expect(serialized).not.toContain('details');
+		expect(serialized).not.toContain('Duration');
+		expect(serialized).not.toContain('This activity');
+	});
+
+	it('renders the final assistant answer as sanitized rich HTML instead of literal Markdown', () => {
+		const message = renderTelegramActivityRound(round({
+			type: 'answer', summary: 'The result', status: 'completed',
+			details: [{ value: '**Result**: `c77774e`\n\n- first\n- second' }],
+		}));
+
+		expect(message).toMatchObject({ html: expect.stringContaining('<b>Result</b>') });
+		expect(message.html).toContain('<code>c77774e</code>');
+		expect(message.html).toContain('• first');
+		expect(message.html).not.toContain('**Result**');
 	});
 });
 

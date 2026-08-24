@@ -156,7 +156,10 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		state.complete = true;
 		state.terminalOutcome = outcome === 'superseded' ? undefined : outcome;
 		await this.removeStopControl(state);
-		await this.publishMutation(state, state.aggregator.completeRequest(outcome), undefined, true);
+		const mutation = state.aggregator.completeRequest(outcome);
+		if (mutation) {
+			await this.publishMutation(state, mutation, undefined, true);
+		}
 		this.notifyTerminal(state);
 	}
 

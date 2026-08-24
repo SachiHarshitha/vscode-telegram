@@ -33,6 +33,7 @@ describe('pendingRequestContext', () => {
 		setPendingCopilotCLIRequestContext('session-a', correlationId, { prompt: 'remote', attachments: [] });
 
 		expect(getPendingCopilotCLIRequestCorrelationId([])).toBeUndefined();
+		expect(marker.isHidden).toBe(true);
 		expect(getPendingCopilotCLIRequestCorrelationId([marker, marker])).toBeUndefined();
 		expect(takePendingCopilotCLIRequestContext('session-a', correlationId)?.prompt).toBe('remote');
 	});

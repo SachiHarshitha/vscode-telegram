@@ -287,8 +287,12 @@
 		.agent-session-description.icon-only {
 			display: flex;
 			align-items: center;
-			justify-content: flex-end;
-			flex: 1;
+			/* Keep icon-only provider state beside the timestamp instead of after
+			 * the diff summary. `margin-left: auto` is intentional here: relying on
+			 * the generic description flex-grow left the rendered-markdown child at
+			 * the start of the remaining row in some layouts. */
+			margin-left: auto;
+			flex: 0 0 auto;
 			overflow: visible;
 		}
 

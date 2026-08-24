@@ -73,7 +73,7 @@ The **Target** column records current implementation status, not only the eventu
 | Permission buttons | P0 | Implemented | Approve once / deny; opaque callback correlation and first-valid-response-wins |
 | User question buttons | P0 | Implemented | Choice buttons + reply-to-question freeform route |
 | Granular activity timeline | P0 | Implemented | One semantic `ActivityRound` per meaningful bubble; read/search bursts aggregate without collapsing the whole turn |
-| Expandable Rich activity bubble | P0 | Implemented | Each round uses `InputRichBlockDetails`; only that round's sanitized details appear inside |
+| Focused Rich activity bubble | P0 | Implemented | Tool/interaction rounds with useful detail use `InputRichBlockDetails`; short lifecycle/progress updates stay compact and final assistant answers render directly as formatted rich HTML |
 | Running-round in-place update | P0 | Implemented | Command/tool completion edits its original Rich Message; a reply-linked replacement is sent if editing fails |
 | Reply-to-bubble steering | P0 | Implemented | Message correlation resolves the activity, then uses the normal native prompt/steering dispatcher |
 | Rich draft streaming | P1 | Adapter implemented, intentionally unused in V1 timeline | Drafts are 30-second ephemeral previews with no persistent reply target; persistent send/edit is used for steerable rounds |
