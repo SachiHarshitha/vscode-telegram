@@ -40,7 +40,7 @@ The **Target** column records current implementation status, not only the eventu
 | Permission request | P0 | Upstream + Glue | Implemented | Individual Rich Message bubble, callback-correlated with the live SDK request |
 | Permission approve/deny | P0 | Upstream + Glue | Implemented | Approve-once/deny only; first-valid-response-wins; replay/stale controls fail closed |
 | Agent user-question request | P0 | Upstream + Glue | Implemented | Individual bubble with callback choices and correlated freeform reply |
-| Plan approval/exit-plan response | P1 | Upstream + Glue | Planned | Reuse SDK/session plan interaction |
+| Plan approval/exit-plan response | P1 | Upstream + Glue | Implemented | Local, Mission Control and Telegram race once; remote actions are limited to `interactive`/`exit_only` or denial/feedback |
 | Subagent activity | P1 | Upstream + Telegram | Implemented | Compact semantic start/complete/failure summaries |
 | Session errors | P0 | Upstream + Telegram | Required | Visible remote failure state |
 | Context/token usage | P1 | Upstream + Telegram | Implemented | Bounded summary only when provided by runtime |
@@ -50,34 +50,35 @@ The **Target** column records current implementation status, not only the eventu
 
 | Feature | Priority | Ownership | Target | Notes |
 | --- | --- | --- | --- | --- |
-| Show current model | P0 | Upstream + Telegram | Required | SDK-backed selected model |
-| List Copilot CLI models | P0 | Upstream + Glue | Required | Copilot SDK/model service is authoritative |
-| Select model | P1 | Upstream + Glue | Planned | Use session model API supported by current source |
-| Reasoning effort selection | P1 | Upstream + Glue | Planned | Only for models exposing supported effort levels |
-| Show current agent mode | P0 | Upstream + Telegram | Required | Interactive/plan/autopilot/etc. as supported |
-| Change mode | P1 | Upstream + Glue | Planned | Reject any change that raises remote permission to autoApprove/autopilot |
-| BYOK provider compatibility | P1 | Upstream | Planned | Do not recreate provider stack |
+| Show current model | P0 | Upstream + Telegram | Implemented | Reads the active wrapper or transiently reads/closes the inactive SDK session; pending Telegram choices never replace actual SDK state |
+| List Agent Chat models | P0 | Upstream + Glue | Implemented | Merges `ICopilotCLIModels` with visible `vscode.lm` models; the inline picker is paginated so every entry remains reachable |
+| Select model | P1 | Upstream + Glue | Implemented | Native CLI models use the ordinary model path; configured VS Code models use an additive SDK provider registry backed by the exact selected LM object |
+| Reasoning effort selection | P1 | Upstream + Glue | Implemented where supported | Offered and accepted only when the feature is enabled and the selected catalogue model lists the effort |
+| Show current agent mode | P0 | Upstream + Telegram | Implemented when live | Reads the live session bridge only; inactive/unknown mode is omitted rather than guessed |
+| Change mode | P1 | Upstream + Glue | Implemented | Telegram offers only `interactive` and `plan`; runtime guards reject `autoApprove`, `autopilot`, and `autopilot_fleet` elevation |
+| BYOK provider compatibility | P1 | Upstream + Glue | Integration implemented; backend compatibility unclaimed | VS Code retains provider credentials and serves inference through the LM API; no backend is declared compatible until the full matrix passes |
 | vLLM/OpenAI-compatible endpoint | P1 | Upstream | Planned | Through supported Copilot BYOK configuration |
 | Ollama compatibility | P1 | Upstream | Planned | Through supported Copilot BYOK configuration |
-| VS Code LM discovery | P2 | VS Code + Telegram | Optional | Supplementary display only; not agent-harness guarantee |
+| VS Code LM discovery and execution | P1 | VS Code + Telegram | Implemented | Uses `vscode.lm.selectChatModels()` plus an authenticated loopback Responses adapter into the existing Copilot SDK agent harness |
 
 ## Telegram UX features
 
 | Feature | Priority | Target | Notes |
 | --- | --- | --- | --- |
-| Home/status card | P0 | Required | Session, model, workspace, status |
-| Inline session picker | P0 | Required | Callback buttons |
-| Inline model picker | P1 | Planned | Dynamic list |
-| Inline mode picker | P1 | Planned | Dynamic list |
+| Home/status card | P0 | Implemented | Telegram-safe HTML card with an emoji title, bold field labels, section spacing, and escaped dynamic session/model/workspace values |
+| Inline session picker | P0 | Implemented | Structured emoji-titled card with bold workstation/workspace labels and opaque callback buttons |
+| Inline model picker | P1 | Implemented | Combined, paginated catalogue with opaque callbacks and nested supported reasoning-effort choices |
+| Inline mode picker | P1 | Implemented | Interactive/plan only; preference applies to the next Telegram prompt |
 | Stop button | P0 | Required | Guard against stale callback/session mismatch |
 | Permission buttons | P0 | Implemented | Approve once / deny; opaque callback correlation and first-valid-response-wins |
 | User question buttons | P0 | Implemented | Choice buttons + reply-to-question freeform route |
+| Plan review controls | P1 | Implemented | Implement interactively / approve only / reject; reply-to-plan feedback; no remote autopilot action |
 | Granular activity timeline | P0 | Implemented | One semantic `ActivityRound` per meaningful bubble; read/search bursts aggregate without collapsing the whole turn |
 | Focused Rich activity bubble | P0 | Implemented | Tool/interaction rounds with useful detail use `InputRichBlockDetails`; short lifecycle/progress updates stay compact and final assistant answers render directly as formatted rich HTML |
 | Running-round in-place update | P0 | Implemented | Command/tool completion edits its original Rich Message; a reply-linked replacement is sent if editing fails |
 | Reply-to-bubble steering | P0 | Implemented | Message correlation resolves the activity, then uses the normal native prompt/steering dispatcher |
 | Rich draft streaming | P1 | Adapter implemented, intentionally unused in V1 timeline | Drafts are 30-second ephemeral previews with no persistent reply target; persistent send/edit is used for steerable rounds |
-| Slash command shortcuts | P1 | Partially implemented | `/new`, `/sessions`, `/deselect`, `/stop`, `/status`, `/start`; model commands remain planned |
+| Slash command shortcuts | P1 | Implemented for current phases | `/new`, `/sessions`, `/deselect`, `/stop`, `/status`, `/start`, `/models`, `/model`, and `/mode` |
 | Images/files from Telegram | P1 | Planned | Controlled download + SDK attachment path |
 | Notifications on completion | P1 | Planned | Completion/failure/approval-needed |
 | Telegram Mini App | P2 | Optional | Rich dashboard only if bot UI becomes limiting |
@@ -166,7 +167,7 @@ All native indicators render transport-neutral registry state; Telegram strings 
 The project MUST NOT claim these capabilities unless upstream APIs change and the implementation is verified:
 
 - guaranteed hidden chain-of-thought access,
-- automatic use of every model registered in `vscode.lm` as a full Copilot coding agent,
+- guaranteed full coding-agent compatibility for every model merely because it is visible in `vscode.lm`,
 - public Marketplace compatibility while the project requires proposed APIs,
 - end-to-end encryption for Telegram bot conversations,
 - seamless operation in Remote SSH, Dev Containers or Codespaces in V1,

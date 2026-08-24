@@ -11,7 +11,7 @@ This plan was revalidated against the repository at:
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Phases 0 through 5.3 implemented; consent-gated setup, native visibility, `/new`, native prompt/steering, granular Rich Message activity, per-bubble steering and permission/question responses are active; plan-exit/model controls remain follow-up work |
+| Implementation status | Phases 0 through 7 implemented; consent-gated setup, native visibility, `/new`, native prompt/steering, granular Rich Message activity, per-bubble steering, permission/question/plan-exit responses, and combined native/configured model and reasoning controls are active |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -695,13 +695,23 @@ extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts       
 
 ## 10. Phase 6 — remaining plan-exit responses
 
+**Status:** Implemented and validated on 2026-08-24.
+
 Permission and normal user-question responses moved into Phase 5.3 because the existing registry already provided the correct transport-neutral response race. Phase 6 now covers only plan-exit/approval interaction types not included in the implemented request interfaces.
 
 ### Files
 
 ```text
-extensions/copilot/src/extension/telegramRemote/node/telegramPlanBridge.ts       (new)
-extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts (response-race modify)
+extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts                (modify)
+extensions/copilot/src/extension/telegramRemote/node/remoteControlRegistry.ts                (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramCallbackRegistry.ts             (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramTransport.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramActivityTimeline.ts             (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramPlanBridge.ts                   (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/missionControlTransport.ts       (modify)
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts           (response-race modify)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts                    (modify)
+extensions/copilot/script/telegram-remote/test-phase6.ps1                                    (new)
 ```
 
 ### Implement
@@ -709,34 +719,97 @@ extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.
 - Add the same registry race to `exit_plan_mode.requested`. Telegram may select only SDK actions that do not elevate permission (`interactive` or `exit_only`) or deny/provide feedback; never expose `autopilot` or `autopilot_fleet`.
 - Correlate plan responses by session ID + SDK request ID + tool-call ID where present; never use display text as correlation.
 
+### Implementation record
+
+- `CopilotCLISession` remains the sole owner of `respondToExitPlanMode()`. It races the existing local review UI against registry responders, cancels losers, and calls the SDK response method once. Autopilot permission level bypasses remote responders entirely.
+- The transport-neutral request type contains only `interactive` and `exit_only`; its response type has no `autoApproveEdits` field. Registry runtime validation drops malformed, unavailable or permission-elevating results before they can win.
+- `TelegramPlanBridge` revalidates the active paired identity, selected session and exact workspace scope before presentation and again before resolution. It uses one-shot opaque callbacks for safe actions/denial and accepts feedback only as a reply to the exact plan message.
+- Callback resolution checks session, SDK request, optional tool call, message ID and paired numeric identity. Local/Mission Control wins, cancellation, disable, identity change and disposal invalidate callbacks and explicitly remove the keyboard.
+- Mission Control now handles correlated `exit_plan_mode_response` commands through the same registry race and rejects `autopilot`, `autopilot_fleet`, stale and unoffered actions.
+
 ### Exit criteria
 
 - Local, Mission Control, and Telegram plan-response race tests prove one SDK response per request.
 - Wrong-session/user/nonce/expired plan callbacks cannot resolve a request.
 - No plan response can select `autopilot` or `autopilot_fleet`.
 
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 6 PowerShell runner | Passed: 27 Telegram Remote files / 169 tests, plus 14 focused `CopilotCLISession` plan tests |
+| Correlation/security | Passed: wrong user/session/tool/nonce/message and expired/replayed callbacks do not resolve; scope is revalidated |
+| Response race | Passed: local/registry race calls the SDK response once and cancels losing responders; Mission Control and Telegram both use first-valid-response-wins |
+| Permission ceiling | Passed: remote request/response types omit elevating actions, runtime validation rejects injected autopilot values, and local autopilot never invokes remote responders |
+| TypeScript / lint | Passed: extension typecheck and targeted ESLint with zero warnings |
+| Extension bundle | Passed: `npm run compile` completed with no errors |
+
 ## 11. Phase 7 — models, reasoning effort and safe modes
+
+**Status:** Implemented on 2026-08-24 and amended with the combined Agent Chat model bridge. Automated source validation is authoritative; provider-specific local/BYOK compatibility remains deliberately unclaimed pending the full runtime matrix.
 
 ### Stage A — read-only visibility
 
-- Enumerate models through `ICopilotCLIModels.getModels()` and read the active wrapper with `getSelectedModelId()`.
+- Enumerate native models through `ICopilotCLIModels.getModels()`, merge models visible through `vscode.lm.selectChatModels()`, and read the active wrapper with `getSelectedModelId()`.
 - Add a read-only session-service helper for an inactive session's selected model if needed; reuse the transient `getEvents()/getSelectedModel()/closeSession()` pattern in `getChatHistoryImpl()` rather than exposing the SDK session.
 - Display current mode from the session bridge only when known.
 
 ### Stage B — validated per-request selection
 
 - Extend the internal workbench command options with `userSelectedModelId` and `userSelectedModelConfiguration`, forwarding them to `chatService.sendRequest()`.
-- Validate model ID and reasoning effort against `ICopilotCLIModels` before storing a Telegram-side preference.
+- Validate model ID and reasoning effort against the combined `TelegramLanguageModelBridge` catalogue before storing a Telegram-side preference.
 - Apply the preference to the next Telegram prompt through the real `ChatRequest`; `CopilotCLIChatSessionInitializer.resolveModel()` and `CopilotCLISession.updateModel()` remain authoritative.
 - Reflect the actual selected model after dispatch. A native user change may supersede Telegram state and must be shown rather than silently overwritten.
 - Expose only non-elevating mode operations. Product V1 may enter plan/interactive through supported request semantics; it must not offer remote `autoApprove`, `autopilot`, or `autopilot_fleet`.
-- Validate GitHub-hosted and configured BYOK/local providers through the same upstream catalog/runtime. Add no Telegram-specific provider stack.
+- Keep native models on the upstream path. Adapt configured VS Code LM models into the existing Copilot SDK agent harness through an additive provider registry and a private, authenticated loopback Responses adapter; provider credentials remain inside VS Code.
 
 ### Exit criteria
 
 - Unsupported/stale model and reasoning choices fail visibly before dispatch.
 - A remote model preference arrives on the native `ChatRequest` and the SDK-selected model matches afterward.
 - Local/BYOK compatibility is reported only for backends that pass the full prompt/tool/permission/steering/abort matrix.
+
+### Implementation record
+
+- `/models`, `/model [model-id] [effort]`, `/mode [interactive|plan]`, and the status-card Model/Mode controls are live. Status, session, model, reasoning and mode cards use Telegram-safe HTML with concise emoji titles, bold labels, section spacing, and escaped dynamic values. The combined picker is paginated, so configured models are not hidden behind the former 30-button truncation. Buttons show the concise model display name only; identifiers remain inside opaque callback state. Model and effort callbacks remain identity/session/request-bound, expiring, and one-shot.
+- `TelegramLanguageModelBridge` merges the native CLI catalogue with the exact visible VS Code LM objects, assigns stable provider-qualified command IDs, and removes native/recursive duplicates. `TelegramRequestPreferences` validates against that merged catalogue when selected and immediately before dispatch. Unsupported or stale state is removed and reported without sending a prompt.
+- Native models still use `copilotcli/<model-id>` in the ordinary `ChatRequest`. Configured models use a private selection property; the initializer obtains an additive SDK registry from the bridge, creates/resumes without an invalid initial custom ID, registers the provider/models idempotently, and only then lets `CopilotCLISession.updateModel()` select the provider-qualified model.
+- The bridge exposes a nonce-authenticated OpenAI Responses endpoint on ephemeral `127.0.0.1` only and translates messages, tools, reasoning metadata, state markers, usage and output back to the exact `LanguageModelChat`. Raw BYOK tokens/base URLs remain inside the VS Code provider and are never placed in Telegram state or logs.
+- Status reads the actual selected model through the active wrapper or the new read-only session-service helper. Inactive reads transiently open/read/close the SDK session without creating a wrapper. A consumed Telegram choice is not persisted, so a later native model change is displayed as authoritative.
+- Current mode is shown only for a live bound session. Every Telegram prompt has a trusted registry-created mode and defaults to `interactive`; the only selectable override is `plan`. Type-level and runtime guards reject `autopilot` and any other permission-elevating mode, including forged origins.
+- No local/BYOK backend is marked compatible merely because it appears and can generate text through the bridge; the full provider matrix remains required.
+
+### Files
+
+```text
+src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts                 (modify)
+src/vs/workbench/contrib/chat/test/browser/chatSessions/chatSessionsService.test.ts             (modify)
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.ts               (modify)
+extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts        (modify)
+extensions/copilot/src/extension/chatSessions/vscode-node/chatSessions.ts                        (modify)
+extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts                     (modify)
+extensions/copilot/src/extension/telegramRemote/common/telegramLanguageModelBridgeTypes.ts      (new)
+extensions/copilot/src/extension/telegramRemote/node/remoteControlRegistry.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramRequestPreferences.ts               (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramCommandRouter.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/remotePromptDispatcher.ts            (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramLanguageModelBridge.ts        (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramLanguageModelResponses.ts     (new)
+extensions/copilot/script/telegram-remote/test-phase7.ps1                                        (new)
+```
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Phase 7 PowerShell runner | Passed via `script/telegram-remote/test-phase7.ps1`: extension typecheck, 29 Telegram files / 189 tests, and 19 focused native model/mode tests |
+| Core workbench seam | Passed after a clean workbench rebuild: 31 tests passed / 13 pending, including external model/configuration forwarding |
+| Selected-model visibility | Passed: active wrapper read without reopen; inactive SDK read followed by close; no wrapper acquisition |
+| Model/reasoning pipeline | Passed: combined/paginated catalogue validation, stale failure before dispatch, native `ChatRequest` resolution, additive configured-model registration, and SDK model/effort update |
+| Configured-model bridge | Passed: exact `LanguageModelChat` invocation through nonce-authenticated loopback Responses translation; no provider credential is copied into the SDK registry |
+| Safe modes | Passed: interactive default, plan selection, forged origin rejection, and runtime/type rejection of elevating Telegram modes |
+| TypeScript / lint / bundles | Passed: extension typecheck, targeted changed-file ESLint with zero warnings, workbench compile, and Copilot extension bundle |
+| Local/BYOK matrix | Not run; compatibility remains unclaimed as required by the exit criteria |
 
 ## 12. Phase 8 — release hardening
 

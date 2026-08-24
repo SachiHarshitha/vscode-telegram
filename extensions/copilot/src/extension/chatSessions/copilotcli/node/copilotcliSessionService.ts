@@ -98,6 +98,7 @@ export interface ICopilotCLISessionService {
 	getSessionItem(sessionId: string, token: CancellationToken): Promise<ICopilotCLISessionItem | undefined>;
 	getSessionTitle(sessionId: string, token: CancellationToken): Promise<string>;
 	getAllSessions(token: CancellationToken): Promise<readonly ICopilotCLISessionItem[]>;
+	getSelectedModelId(sessionId: string, token: CancellationToken): Promise<string | undefined>;
 
 	// SDK session management
 	createNewSessionId(): string;
@@ -840,6 +841,37 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 			lockDisposable?.dispose();
 		}
 	}
+
+	/** Reads the selected SDK model without creating or retaining a Copilot CLI wrapper. */
+	public async getSelectedModelId(sessionId: string, token: CancellationToken): Promise<string | undefined> {
+		const existingSession = this._sessionWrappers.get(sessionId)?.object;
+		if (existingSession) {
+			return raceCancellation(existingSession.getSelectedModelId(), token);
+		}
+
+		const sessionManager = await raceCancellation(this.getSessionManager(), token);
+		if (!sessionManager || token.isCancellationRequested) {
+			return undefined;
+		}
+
+		let shutdown = Promise.resolve();
+		try {
+			const session = await sessionManager.getSession({ sessionId }, false);
+			if (!session) {
+				return undefined;
+			}
+			shutdown = sessionManager.closeSession(sessionId).catch(error => {
+				this.logService.error(`[CopilotCLISession] Failed to close session ${sessionId} after reading its selected model: ${error}`);
+			});
+			return await raceCancellation(session.getSelectedModel(), token);
+		} catch (error) {
+			this.logService.error(`[CopilotCLISession] Failed to read the selected model for session ${sessionId}: ${error}`);
+			return undefined;
+		} finally {
+			await shutdown;
+		}
+	}
+
 	public async getChatHistory({ sessionId, workspace }: { sessionId: string; workspace: IWorkspaceInfo }, token: CancellationToken): Promise<(ChatRequestTurn2 | ChatResponseTurn2)[]> {
 		const { history } = await this.getChatHistoryImpl({ sessionId, workspace }, token);
 		return history;

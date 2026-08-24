@@ -16,6 +16,7 @@ import { RemoteControlRegistry } from '../remoteControlRegistry';
 import type { TelegramPairedIdentity } from '../telegramAuthorization';
 import { TelegramCallbackRegistry, type TelegramCallbackConstraints, type TelegramCallbackInput } from '../telegramCallbackRegistry';
 import { TelegramCommandRouter, type TelegramActivityReplyResolution, type TelegramCommandHost, type TelegramPromptDispatcher, type TelegramRequestActivity, type TelegramRequestTerminalEvent, type TelegramSessionCreator } from '../telegramCommandRouter';
+import type { TelegramRequestPreferenceController } from '../telegramRequestPreferences';
 import { TelegramSessionState } from '../telegramSessionState';
 import { TestTelegramExtensionContext, telegramCallbackUpdate, telegramMessageUpdate } from './testTelegramSecurityState';
 
@@ -34,6 +35,10 @@ describe('TelegramCommandRouter', () => {
 
 		const picker = lastSendOptions(test.host).replyMarkup!;
 		expect({ rows: picker.inline_keyboard.length, text: lastSentText(test.host) }).toEqual({ rows: 1, text: expect.not.stringContaining('Secret foreign session') });
+		expect(lastSentText(test.host)).toContain('<b>🧭 Select a Copilot session</b>');
+		expect(lastSentText(test.host)).toContain('<b>Workstation</b>: workstation-1');
+		expect(lastSentText(test.host)).toContain('<b>Workspace</b>: C:\\workspace');
+		expect(lastSendOptions(test.host).parseMode).toBe('HTML');
 		const callbackData = picker.inline_keyboard[0][0].callback_data!;
 		expect(callbackData).toMatch(/^tr1:/);
 		expect(callbackData).not.toContain(firstSession.id);
@@ -43,7 +48,7 @@ describe('TelegramCommandRouter', () => {
 		expect(test.registry.getAttachedSessionIds('telegram')).toEqual([firstSession.id]);
 		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
 		expect(test.host.editMessageReplyMarkup).toHaveBeenCalledWith(identity.chatId, 1, { inline_keyboard: [] });
-		expect(lastSentText(test.host)).toContain('Authorized workspace: C:\\workspace');
+		expect(lastSentText(test.host)).toContain('<b>Authorized workspace</b>: C:\\workspace');
 	});
 
 	it('fails closed when an empty window has no authorized sessions', async () => {
@@ -62,6 +67,126 @@ describe('TelegramCommandRouter', () => {
 
 		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
 		expect(test.host.editMessageText).not.toHaveBeenCalled();
+	});
+
+	it('shows the actual selected model and live mode in status when known', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.requestPreferences.getStatus.mockResolvedValue({ selectedModelId: 'gpt-fast', selectedModelLabel: 'GPT Fast', currentMode: 'plan' });
+
+		await test.host.deliver(telegramMessageUpdate(1, '/status'));
+
+		expect(lastSentText(test.host)).toContain('<b>📡 Telegram Remote</b>');
+		expect(lastSentText(test.host)).toContain('<b>Model</b>: GPT Fast');
+		expect(lastSentText(test.host)).toContain('<b>Mode</b>: plan');
+		expect(lastSentText(test.host)).toContain('\n\n<b>Permissions</b>:');
+		expect(lastSentText(test.host)).toContain('<b>Commands</b>: /new, /sessions');
+		expect(lastSendOptions(test.host).parseMode).toBe('HTML');
+		expect(lastSendOptions(test.host).replyMarkup?.inline_keyboard[0].map(button => button.text)).toEqual(['Model', 'Mode']);
+	});
+
+	it('escapes dynamic status-card values before enabling Telegram HTML', async () => {
+		const specialSession = { ...firstSession, label: 'R&D <session>' };
+		const test = createRouter([specialSession], new Set([specialSession.id]));
+		await test.state.select(identity, specialSession.id, sessionScopeFingerprint);
+
+		await test.host.deliver(telegramMessageUpdate(1, '/status'));
+
+		expect(lastSentText(test.host)).toContain('<b>Session</b>: R&amp;D &lt;session&gt;');
+		expect(lastSentText(test.host)).not.toContain('R&D <session>');
+		expect(lastSendOptions(test.host).parseMode).toBe('HTML');
+	});
+
+	it('passes a validated one-request model, reasoning effort, and safe mode to native dispatch', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.requestPreferences.setModel.mockImplementation(async (_identity, _sessionId, modelId, reasoningEffort) => modelId === 'claude-sonnet high'
+			? { kind: 'invalid', error: 'unsupported-model' }
+			: { kind: 'valid', value: { modelId: 'claude-sonnet', reasoningEffort, mode: 'interactive' } });
+		test.requestPreferences.consumeForDispatch.mockResolvedValue({ kind: 'valid', value: { modelId: 'claude-sonnet', reasoningEffort: 'high', mode: 'plan' } });
+
+		await test.host.deliver(telegramMessageUpdate(1, '/model claude-sonnet high'));
+		await test.host.deliver(telegramMessageUpdate(2, '/mode plan'));
+		await test.host.deliver(telegramMessageUpdate(3, 'Create a safe implementation plan'));
+
+		expect(test.requestPreferences.setModel).toHaveBeenCalledWith(identity, firstSession.id, 'claude-sonnet', 'high');
+		expect(test.requestPreferences.setMode).toHaveBeenCalledWith(identity, firstSession.id, 'plan');
+		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(
+			firstSession.id,
+			'Create a safe implementation plan',
+			expect.objectContaining({ kind: 'telegram', mode: 'plan' }),
+			{ modelId: 'claude-sonnet', reasoningEffort: 'high' },
+		);
+	});
+
+	it('fails a stale model preference visibly before native dispatch', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.requestPreferences.consumeForDispatch.mockResolvedValue({ kind: 'invalid', error: 'unsupported-model' });
+
+		await test.host.deliver(telegramMessageUpdate(1, 'Do not silently fall back'));
+
+		expect(test.dispatcher.dispatch).not.toHaveBeenCalled();
+		expect(lastSentText(test.host)).toContain('unsupported or no longer available');
+		expect(lastSentText(test.host)).toContain('No prompt was dispatched');
+	});
+
+	it('rejects permission-elevating mode commands and offers only interactive or plan', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+
+		await test.host.deliver(telegramMessageUpdate(1, '/mode autopilot'));
+		expect(test.requestPreferences.setMode).not.toHaveBeenCalled();
+		expect(lastSentText(test.host)).toContain('cannot be enabled from Telegram');
+
+		await test.host.deliver(telegramMessageUpdate(2, '/mode'));
+		expect(lastSendOptions(test.host).replyMarkup?.inline_keyboard.map(row => row[0].text)).toEqual(['Interactive', 'Plan']);
+	});
+
+	it('enumerates the upstream catalog through opaque model callbacks', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.requestPreferences.getModels.mockResolvedValue([{ id: 'gpt-fast', name: 'GPT Fast', provider: 'Copilot CLI', source: 'copilotcli', maxContextWindowTokens: 64_000 }]);
+		test.requestPreferences.setModel.mockResolvedValue({ kind: 'valid', value: { modelId: 'gpt-fast', mode: 'interactive' } });
+
+		await test.host.deliver(telegramMessageUpdate(1, '/models'));
+		const button = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0];
+		expect(lastSentText(test.host)).toContain('<b>🤖 Choose a model</b>');
+		expect(lastSendOptions(test.host).parseMode).toBe('HTML');
+		expect(button.text).toBe('GPT Fast');
+		expect(button.callback_data).toMatch(/^tr1:/);
+		expect(button.callback_data).not.toContain('gpt-fast');
+
+		await test.host.deliver(callbackUpdate(2, button.callback_data!, 1));
+		expect(test.requestPreferences.setModel).toHaveBeenCalledWith(identity, firstSession.id, 'gpt-fast', undefined);
+	});
+
+	it('paginates the complete model catalog so configured models beyond the first page remain visible', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.requestPreferences.getModels.mockResolvedValue(Array.from({ length: 25 }, (_, index) => ({
+			id: `openai/model-${index + 1}`,
+			name: `Configured ${index + 1}`,
+			provider: 'openai',
+			source: 'vscode-lm' as const,
+			maxContextWindowTokens: 64_000,
+		})));
+
+		await test.host.deliver(telegramMessageUpdate(1, '/models'));
+		const firstPage = lastSendOptions(test.host).replyMarkup!.inline_keyboard;
+		expect(firstPage).toHaveLength(21);
+		expect(firstPage.at(-1)?.map(button => button.text)).toEqual(['Next']);
+
+		await test.host.deliver(callbackUpdate(2, firstPage.at(-1)![0].callback_data!, 1));
+		const secondPage = lastSendOptions(test.host).replyMarkup!.inline_keyboard;
+		expect(secondPage?.slice(0, 5).map(row => row[0].text)).toEqual([
+			'Configured 21',
+			'Configured 22',
+			'Configured 23',
+			'Configured 24',
+			'Configured 25',
+		]);
+		expect(secondPage?.at(-1)?.map(button => button.text)).toEqual(['Previous']);
 	});
 
 	it('creates a session in the single authorized workspace and dispatches its first prompt', async () => {
@@ -330,11 +455,20 @@ function createRouter(
 			: undefined,
 	};
 	const activity = new TestRequestActivity(host);
+	const requestPreferences = {
+		getModels: vi.fn<TelegramRequestPreferenceController['getModels']>(async () => []),
+		isReasoningEffortSelectionEnabled: vi.fn<TelegramRequestPreferenceController['isReasoningEffortSelectionEnabled']>(() => true),
+		setModel: vi.fn<TelegramRequestPreferenceController['setModel']>(async () => ({ kind: 'invalid', error: 'unsupported-model' })),
+		setMode: vi.fn<TelegramRequestPreferenceController['setMode']>((_identity, _sessionId, mode) => ({ mode })),
+		consumeForDispatch: vi.fn<TelegramRequestPreferenceController['consumeForDispatch']>(async () => ({ kind: 'valid', value: { mode: 'interactive' } })),
+		getStatus: vi.fn<TelegramRequestPreferenceController['getStatus']>(async () => ({})),
+		clear: vi.fn<TelegramRequestPreferenceController['clear']>(),
+	} satisfies TelegramRequestPreferenceController;
 	const logService = new class extends mock<ILogService>() { override warn = vi.fn(); override error = vi.fn(); override info = vi.fn(); };
 	const router = new TelegramCommandRouter(host, state, sessionService, registry, dispatcher, sessionCreator, {
 		workstationLabel: 'workstation-1', workspaceLabel: 'C:\\workspace', workspaceRoots, remotePermissionResponses: false,
-	}, scopePolicy, activity, logService);
-	return { router, host, state, registry, sessionService, dispatcher, sessionCreator, activity, logService, workspaceRoots };
+	}, scopePolicy, activity, requestPreferences, logService);
+	return { router, host, state, registry, sessionService, dispatcher, sessionCreator, activity, requestPreferences, logService, workspaceRoots };
 }
 
 function callbackUpdate(updateId: number, callbackData: string, messageId: number): TelegramUpdate {

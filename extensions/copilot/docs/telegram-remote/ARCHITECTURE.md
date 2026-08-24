@@ -199,19 +199,20 @@ Phase 1 introduces a transport-neutral registry and a narrow session binding. Na
 ```ts
 type RemoteRequestOrigin =
     | { kind: 'missionControl'; transportId: 'missionControl'; commandId: string; mode?: MissionControlMode }
-    | { kind: 'telegram'; transportId: 'telegram'; updateId: string };
+    | { kind: 'telegram'; transportId: 'telegram'; updateId: string; mode: 'interactive' | 'plan' };
 
 interface IRemoteControlTransport {
     readonly id: string;
     readonly onDidReceiveCommand: Event<RemoteCommand>;
     publish(sessionId: string, event: RemoteAgentEvent): void;
-    requestPermission?(request: RemotePermissionRequest, token: CancellationToken): Promise<PermissionRequestResult | undefined>;
-    requestUserInput?(request: RemoteUserInputRequest, token: CancellationToken): Promise<UserInputResponse | undefined>;
+    requestPermission?(sessionId: string, request: RemotePermissionRequest, token: CancellationToken): Promise<PermissionRequestResult | undefined>;
+    requestUserInput?(sessionId: string, request: RemoteUserInputRequest, token: CancellationToken): Promise<UserInputResponse | undefined>;
+    requestExitPlanMode?(sessionId: string, request: RemoteExitPlanModeRequest, token: CancellationToken): Promise<RemoteExitPlanModeResponse | undefined>;
 }
 
 interface IRemoteSessionControl {
     abort(): Promise<void>;
-    setSelectedModel?(modelId: string, reasoningEffort?: string): Promise<void>;
+    getCurrentMode(): string | undefined;
 }
 
 interface IRemoteControlRegistry {
@@ -220,6 +221,7 @@ interface IRemoteControlRegistry {
     publish(sessionId: string, event: SessionEvent): void;
     waitForPermission(...): Promise<PermissionRequestResult | undefined>;
     waitForUserInput(...): Promise<UserInputResponse | undefined>;
+    waitForExitPlanMode(...): Promise<RemoteExitPlanModeResponse | undefined>;
 }
 ```
 
@@ -227,12 +229,12 @@ The registry owns transport fan-out and correlation; `CopilotCLISession` remains
 
 ### Typed request origin
 
-The current source infers a Mission Control request from `SendOptions.source.startsWith('command-')` and then reads the shared `_mcState.mcMode`. This is unsafe for an N-transport design: a Telegram request accidentally or maliciously labelled `command-*` could inherit Mission Control's `autopilot` mode.
+The registry-created typed origin replaces the former `SendOptions.source.startsWith('command-')` mode inference. That older inference was unsafe for an N-transport design because a Telegram request accidentally or maliciously labelled `command-*` could inherit Mission Control's `autopilot` mode.
 
 The registry MUST create a typed `RemoteRequestOrigin`; transport payloads cannot supply or override it. Carry this typed origin through pending request context and `CopilotCLISessionInput`. Derive effective remote mode/permission only from `origin.kind` and the originating transport's policy:
 
-- only a registry-created `missionControl` origin may consume Mission Control mode,
-- a `telegram` origin has no permission-elevating mode,
+- only a registry-created `missionControl` origin may carry Mission Control's `autopilot` mode,
+- a registry-created `telegram` origin is always `interactive` or `plan` and defaults to `interactive`,
 - Telegram remains limited to approve-once/deny even while Mission Control is active in `autopilot`,
 - `SendOptions.source` remains a separately serialized SDK correlation/telemetry string and is never an authorization signal.
 
@@ -246,7 +248,8 @@ Remote prompts MUST follow the same path currently used by Mission Control:
 TelegramTransport
   -> setPendingCopilotCLIRequestContext(sessionId, ...)
   -> workbench.action.chat.openSessionWithPrompt.copilotcli
-  -> VS Code creates ChatRequest + ChatParticipantToolToken
+     (optional userSelectedModelId + userSelectedModelConfiguration)
+  -> VS Code creates ChatRequest + ChatParticipantToolToken + selected model configuration
   -> Copilot chat participant resolves the existing session
   -> CopilotCLISession.handleRequest(...)
   -> normal send, or mode: 'immediate' when already busy
@@ -325,6 +328,7 @@ The current Copilot session implementation:
 - handles remote messages/steering,
 - handles permission responses,
 - handles user-input responses,
+- handles plan-exit responses,
 - keeps session state shared across wrapper instances.
 
 Telegram should reuse the **control-plane pattern**, not call Mission Control itself.
@@ -351,7 +355,7 @@ The first registry test uses Mission Control plus an in-memory second transport.
 
 ## 10. Permissions and interactive requests
 
-The registry races the existing local UI, Mission Control and Telegram responders. Telegram publishes permission and question requests as individual waiting Rich Message rounds. Permission controls are approve-once/deny callbacks; question controls are bounded choice callbacks, with a reply to that question bubble used for freeform input when allowed.
+The registry races the existing local UI, Mission Control and Telegram responders. Telegram publishes permission and question requests as individual waiting Rich Message rounds. Permission controls are approve-once/deny callbacks; question controls are bounded choice callbacks, with a reply to that question bubble used for freeform input when allowed. Plan requests use the separate `TelegramPlanBridge`, which shows only `interactive`, `exit_only`, denial and correlated reply feedback.
 
 Conceptually:
 
@@ -380,6 +384,7 @@ Rules:
 - Telegram may never set or raise the session permission level to `autoApprove` or `autopilot`, directly or through a mode change.
 - a callback registration is one-shot; replay cannot resolve the request twice,
 - local or Mission Control resolution cancels Telegram's pending responder and removes its active controls.
+- plan response types cannot represent `autopilot`, `autopilot_fleet` or `autoApproveEdits`; registry runtime validation also rejects forged elevating values before they can win.
 
 ## 11. Telegram networking
 
@@ -429,19 +434,30 @@ Destructive/permission operations use callback tokens, never free-text inference
 
 ## 13. Model source of truth
 
-For Copilot CLI-backed sessions the Copilot SDK/upstream `ICopilotCLIModels` layer is authoritative.
+The Telegram catalogue has two provider-qualified sources:
+
+- native Copilot CLI models from `ICopilotCLIModels`, and
+- models visible to the built-in extension through `vscode.lm.selectChatModels()`, including configured models from `chatLanguageModels.json`.
 
 Relevant source:
 
 - [`../../src/extension/chatSessions/copilotcli/node/copilotCli.ts`](../../src/extension/chatSessions/copilotcli/node/copilotCli.ts)
 
-The VS Code `vscode.lm` model registry may contain additional models contributed by other extensions. These can be displayed as supplementary information later, but the Telegram UI must distinguish:
+`TelegramLanguageModelBridge` merges both sources, assigns provider-qualified Telegram IDs, removes native and recursive proxy duplicates, and retains the exact `LanguageModelChat` object returned by VS Code. `TelegramRequestPreferences` stores only an identity/session-bound preference for the next Telegram prompt and revalidates it immediately before dispatch.
+
+Native models continue through `userSelectedModelId`. A VS Code-backed selection travels as private `ChatRequest.modelConfiguration`, where `CopilotCLIChatSessionInitializer` resolves it to an additive Copilot SDK provider/model registry. `CopilotCLISession` registers that registry idempotently before `updateModel()` selects it. The SDK's OpenAI Responses request is serviced by a nonce-authenticated loopback adapter bound only to `127.0.0.1`; the adapter calls the retained VS Code LM object, so configured provider secrets stay inside the provider implementation and are never copied into Telegram configuration, logs, or SDK provider credentials.
+
+Current selected-model visibility reads an active wrapper through `getSelectedModelId()`. For an inactive session, `ICopilotCLISessionService.getSelectedModelId()` transiently opens the SDK session, reads the model, and closes it without creating a wrapper. Current mode is displayed only from a live registry binding and is omitted when unknown.
+
+The execution paths remain deliberately distinct:
 
 ```text
-Agent-capable Copilot CLI models
+Native Copilot CLI model
 vs.
-Other VS Code language models
+VS Code LM model adapted into the Copilot SDK agent harness
 ```
+
+Visibility is not a provider-compatibility claim. A configured backend must still pass prompt, tool, permission, steering, image and abort tests before the documentation marks that backend compatible.
 
 ## 14. IDE context
 

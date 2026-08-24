@@ -18,6 +18,7 @@ import { FolderRepositoryInfo, IFolderRepositoryManager, IsolationMode } from '.
 import { emptyWorkspaceInfo, getWorkingDirectory, isIsolationEnabled, IWorkspaceInfo } from '../../common/workspaceInfo';
 import { SessionIdForCLI } from '../../copilotcli/common/utils';
 import { IRemoteControlRegistry } from '../../../telegramRemote/common/remoteControlTypes';
+import { ITelegramLanguageModelBridge, TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY, type TelegramAdditionalModelRegistry } from '../../../telegramRemote/common/telegramLanguageModelBridgeTypes';
 import { COPILOT_CLI_CONTEXT_SIZE_PROPERTY, COPILOT_CLI_REASONING_EFFORT_PROPERTY, ICopilotCLIAgents, ICopilotCLIModels, resolveContextTier } from '../../copilotcli/node/copilotCli';
 import { ICopilotCLISession } from '../../copilotcli/node/copilotcliSession';
 import { ICopilotCLISessionService } from '../../copilotcli/node/copilotcliSessionService';
@@ -35,6 +36,13 @@ export interface SessionInitOptions {
 	stream: vscode.ChatResponseStream;
 }
 
+export interface CopilotCLIResolvedModel {
+	readonly model: string;
+	readonly reasoningEffort?: string;
+	readonly contextTier?: 'default' | 'long_context';
+	readonly additionalModels?: TelegramAdditionalModelRegistry;
+}
+
 export interface ICopilotCLIChatSessionInitializer {
 	readonly _serviceBrand: undefined;
 
@@ -50,7 +58,7 @@ export interface ICopilotCLIChatSessionInitializer {
 		options: SessionInitOptions,
 		disposables: DisposableStore,
 		token: vscode.CancellationToken
-	): Promise<{ session: IReference<ICopilotCLISession> | undefined; isNewSession: boolean; model: { model: string; reasoningEffort?: string; contextTier?: 'default' | 'long_context' } | undefined; agent: SweCustomAgent | undefined; trusted: boolean }>;
+	): Promise<{ session: IReference<ICopilotCLISession> | undefined; isNewSession: boolean; model: CopilotCLIResolvedModel | undefined; agent: SweCustomAgent | undefined; trusted: boolean }>;
 
 	/**
 	 * Initialize a working directory, optionally based on a chat session context.
@@ -79,7 +87,7 @@ export const ICopilotCLIChatSessionInitializer = createServiceIdentifier<ICopilo
 
 export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionInitializer {
 	declare readonly _serviceBrand: undefined;
-	private readonly delegatedSessionContext = new Map<string, { model: { model: string; reasoningEffort?: string; contextTier?: 'default' | 'long_context' } | undefined; agent: SweCustomAgent | undefined }>();
+	private readonly delegatedSessionContext = new Map<string, { model: CopilotCLIResolvedModel | undefined; agent: SweCustomAgent | undefined }>();
 
 	constructor(
 		@ICopilotCLISessionService private readonly sessionService: ICopilotCLISessionService,
@@ -91,6 +99,7 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 		@ILogService private readonly logService: ILogService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IRemoteControlRegistry private readonly remoteControlRegistry: IRemoteControlRegistry,
+		@ITelegramLanguageModelBridge private readonly telegramLanguageModelBridge: ITelegramLanguageModelBridge,
 	) { }
 
 	async getOrCreateSession(
@@ -99,7 +108,7 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 		options: SessionInitOptions,
 		disposables: DisposableStore,
 		token: vscode.CancellationToken
-	): Promise<{ session: IReference<ICopilotCLISession> | undefined; isNewSession: boolean; model: { model: string; reasoningEffort?: string; contextTier?: 'default' | 'long_context' } | undefined; agent: SweCustomAgent | undefined; trusted: boolean }> {
+	): Promise<{ session: IReference<ICopilotCLISession> | undefined; isNewSession: boolean; model: CopilotCLIResolvedModel | undefined; agent: SweCustomAgent | undefined; trusted: boolean }> {
 		const sessionId = SessionIdForCLI.parse(chatResource);
 		const isNewSession = this.sessionService.isNewSessionId(sessionId);
 		const { stream } = options;
@@ -118,13 +127,17 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 
 		const debugTargetSessionIds = extractDebugTargetSessionIds(request.references);
 		const mcpServerMappings = buildMcpServerMappings(request.tools);
+		const initialModel = model?.additionalModels ? undefined : model?.model;
 		const session = isNewSession ?
-			await this.sessionService.createSession({ sessionId, model: model?.model, reasoningEffort: model?.reasoningEffort, contextTier: model?.contextTier, workspace: workspaceInfo, agent, debugTargetSessionIds, mcpServerMappings }, token) :
-			await this.sessionService.getSession({ sessionId, model: model?.model, reasoningEffort: model?.reasoningEffort, contextTier: model?.contextTier, workspace: workspaceInfo, agent, debugTargetSessionIds, mcpServerMappings }, token);
+			await this.sessionService.createSession({ sessionId, model: initialModel, reasoningEffort: model?.reasoningEffort, contextTier: model?.contextTier, workspace: workspaceInfo, agent, debugTargetSessionIds, mcpServerMappings }, token) :
+			await this.sessionService.getSession({ sessionId, model: initialModel, reasoningEffort: model?.reasoningEffort, contextTier: model?.contextTier, workspace: workspaceInfo, agent, debugTargetSessionIds, mcpServerMappings }, token);
 
 		if (!session) {
 			stream.warning(l10n.t('Chat session not found.'));
 			return { session: undefined, isNewSession, model, agent, trusted };
+		}
+		if (model?.additionalModels) {
+			session.object.ensureAdditionalModels(model.additionalModels);
 		}
 		this.logService.info(`Using Copilot CLI session: ${session.object.sessionId} (isNewSession: ${isNewSession}, isolationEnabled: ${isIsolationEnabled(workspaceInfo)}, workingDirectory: ${workingDirectory}, worktreePath: ${worktreeProperties?.worktreePath})`);
 
@@ -189,7 +202,10 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 			this.resolveAgent(request, token),
 		]);
 
-		const session = await this.sessionService.createSession({ workspace, agent, model: model?.model, reasoningEffort: model?.reasoningEffort, contextTier: model?.contextTier, mcpServerMappings: options.mcpServerMappings }, token);
+		const session = await this.sessionService.createSession({ workspace, agent, model: model?.additionalModels ? undefined : model?.model, reasoningEffort: model?.reasoningEffort, contextTier: model?.contextTier, mcpServerMappings: options.mcpServerMappings }, token);
+		if (model?.additionalModels) {
+			session.object.ensureAdditionalModels(model.additionalModels);
+		}
 		this.delegatedSessionContext.set(session.object.sessionId, { model, agent });
 		return session;
 	}
@@ -197,7 +213,7 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 	/**
 	 * Resolve the model ID to use for a request.
 	 */
-	async resolveModel(request: vscode.ChatRequest | undefined, token: vscode.CancellationToken): Promise<{ model: string; reasoningEffort?: string; contextTier?: 'default' | 'long_context' } | undefined> {
+	async resolveModel(request: vscode.ChatRequest | undefined, token: vscode.CancellationToken): Promise<CopilotCLIResolvedModel | undefined> {
 		const promptFile = request ? await this.getPromptInfoFromRequest(request, token) : undefined;
 		const model = promptFile?.header?.model ? await this.getModelFromPromptFile(promptFile.header.model) : undefined;
 		if (token.isCancellationRequested) {
@@ -205,6 +221,19 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 		}
 		if (model) {
 			return { model };
+		}
+		const telegramModelId = request?.modelConfiguration?.[TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY];
+		if (typeof telegramModelId === 'string' && telegramModelId) {
+			const selection = await this.telegramLanguageModelBridge.resolveSelection(telegramModelId);
+			if (!selection) {
+				throw new Error(l10n.t('The Telegram-selected language model is no longer available. Refresh /models and try again.'));
+			}
+			const reasoningEffort = isReasoningEffortFeatureEnabled(this.configurationService) ? request?.modelConfiguration?.[COPILOT_CLI_REASONING_EFFORT_PROPERTY] : undefined;
+			return {
+				model: selection.model,
+				reasoningEffort: typeof reasoningEffort === 'string' && reasoningEffort ? reasoningEffort : undefined,
+				additionalModels: selection.registry,
+			};
 		}
 		// Get model from request.
 		const preferredModelInRequest = request?.model?.id ? await this.copilotCLIModels.resolveModel(request.model.id) : undefined;

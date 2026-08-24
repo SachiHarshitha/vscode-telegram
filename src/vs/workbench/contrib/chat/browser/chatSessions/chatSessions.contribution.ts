@@ -36,7 +36,7 @@ import { ChatSessionOptionsMap, ChatSessionStatus, ChatSessionsExtensions, IAsyn
 import { ChatAgentLocation, ChatModeKind } from '../../common/constants.js';
 import { CHAT_CATEGORY } from '../actions/chatActions.js';
 import { IChatEditorOptions } from '../widgetHosts/editor/chatEditor.js';
-import { ChatRequestQueueKind, ChatSendResult, IChatService, ResponseModelState } from '../../common/chatService/chatService.js';
+import { ChatRequestQueueKind, ChatSendResult, IChatSendRequestOptions, IChatService, ResponseModelState } from '../../common/chatService/chatService.js';
 import { autorun, observableFromEvent } from '../../../../../base/common/observable.js';
 import { IChatRequestVariableEntry, PromptFileVariableKind, toPromptFileVariableEntry } from '../../common/attachments/chatVariableEntries.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
@@ -62,8 +62,27 @@ import { IsSessionsWindowContext } from '../../../../common/contextkeys.js';
 
 export type ChatSessionPromptQueue = 'queued' | 'steering';
 
+export interface IChatSessionPromptCommandOptions {
+	readonly resource: UriComponents;
+	readonly prompt: string;
+	readonly attachedContext?: IChatRequestVariableEntry[];
+	readonly queue?: ChatSessionPromptQueue;
+	readonly userSelectedModelId?: string;
+	readonly userSelectedModelConfiguration?: Record<string, unknown>;
+}
+
 export function getChatSessionPromptQueueKind(queue: ChatSessionPromptQueue | undefined): ChatRequestQueueKind | undefined {
 	return queue === 'steering' ? ChatRequestQueueKind.Steering : queue === 'queued' ? ChatRequestQueueKind.Queued : undefined;
+}
+
+export function getChatSessionPromptSendOptions(type: string, chatOptions: IChatSessionPromptCommandOptions, attachedContext: IChatRequestVariableEntry[] | undefined): IChatSendRequestOptions {
+	return {
+		agentIdSilent: type,
+		attachedContext,
+		queue: getChatSessionPromptQueueKind(chatOptions.queue),
+		userSelectedModelId: chatOptions.userSelectedModelId,
+		userSelectedModelConfiguration: chatOptions.userSelectedModelConfiguration,
+	};
 }
 
 export async function waitForChatSessionPromptResult(initialResult: ChatSendResult): Promise<void> {
@@ -687,7 +706,7 @@ export class ChatSessionsService extends Disposable implements IChatSessionsServ
 					});
 				}
 
-				async run(accessor: ServicesAccessor, chatOptions?: { resource: UriComponents; prompt: string; attachedContext?: IChatRequestVariableEntry[]; queue?: ChatSessionPromptQueue }): Promise<void> {
+				async run(accessor: ServicesAccessor, chatOptions?: IChatSessionPromptCommandOptions): Promise<void> {
 					const chatService = accessor.get(IChatService);
 					const customizationHarnessService = accessor.get(ICustomizationHarnessService);
 					const toolsService = accessor.get(ILanguageModelToolsService);
@@ -704,8 +723,7 @@ export class ChatSessionsService extends Disposable implements IChatSessionsServ
 								attachedContext = [promptFile, ...(attachedContext ?? [])];
 							}
 
-							const queue = getChatSessionPromptQueueKind(chatOptions.queue);
-							const result = await chatService.sendRequest(sessionResource, chatOptions.prompt, { agentIdSilent: type, attachedContext, queue });
+							const result = await chatService.sendRequest(sessionResource, chatOptions.prompt, getChatSessionPromptSendOptions(type, chatOptions, attachedContext));
 							await waitForChatSessionPromptResult(result);
 						} finally {
 							ref?.dispose();

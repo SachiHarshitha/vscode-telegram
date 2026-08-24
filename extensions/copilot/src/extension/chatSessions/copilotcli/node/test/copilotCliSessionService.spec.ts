@@ -238,6 +238,32 @@ describe('CopilotCLISessionService', () => {
 
 	// --- Tests ----------------------------------------------------------------------------------
 
+	describe('CopilotCLISessionService.getSelectedModelId', () => {
+		it('reads and closes an inactive SDK session without creating a wrapper', async () => {
+			const sessionId = 'inactive-model-session';
+			const sdkSession = new MockCliSdkSession(sessionId, new Date());
+			vi.spyOn(sdkSession, 'getSelectedModel').mockResolvedValue('claude-sonnet');
+			manager.sessions.set(sessionId, sdkSession);
+			const closeSession = vi.spyOn(manager, 'closeSession');
+
+			await expect(service.getSelectedModelId(sessionId, CancellationToken.None)).resolves.toBe('claude-sonnet');
+
+			expect(closeSession).toHaveBeenCalledWith(sessionId);
+		});
+
+		it('reads an active wrapper without reopening or closing the SDK session', async () => {
+			const session = await service.createSession({ model: 'gpt-test', ...sessionOptionsFor(URI.file('/tmp')) }, CancellationToken.None);
+			vi.spyOn(session.object, 'getSelectedModelId').mockResolvedValue('gpt-test');
+			const getSession = vi.spyOn(manager, 'getSession');
+			const closeSession = vi.spyOn(manager, 'closeSession');
+
+			await expect(service.getSelectedModelId(session.object.sessionId, CancellationToken.None)).resolves.toBe('gpt-test');
+
+			expect(getSession).not.toHaveBeenCalled();
+			expect(closeSession).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('CopilotCLISessionService.getChatHistory', () => {
 		it('refreshes cached custom agent mode instructions when custom agents change', async () => {
 			const agentUri = URI.file('/workspace/.github/agents/review.agent.md');

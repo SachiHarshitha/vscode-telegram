@@ -35,12 +35,13 @@ import { IChatSessionMetadataStore } from '../../common/chatSessionMetadataStore
 import { ExternalEditTracker } from '../../common/externalEditTracker';
 import { getWorkingDirectory, isIsolationEnabled, IWorkspaceInfo } from '../../common/workspaceInfo';
 import { clearTodoList, enrichToolInvocationWithSubagentMetadata, isCopilotCliEditToolCall, isCopilotCLIToolThatCouldRequirePermissions, isTodoRelatedSqlQuery, processToolExecutionComplete, processToolExecutionStart, ToolCall, updateTodoListFromSqlItems } from '../common/copilotCLITools';
-import { IRemoteControlRegistry, IRemoteUserInputResponse, RemoteRequestOrigin } from '../../../telegramRemote/common/remoteControlTypes';
+import { IRemoteControlRegistry, IRemoteUserInputResponse, type RemoteExitPlanModeAction, RemoteRequestOrigin } from '../../../telegramRemote/common/remoteControlTypes';
+import type { TelegramAdditionalModelRegistry } from '../../../telegramRemote/common/telegramLanguageModelBridgeTypes';
 import { LocalSession, Session } from '../common/utils';
 import { getCopilotCLISessionDir } from './cliHelpers';
 import type { CopilotCliBridgeSpanProcessor } from './copilotCliBridgeSpanProcessor';
 import { ICopilotCLIImageSupport } from './copilotCLIImageSupport';
-import { handleExitPlanMode } from './exitPlanModeHandler';
+import { handleExitPlanMode, type ExitPlanModeResponse } from './exitPlanModeHandler';
 import { handleMcpPermission, handleReadPermission, handleShellPermission, handleWritePermission, type PermissionRequest, type PermissionRequestResult, showInteractivePermissionPrompt } from './permissionHelpers';
 import { TodoSqlQuery } from './todoSqlQuery';
 import { IQuestion, IQuestionAnswer, IUserQuestionHandler } from './userInputHelpers';
@@ -217,6 +218,7 @@ export interface ICopilotCLISession extends IDisposable {
 	getReplayEvents(): readonly SessionEvent[];
 	abort(): Promise<void>;
 	notifyRemoteAttachment(label: string, remotePermissionResponses: boolean): void;
+	ensureAdditionalModels(registry: TelegramAdditionalModelRegistry): void;
 	getCurrentMode(): string | undefined;
 	selectCustomAgent(name: string | undefined): Promise<void>;
 	renameSdkSession(title: string): Promise<void>;
@@ -343,6 +345,16 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 		this._stream.warning(remotePermissionResponses
 			? l10n.t('This session is now remotely controllable from {0}. Supported permission prompts may be answered remotely.', label)
 			: l10n.t('This session is now remotely controllable from {0}. Permission prompts must be answered locally.', label));
+	}
+
+	ensureAdditionalModels(registry: TelegramAdditionalModelRegistry): void {
+		const models = registry.models.filter(model => !this._sdkSession.isByokSelection(`${model.provider}/${model.id}`));
+		if (models.length === 0) {
+			return;
+		}
+		const providers = registry.providers.filter(provider => !registry.models.some(model => model.provider === provider.name && this._sdkSession.isByokSelection(`${model.provider}/${model.id}`)));
+		this._sdkSession.registerByokEntries(providers, models);
+		this.logService.info(`[CopilotCLISession] Registered ${models.length} additional Telegram model(s) across ${providers.length} new provider(s)`);
 	}
 
 	getCurrentMode(): string | undefined {
@@ -634,7 +646,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 		let sdkRequestId: string | undefined;
 		let isQuotaError = false;
 		const toolIdEditMap = new Map<string, Promise<string | undefined>>();
-		const remoteMode = this._remoteControlRegistry.getValidatedMissionControlMode(input.origin);
+		const remoteMode = this._remoteControlRegistry.getValidatedRemoteMode(input.origin);
 		const effectivePermissionLevel = remoteMode ? (remoteMode === 'autopilot' ? 'autopilot' : undefined) : this._permissionLevel;
 		clearTodoList(this._toolsService, request.toolInvocationToken, token).catch(err => {
 			this.logService.error(err, '[CopilotCLISession] Failed to clear todo list at start of session');
@@ -810,9 +822,10 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 			})));
 			if (shouldHandleExitPlanModeRequests) {
 				disposables.add(toDisposable(this._sdkSession.on('exit_plan_mode.requested', async (event) => {
-					this.updateArtifacts();
+					let response: ExitPlanModeResponse = { approved: false };
 					try {
-						const response = await handleExitPlanMode(
+						this.updateArtifacts();
+						const resolveLocalPlanResponse = (resolutionToken: CancellationToken) => handleExitPlanMode(
 							event.data,
 							this._sdkSession,
 							effectivePermissionLevel,
@@ -820,14 +833,38 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 							this.workspaceService,
 							this.logService,
 							this._toolsService,
-							token,
+							resolutionToken,
 						);
+						if (effectivePermissionLevel !== 'autopilot' && this._remoteControlRegistry.isTransportAttached(this.sessionId)) {
+							const planResolutionTokenSource = new CancellationTokenSource(token);
+							const eventData = event.data as typeof event.data & { readonly toolCallId?: string };
+							const actions = eventData.actions.filter((action): action is RemoteExitPlanModeAction => action === 'interactive' || action === 'exit_only');
+							try {
+								response = (await Promise.race([
+									resolveLocalPlanResponse(planResolutionTokenSource.token),
+									this._remoteControlRegistry.requestExitPlanMode(this.sessionId, {
+										requestId: eventData.requestId,
+										toolCallId: eventData.toolCallId,
+										summary: eventData.summary,
+										planContent: eventData.planContent,
+										actions,
+										recommendedAction: actions.includes(eventData.recommendedAction as RemoteExitPlanModeAction) ? eventData.recommendedAction as RemoteExitPlanModeAction : undefined,
+									}, planResolutionTokenSource.token),
+								])) ?? { approved: false };
+							} finally {
+								planResolutionTokenSource.dispose(true);
+							}
+						} else {
+							response = await resolveLocalPlanResponse(token);
+						}
 						flushPendingInvocationMessages();
-
-						this._sdkSession.respondToExitPlanMode(event.data.requestId, response);
 					} catch (error) {
 						this.logService.error(error, '[CopilotCLISession] Error handling exit plan mode');
-						this._sdkSession.respondToExitPlanMode(event.data.requestId, { approved: false });
+					}
+					try {
+						this._sdkSession.respondToExitPlanMode(event.data.requestId, response);
+					} catch (error) {
+						this.logService.error(error, '[CopilotCLISession] Failed to send exit plan mode response');
 					}
 				})));
 			}
@@ -1312,7 +1349,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 				}
 			}
 		} else {
-			const remoteMode = this._remoteControlRegistry.getValidatedMissionControlMode(input.origin);
+			const remoteMode = this._remoteControlRegistry.getValidatedRemoteMode(input.origin);
 			if (remoteMode) {
 				this._sdkSession.currentMode = remoteMode;
 			} else if ('command' in input && input.command === 'plan') {

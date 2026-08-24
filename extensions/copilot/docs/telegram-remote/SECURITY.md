@@ -143,6 +143,8 @@ V1 response choices are deliberately limited to:
 
 Telegram MUST NOT expose session-wide approval, persistent allow rules, `setPermissionLevel()`, `autoApprove` or `autopilot`. A remote mode change that would implicitly raise permission is rejected. Any future expansion requires a new security review and a locally configured ceiling that remote input cannot increase.
 
+Phase 6 applies the same ceiling to plan exit. Telegram and Mission Control may approve only an action already offered as `interactive` or `exit_only`, reject, or provide bounded feedback. Their transport-neutral response type cannot represent `autopilot`, `autopilot_fleet` or `autoApproveEdits`, and the registry rejects forged or unoffered values at runtime. Telegram plan callbacks additionally bind the paired numeric identity, session ID, SDK request ID, optional tool-call ID and exact message ID; one-shot expiry, replay, workspace-scope change and local/competing response all fail closed.
+
 ### Transport-origin isolation
 
 The current upstream code recognizes Mission Control through a string prefix (`source.startsWith('command-')`) and may apply the shared Mission Control mode to that request. The multi-transport implementation MUST NOT use that string as an authorization or permission signal.
@@ -241,6 +243,8 @@ Recommended defaults:
 Long polling requires outbound HTTPS only. This reduces attack surface compared with running a public webhook endpoint.
 
 V1 MUST NOT automatically expose a local HTTP server to the public Internet.
+
+The configured-model adapter is a private loopback boundary, not a public endpoint. It binds to `127.0.0.1` on an ephemeral port, requires a 256-bit bearer nonce, accepts only the Responses route, bounds request bodies, cancels in-flight LM requests on disconnect/disposal, and logs neither prompt content nor provider credentials. VS Code provider secrets remain owned by the registered LM provider; they are not copied into the adapter or the Copilot SDK registry.
 
 Tailscale is not required. If a later dashboard uses Tailscale, it receives a separate threat model.
 

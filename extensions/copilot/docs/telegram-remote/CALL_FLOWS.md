@@ -336,7 +336,39 @@ sequenceDiagram
     S-->>T: invalidate/resolve question
 ```
 
-## 10. Abort
+## 10. Plan exit approval
+
+`CopilotCLISession` owns the only SDK response call. Local VS Code, Mission Control and Telegram race through the same registry; cancellation retires every losing control.
+
+```mermaid
+sequenceDiagram
+    participant SDK as SDK Session
+    participant S as CopilotCLISession
+    participant VS as VS Code plan review
+    participant C as RemoteControlRegistry
+    participant M as MissionControlTransport
+    participant T as TelegramPlanBridge
+
+    SDK-->>S: exit_plan_mode.requested(requestId, actions)
+    S->>S: filter remote actions to interactive / exit_only
+    par Local response
+        S->>VS: review plan
+        VS-->>S: local decision
+    and Remote responses
+        S->>C: requestExitPlanMode(session, request)
+        C-->>M: correlated request
+        C-->>T: correlated request
+        M-->>C: safe action / deny / feedback
+        T-->>C: safe callback or bound reply feedback
+        C-->>S: first valid remote response
+    end
+    S->>S: cancel losing responders
+    S->>SDK: respondToExitPlanMode(requestId, response) once
+```
+
+Remote transports never receive or return `autopilot`, `autopilot_fleet` or `autoApproveEdits`. A locally running autopilot request is resolved only by the existing local handler and is not offered to remote responders.
+
+## 11. Abort
 
 ```mermaid
 sequenceDiagram
@@ -357,31 +389,49 @@ sequenceDiagram
     TT-->>T: stopped
 ```
 
-## 11. Model selection
+## 12. Model selection
 
 ```mermaid
 sequenceDiagram
     participant T as Telegram
-    participant C as TelegramTransport
-    participant R as RemoteControlRegistry
-    participant M as ICopilotCLIModels / SDK
+    participant C as TelegramCommandRouter
+    participant P as TelegramRequestPreferences
+    participant M as Combined model bridge
+    participant LM as VS Code LM registry
+    participant D as RemotePromptDispatcher
+    participant VS as Native ChatRequest path
     participant S as CopilotCLISession
 
     T->>C: Open model picker
     C->>M: get available models
-    M-->>C: model metadata
-    C-->>T: inline model picker
-    T->>C: select modelId
-    C->>R: setSelectedModel(sessionId, modelId)
-    R->>S: update selected model
-    S-->>R: selected model / error
-    R-->>C: selected model / error
-    C-->>T: model status updated
+    M->>LM: selectChatModels()
+    M-->>C: native + configured metadata
+    C-->>T: paginated inline model picker
+    T->>C: select modelId + supported effort
+    C->>P: validate and store next-request preference
+    P->>M: resolveModel + getModels
+    M-->>P: exact catalogue match / error
+    P-->>C: validated preference
+    T->>C: next prompt
+    C->>P: validate again and consume once
+    C->>D: prompt + model/effort + safe mode
+    alt Native CLI model
+        D->>VS: userSelectedModelId + model configuration
+    else Configured VS Code model
+        D->>VS: private configured-model selection
+        VS->>M: resolve exact LM + loopback registry
+        M-->>VS: provider-qualified SDK model + registry
+    end
+    VS->>S: handleRequest(real ChatRequest)
+    S->>S: register additive model if needed, then updateModel
+    S->>SDK: setSelectedModel(modelId, effort)
+    C->>S: later read actual selected model
+    C-->>T: actual model in /status
 ```
 
-Cross-provider/BYOK changes may have stronger constraints than same-provider model changes. The implementation must follow the current upstream API rather than assuming all provider changes are hot-swappable.
+The Telegram preference is not durable and is consumed for one prompt. A later native selection therefore supersedes it and `/status` reports the SDK-selected value. For a configured model, the SDK calls an authenticated loopback Responses adapter that invokes the exact VS Code `LanguageModelChat`; provider credentials remain inside VS Code. Catalogue presence alone is not a compatibility claim.
 
-## 12. Session event projection
+## 13. Session event projection
 
 ```mermaid
 flowchart LR
@@ -418,7 +468,7 @@ Remote forwarding has exactly one publication point. Request-scoped native rende
 
 Reference: https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events
 
-## 13. Future own-ID extension proposal authorization
+## 14. Future own-ID extension proposal authorization
 
 ### 13.1 Fork-bundled V2 companion
 
@@ -471,7 +521,7 @@ This `argv.json` flow does not run for V1 or for a correctly registered fork-bun
 
 Reference: https://code.visualstudio.com/api/advanced-topics/using-proposed-api
 
-## 14. Error handling flow
+## 15. Error handling flow
 
 ```mermaid
 flowchart TD

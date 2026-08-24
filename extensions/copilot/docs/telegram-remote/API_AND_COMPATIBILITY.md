@@ -37,15 +37,17 @@ The goal is to make upgrade risk explicit.
 | Permission response | registry result consumed by `CopilotCLISession`, then SDK `respondToPermission()` | Downstream seam + SDK | Yes | Telegram returns approve-once/deny only; no raw SDK session exposure or policy mutation |
 | Agent question | `user_input.requested` | Copilot SDK | Yes | Choice/freeform input |
 | User-input response | registry result consumed by `CopilotCLISession`, then SDK `respondToUserInput()` | Downstream seam + SDK | Yes | P0 |
-| Plan approval/exit | current session/SDK plan request APIs | Upstream + SDK | Yes | P1; follow current source API names |
+| Plan approval/exit | `exit_plan_mode.requested` + registry race + SDK `respondToExitPlanMode()` | Downstream seam + Copilot SDK 1.0.73 | Yes | Implemented in Phase 6; remote responses allow only `interactive`, `exit_only`, denial or feedback |
 | Subagent status | `subagent.*` events | Copilot SDK | Yes | P1 |
 | Usage/context | `assistant.usage`, `session.usage_info` | Copilot SDK | Yes | Some aggregate metrics may evolve |
-| List Copilot CLI models | upstream model service / SDK model catalogue | Upstream + SDK | Yes | Authoritative for agent sessions |
-| Model switch | current SDK session selected-model API | Copilot SDK/upstream | Yes | Check provider compatibility before hot switch |
-| Reasoning effort | selected-model/session options | Copilot SDK/upstream | Yes where supported | Do not show unsupported choices |
-| BYOK | Copilot SDK/CLI provider configuration | Copilot SDK | Yes | Provider configuration remains upstream-owned |
-| vLLM/Ollama | supported compatible provider path | Copilot SDK/CLI | Yes when model supports agent requirements | Test each local model |
-| VS Code LM enumeration | `vscode.lm.selectChatModels()` | Stable VS Code API | Yes | Supplementary only |
+| List Agent Chat models | `ICopilotCLIModels.getModels()` + `vscode.lm.selectChatModels()` | Upstream + stable VS Code API | Implemented | Provider-qualified merged catalogue; opaque callbacks and complete pagination |
+| Read selected model | `ICopilotCLISession.getSelectedModelId()` or `ICopilotCLISessionService.getSelectedModelId()` | Upstream + SDK | Implemented | Inactive reads reuse the transient SDK session open/read/close pattern and never expose the SDK object |
+| Model switch | native `userSelectedModelId`, or private VS Code-LM selection configuration -> initializer -> additive SDK registry -> session `updateModel()` | Internal workbench + upstream + SDK | Implemented | Telegram preference is consumed once; stale custom selection never falls back to another model |
+| Reasoning effort | workbench `userSelectedModelConfiguration` -> native `ChatRequest.modelConfiguration` -> SDK `setSelectedModel()` | Internal workbench + upstream + SDK | Implemented where supported | Feature flag and exact catalogue effort list are validated before dispatch; stale choices fail visibly |
+| Safe request mode | registry-created Telegram origin -> `CopilotCLISession` `agentMode` | Downstream seam + SDK | Implemented | Telegram origins default to `interactive` and may select `plan`; runtime and type guards reject elevating modes |
+| BYOK/configured models | VS Code LM object -> authenticated `127.0.0.1` Responses adapter -> additive Copilot SDK provider registry | VS Code LM API + Copilot SDK | Integration implemented; backend compatibility unclaimed | Raw provider credentials remain in the VS Code provider; the SDK receives only the loopback nonce |
+| vLLM/Ollama | supported compatible provider path | Copilot SDK/CLI | Unclaimed pending full matrix | Catalogue visibility alone is not an agent compatibility result |
+| VS Code LM enumeration | `vscode.lm.selectChatModels()` | Stable VS Code API | Implemented | Merged into Telegram model selection; recursive agent-host and native duplicates are excluded |
 | Workspace folders | `vscode.workspace` + upstream workspace services | Stable/upstream | Yes | P0/P1 |
 | Diagnostics | `vscode.languages.getDiagnostics()` | Stable VS Code API | Yes | Existing Copilot MCP tooling already uses it |
 | Native diff | `vscode.diff` command | Stable VS Code command | Yes | Existing upstream behavior |
@@ -53,7 +55,7 @@ The goal is to make upgrade risk explicit.
 | Native advanced model provider integration | richer LM/chat provider proposals | Proposed VS Code API | Yes only when enabled | Inherited from upstream fork |
 | Native remote prompt rendered in same chat | pending request context + upstream internal workbench command | Internal | Required in current fork | Both controller implementations use this route; guard with compatibility tests |
 | Telegram long polling | `getUpdates` | Telegram Bot API | Yes | Default transport |
-| Telegram buttons | `InlineKeyboardMarkup` / `CallbackQuery` | Telegram Bot API | Yes | Sessions, Stop, permissions and questions use opaque one-shot callback data |
+| Telegram buttons | `InlineKeyboardMarkup` / `CallbackQuery` | Telegram Bot API | Yes | Sessions, Stop, permissions, questions and plan review use opaque one-shot callback data |
 | Rich activity send | `sendRichMessage` + `InputRichMessage` | Telegram Bot API 10.1/10.2 | Yes | One persistent message per semantic ActivityRound |
 | Expandable activity | `InputRichBlockDetails` with paragraph/pre/list blocks | Telegram Bot API 10.2 | Yes | Collapsed summary plus details belonging only to that round |
 | Live status edit | `editMessageText` with `rich_message` / reply markup edit | Telegram Bot API | Yes | Updates the original running-round message; replacement fallback on edit failure |
@@ -116,6 +118,7 @@ Current source now provides:
 - model updates,
 - a wrapper-lifetime transport-neutral event/replay/control bridge,
 - registry-coordinated permission and user-input response races,
+- registry-coordinated plan-exit response races with a non-elevating remote action type,
 - Mission Control forwarding and command processing in `missionControlTransport.ts`.
 
 This is the most important reference implementation for Telegram remote semantics.
@@ -128,7 +131,7 @@ Phase 1 adds these narrow transport-neutral members to `ICopilotCLISession`:
 - `notifyRemoteAttachment()`,
 - `getCurrentMode()`.
 
-SDK response calls remain owned by `CopilotCLISession`; transports return correlated values through the registry and never receive `respondToPermission()`, `respondToUserInput()`, selected-model mutation, or raw SDK access. Native rendering listeners remain request-scoped, while one constructor-owned wildcard listener feeds the registry bridge for wrapper lifetime.
+SDK response calls remain owned by `CopilotCLISession`; transports return correlated values through the registry and never receive `respondToPermission()`, `respondToUserInput()`, `respondToExitPlanMode()`, selected-model mutation, or raw SDK access. Native rendering listeners remain request-scoped, while one constructor-owned wildcard listener feeds the registry bridge for wrapper lifetime.
 
 Mission Control mode attribution now uses only a registry-created, runtime-validated typed origin carried separately from the SDK source string. `SendOptions.source` is telemetry/correlation data only. Registry deduplication and a single wrapper-lifetime publication point ensure each SDK event ID is exported once per attached transport.
 

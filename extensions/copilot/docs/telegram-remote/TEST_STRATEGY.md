@@ -371,6 +371,19 @@ Run the Mission Control suite once with only its transport registered and once w
 
 ## 11. Local/BYOK model tests
 
+Phase 7 model/mode contract tests run before any provider compatibility claim:
+
+- merge `ICopilotCLIModels.getModels()` with visible `vscode.lm.selectChatModels()` results, deduplicate native/recursive copies, and keep callback data opaque,
+- paginate the model picker and prove models beyond the first page remain reachable,
+- validate model aliases and supported reasoning effort before storage and again before dispatch,
+- prove stale catalogue/effort state produces a visible failure and no native request,
+- prove `userSelectedModelId` and `userSelectedModelConfiguration` reach the native chat send options,
+- prove the initializer resolves native requests normally and registers a VS Code-backed additive provider before SDK `setSelectedModel()`,
+- exercise the nonce-authenticated loopback Responses adapter against the exact selected `LanguageModelChat` object and reject missing/stale selections without fallback,
+- read active selected-model state without reopening and inactive state through a transient read/close,
+- show actual SDK model state after the one-request Telegram preference is consumed,
+- accept only registry-created Telegram `interactive`/`plan` origins and reject forged/elevating modes.
+
 P1 matrix:
 
 | Backend | Test |
@@ -433,11 +446,12 @@ This default profile is intentionally persistent so iterative runs reuse GitHub/
 18. Verify a running command bubble is edited in place on completion rather than duplicated.
 19. Open an empty VS Code window using a separate profile and verify foreign session titles/paths are not listed. Repeat with a sibling repository and one authorized multi-root folder.
 20. Return to VS Code and verify the same session/history/state is intact.
-21. Enable/smoke-test Mission Control and confirm it still works.
-22. Disable Telegram locally and verify remote commands no longer act, attached state clears immediately, and the status item becomes muted `Telegram: Off` with Enable but no Unpair/Disable action.
-23. Enable again and verify the same exact-scope configuration reconnects without asking for the bot token; confirm the authorized selection restores only after connection/scope validation.
-24. Restart the extension-development window while disabled, enable again, and repeat the no-token-prompt check.
-25. Simulate a retryable network failure, use Reconnect, and confirm only one poller resumes. If the saved token/consent/pairing is intentionally invalidated, confirm Enable routes to setup instead.
+21. Trigger plan completion. Verify Telegram offers only **Implement Plan**, **Approve Plan Only**, and **Reject Plan**; reply to the plan message with feedback and confirm it resolves only that request. Repeat with local VS Code winning first and verify the Telegram keyboard becomes stale. No remote surface may show autopilot actions.
+22. Enable/smoke-test Mission Control and confirm its correlated safe plan response still participates in the same race.
+23. Disable Telegram locally and verify remote commands no longer act, attached state clears immediately, and the status item becomes muted `Telegram: Off` with Enable but no Unpair/Disable action.
+24. Enable again and verify the same exact-scope configuration reconnects without asking for the bot token; confirm the authorized selection restores only after connection/scope validation.
+25. Restart the extension-development window while disabled, enable again, and repeat the no-token-prompt check.
+26. Simulate a retryable network failure, use Reconnect, and confirm only one poller resumes. If the saved token/consent/pairing is intentionally invalidated, confirm Enable routes to setup instead.
 
 Do not mark this real-bot checklist passed until a human performs it. Never print or inspect the persistent profile's bot token or GitHub/Copilot credentials.
 
@@ -446,11 +460,10 @@ Do not mark this real-bot checklist passed until a human performs it. Never prin
 From `extensions/copilot`:
 
 ```powershell
-npx vitest run src/extension/telegramRemote
-npx tsc --noEmit --project tsconfig.json
+.\script\telegram-remote\test-phase6.ps1
 ```
 
-The Phase 5.3 deterministic run covers 26 files / 148 tests using fake tokens and in-memory Bot API hosts only. It includes the Phase 5.2 lifecycle corrections, Rich Message payloads, semantic rounds and reply/callback control flow; it does not read `.env` or contact Telegram. The older PowerShell runners remain useful phase-history gates but do not yet enumerate every new Phase 5.3 file.
+The Phase 6 deterministic run covers 27 Telegram Remote files / 169 tests plus 14 focused `CopilotCLISession` plan-response tests using fake tokens and in-memory hosts only. It includes lifecycle recovery, Rich Message activity, permission/question response races, Telegram plan callbacks/replies, Mission Control plan commands, forged-autopilot rejection and the one-response SDK boundary. It does not read `.env` or contact Telegram.
 
 ## 14. Release compatibility report
 

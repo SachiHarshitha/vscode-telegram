@@ -9,7 +9,7 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
-import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport, type IRemotePermissionRequest, type IRemoteUserInputRequest, type IRemoteUserInputResponse, type RemotePermissionResult } from '../common/remoteControlTypes';
+import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport, type IRemoteExitPlanModeRequest, type IRemoteExitPlanModeResponse, type IRemotePermissionRequest, type IRemoteUserInputRequest, type IRemoteUserInputResponse, type RemotePermissionResult } from '../common/remoteControlTypes';
 import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
 import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHandler } from './telegramService';
 
@@ -20,7 +20,7 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 	readonly themeIcon = 'copilot-telegram-logo';
 
 	private readonly service: TelegramService;
-	private eventPublisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput'> | undefined;
+	private eventPublisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput' | 'requestExitPlanMode'> | undefined;
 	readonly onDidChangeStatus: Event<TelegramPollingStatus>;
 
 	constructor(
@@ -87,7 +87,7 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		this.service.clearDeliveryClient();
 	}
 
-	setEventPublisher(publisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput'>): IDisposable {
+	setEventPublisher(publisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput' | 'requestExitPlanMode'>): IDisposable {
 		if (this.eventPublisher) {
 			throw new Error('A Telegram event publisher is already registered.');
 		}
@@ -109,5 +109,9 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 
 	requestUserInput(sessionId: string, request: IRemoteUserInputRequest, token: CancellationToken): Promise<IRemoteUserInputResponse | undefined> {
 		return this.eventPublisher?.requestUserInput?.(sessionId, request, token) ?? Promise.resolve(undefined);
+	}
+
+	requestExitPlanMode(sessionId: string, request: IRemoteExitPlanModeRequest, token: CancellationToken): Promise<IRemoteExitPlanModeResponse | undefined> {
+		return this.eventPublisher?.requestExitPlanMode?.(sessionId, request, token) ?? Promise.resolve(undefined);
 	}
 }

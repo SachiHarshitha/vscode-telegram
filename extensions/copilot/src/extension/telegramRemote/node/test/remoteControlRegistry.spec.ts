@@ -11,7 +11,7 @@ import { CancellationToken } from '../../../../util/vs/base/common/cancellation'
 import { Emitter } from '../../../../util/vs/base/common/event';
 import { Disposable, DisposableStore } from '../../../../util/vs/base/common/lifecycle';
 import type { IWorkspaceInfo } from '../../../chatSessions/common/workspaceInfo';
-import type { IRemoteControlSession, IRemoteControlSessionEvent, IRemoteControlTransport, IRemotePermissionRequest, RemotePermissionResult, RemoteRequestOrigin } from '../../common/remoteControlTypes';
+import type { IRemoteControlSession, IRemoteControlSessionEvent, IRemoteControlTransport, IRemoteExitPlanModeRequest, IRemotePermissionRequest, RemotePermissionResult, RemoteRequestOrigin } from '../../common/remoteControlTypes';
 import { RemoteControlRegistry } from '../remoteControlRegistry';
 
 const emptyWorkspace: IWorkspaceInfo = { folder: undefined, repository: undefined, worktree: undefined, worktreeProperties: undefined };
@@ -158,6 +158,56 @@ describe('RemoteControlRegistry', () => {
 		expect(loserCancelled).toBe(true);
 	});
 
+	it('rejects permission-elevating plan responses before selecting the first safe response', async () => {
+		const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
+		const unsafe = Object.assign(new TestTransport('unsafe'), {
+			requestExitPlanMode: async () => ({ approved: true, selectedAction: 'autopilot' }) as never,
+		});
+		const safe = Object.assign(new TestTransport('safe'), {
+			requestExitPlanMode: async (_sessionId: string, _request: IRemoteExitPlanModeRequest) => ({ approved: true as const, selectedAction: 'interactive' as const }),
+		});
+		registry.registerTransport(unsafe);
+		registry.registerTransport(safe);
+		registry.attachTransport('session-1', unsafe.id);
+		registry.attachTransport('session-1', safe.id);
+
+		const result = await registry.requestExitPlanMode('session-1', {
+			requestId: 'plan-1',
+			summary: 'Plan ready',
+			actions: ['interactive', 'exit_only'],
+		}, CancellationToken.None);
+
+		expect(result).toEqual({ approved: true, selectedAction: 'interactive' });
+	});
+
+	it('races Mission Control and Telegram plan responses and cancels the loser', async () => {
+		const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
+		let missionControlCancelled = false;
+		const missionControl = Object.assign(new TestTransport('missionControl'), {
+			requestExitPlanMode: async (_sessionId: string, _request: IRemoteExitPlanModeRequest, token: CancellationToken) =>
+				new Promise<undefined>(resolve => token.onCancellationRequested(() => {
+					missionControlCancelled = true;
+					resolve(undefined);
+				})),
+		});
+		const telegram = Object.assign(new TestTransport('telegram'), {
+			requestExitPlanMode: async () => ({ approved: false as const, feedback: 'Revise the tests' }),
+		});
+		registry.registerTransport(missionControl);
+		registry.registerTransport(telegram);
+		registry.attachTransport('session-1', missionControl.id);
+		registry.attachTransport('session-1', telegram.id);
+
+		const result = await registry.requestExitPlanMode('session-1', {
+			requestId: 'plan-1',
+			summary: 'Plan ready',
+			actions: ['interactive'],
+		}, CancellationToken.None);
+
+		expect(result).toEqual({ approved: false, feedback: 'Revise the tests' });
+		expect(missionControlCancelled).toBe(true);
+	});
+
 	it('only trusts origins created by this registry instance', () => {
 		const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
 		const trusted = registry.createMissionControlOrigin('command-1', 'plan');
@@ -165,6 +215,18 @@ describe('RemoteControlRegistry', () => {
 
 		expect(registry.getValidatedMissionControlMode(trusted)).toBe('plan');
 		expect(registry.getValidatedMissionControlMode(forged)).toBeUndefined();
+	});
+
+	it('trusts only non-elevating Telegram modes created by the registry', () => {
+		const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
+		const plan = registry.createTelegramOrigin('update-1', 'plan');
+		const interactive = registry.createTelegramOrigin('update-2');
+		const forged = { ...plan } as RemoteRequestOrigin;
+
+		expect(registry.getValidatedRemoteMode(plan)).toBe('plan');
+		expect(registry.getValidatedRemoteMode(interactive)).toBe('interactive');
+		expect(registry.getValidatedRemoteMode(forged)).toBeUndefined();
+		expect(() => registry.createTelegramOrigin('update-3', 'autopilot' as never)).toThrow();
 	});
 
 	it('aborts only an already-bound live wrapper and reports whether one existed', async () => {

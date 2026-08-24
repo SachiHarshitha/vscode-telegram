@@ -210,11 +210,12 @@ Recommended sequence:
 
 No Tailscale or inbound firewall configuration is required for the default long-polling mode.
 
-Current Phase 5.3 behavior is deliberately conservative:
+Current Phase 6 behavior is deliberately conservative:
 
 - only sessions whose valid file-URI working directory is inside a root of the currently consented window are shown or controllable;
 - an empty window, missing working directory or foreign/sibling workspace fails closed; cross-workspace local approval is not implemented yet;
 - permission prompts expose only per-request **Approve once** and **Deny** controls; Telegram cannot change the permission policy;
+- plan review exposes only **Implement Plan**, **Approve Plan Only**, **Reject Plan**, and reply-bound feedback; remote clients cannot select autopilot modes;
 - SDK-visible activity is converted into bounded, redacted semantic rounds; no hidden model chain-of-thought is exposed;
 - each meaningful round is one expandable Telegram Rich Message, and running tool rounds are edited in place.
 
@@ -239,6 +240,23 @@ cd extensions/copilot
 ```
 
 This runner currently covers 25 files / 232 tests using only fake credentials and in-memory Telegram hosts. It does not read `.env` or contact the real Bot API. Real-bot verification remains a separate human checklist in [TEST_STRATEGY.md](./TEST_STRATEGY.md#13-manual-smoke-test-script).
+
+### Phase 6 deterministic regression test
+
+From the Copilot extension directory:
+
+```powershell
+cd extensions/copilot
+.\script\telegram-remote\test-phase6.ps1
+```
+
+This current runner covers 27 Telegram Remote files / 169 tests plus 14 focused Copilot CLI plan-response tests. It uses no persistent token and makes no Telegram or Mission Control network request.
+
+### Configured Agent Chat models
+
+Models configured through the Agent Chat picker are read from VS Code's active language-model registry (the profile resource is `chatLanguageModels.json`). A chat debug `models.json` snapshot is diagnostic output, not the configuration source. Restart or reload the development window after changing provider configuration, then use `/models`; the Telegram picker paginates the complete merged native/configured catalogue.
+
+Configured model credentials remain owned by their VS Code provider. Telegram Remote retains only the opaque selected model identity and routes inference through the local authenticated bridge; it does not read or copy provider API keys.
 
 ### Phase 2 developer smoke test
 

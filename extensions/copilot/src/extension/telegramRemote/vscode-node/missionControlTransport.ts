@@ -22,6 +22,8 @@ import {
 	IRemoteControlRegistry,
 	IRemoteControlSessionEvent,
 	IRemoteControlTransport,
+	IRemoteExitPlanModeRequest,
+	IRemoteExitPlanModeResponse,
 	IRemotePermissionRequest,
 	IRemoteUserInputRequest,
 	IRemoteUserInputResponse,
@@ -51,6 +53,14 @@ interface IMissionControlPendingUserInput {
 	resolve(result: IRemoteUserInputResponse | undefined): void;
 }
 
+interface IMissionControlPendingExitPlanMode {
+	readonly sessionId: string;
+	readonly requestId: string;
+	readonly toolCallId?: string;
+	readonly actions: IRemoteExitPlanModeRequest['actions'];
+	resolve(result: IRemoteExitPlanModeResponse | undefined): void;
+}
+
 interface IMissionControlState {
 	readonly sessionId: string;
 	readonly mcSessionId: string;
@@ -60,6 +70,7 @@ interface IMissionControlState {
 	readonly pendingCommandCompletionIds: Set<string>;
 	readonly pendingPermissionRequests: Map<string, IMissionControlPendingPermission>;
 	readonly pendingUserInputRequests: Set<IMissionControlPendingUserInput>;
+	readonly pendingExitPlanModeRequests: Set<IMissionControlPendingExitPlanMode>;
 	attachment: IDisposable;
 	frontendUrl?: string;
 	mode?: RemoteControlMode;
@@ -86,6 +97,15 @@ interface IMissionControlUserInputResponseData {
 	readonly selected?: readonly string[];
 	readonly skipped?: boolean;
 	readonly response?: IMissionControlUserInputResponseData;
+}
+
+interface IMissionControlExitPlanModeResponseData {
+	readonly requestId?: string;
+	readonly promptId?: string;
+	readonly toolCallId?: string;
+	readonly approved?: boolean;
+	readonly selectedAction?: string;
+	readonly feedback?: string;
 }
 
 const skippedEventTypes = new Set([
@@ -220,6 +240,42 @@ export class MissionControlTransport extends Disposable implements IRemoteContro
 		});
 	}
 
+	requestExitPlanMode(sessionId: string, request: IRemoteExitPlanModeRequest, token: CancellationToken): Promise<IRemoteExitPlanModeResponse | undefined> {
+		const state = this.states.get(sessionId);
+		if (!state) {
+			return Promise.resolve(undefined);
+		}
+		return new Promise(resolve => {
+			let settled = false;
+			let cancellationListener: IDisposable = Disposable.None;
+			const pending: IMissionControlPendingExitPlanMode = {
+				sessionId,
+				requestId: request.requestId,
+				toolCallId: request.toolCallId,
+				actions: request.actions,
+				resolve: result => {
+					if (settled) {
+						return;
+					}
+					settled = true;
+					state.pendingExitPlanModeRequests.delete(pending);
+					cancellationListener.dispose();
+					resolve(result);
+				},
+			};
+			cancellationListener = token.onCancellationRequested(() => pending.resolve(undefined));
+			if (settled) {
+				cancellationListener.dispose();
+				return;
+			}
+			if (token.isCancellationRequested) {
+				pending.resolve(undefined);
+				return;
+			}
+			state.pendingExitPlanModeRequests.add(pending);
+		});
+	}
+
 	private async handleRemoteCommand(context: IRemoteCommandContext): Promise<void> {
 		if (!this.configurationService.getConfig(ConfigKey.Advanced.CLIRemoteEnabled)) {
 			context.output.markdown(l10n.t('The /remote command is not enabled. Set `github.copilot.chat.cli.remote.enabled` to `true` in settings to use it.'));
@@ -290,6 +346,7 @@ export class MissionControlTransport extends Disposable implements IRemoteContro
 				pendingCommandCompletionIds: new Set(),
 				pendingPermissionRequests: new Map(),
 				pendingUserInputRequests: new Set(),
+				pendingExitPlanModeRequests: new Set(),
 				attachment: toDisposable(() => { }),
 				lastEventId: null,
 				lastSubmitAttemptTimeMs: Date.now(),
@@ -405,6 +462,9 @@ export class MissionControlTransport extends Disposable implements IRemoteContro
 		for (const pending of state.pendingUserInputRequests) {
 			pending.resolve(undefined);
 		}
+		for (const pending of state.pendingExitPlanModeRequests) {
+			pending.resolve(undefined);
+		}
 		this.bufferSyntheticEvent(state, 'session.remote_steerable_changed', { remoteSteerable: false });
 		this.bufferSyntheticEvent(state, 'session.idle', {});
 		await this.flushEvents(state);
@@ -475,6 +535,10 @@ export class MissionControlTransport extends Disposable implements IRemoteContro
 					this.acceptUserInputResponse(state, command);
 					state.completedCommandIds.push(command.id);
 					break;
+				case 'exit_plan_mode_response':
+					this.acceptExitPlanModeResponse(state, command);
+					state.completedCommandIds.push(command.id);
+					break;
 				case 'user_message':
 				default: {
 					state.pendingCommandCompletionIds.add(command.id);
@@ -521,11 +585,37 @@ export class MissionControlTransport extends Disposable implements IRemoteContro
 		pending.resolve(toUserInputResponse(payload, command.content));
 	}
 
+	private acceptExitPlanModeResponse(state: IMissionControlState, command: McCommand): void {
+		const payload = parseJsonCommand<IMissionControlExitPlanModeResponseData>(command, this.logService);
+		const pending = [...state.pendingExitPlanModeRequests].find(candidate =>
+			candidate.sessionId === state.sessionId &&
+			(payload?.requestId ?? payload?.promptId) === candidate.requestId &&
+			payload?.toolCallId === candidate.toolCallId
+		);
+		if (!pending || typeof payload?.approved !== 'boolean') {
+			this.logService.warn(`[MissionControlTransport] Ignoring stale plan-exit response ${command.id}`);
+			return;
+		}
+		const feedback = typeof payload.feedback === 'string' ? payload.feedback.trim().slice(0, 4_096) || undefined : undefined;
+		if (!payload.approved) {
+			pending.resolve({ approved: false, feedback });
+			return;
+		}
+		if ((payload.selectedAction !== 'interactive' && payload.selectedAction !== 'exit_only') || !pending.actions.includes(payload.selectedAction)) {
+			this.logService.warn(`[MissionControlTransport] Ignoring unsafe plan-exit action for ${command.id}`);
+			return;
+		}
+		pending.resolve({ approved: true, selectedAction: payload.selectedAction });
+	}
+
 	private cancelPendingResponses(state: IMissionControlState): void {
 		for (const pending of state.pendingPermissionRequests.values()) {
 			pending.resolve(undefined);
 		}
 		for (const pending of state.pendingUserInputRequests) {
+			pending.resolve(undefined);
+		}
+		for (const pending of state.pendingExitPlanModeRequests) {
 			pending.resolve(undefined);
 		}
 	}

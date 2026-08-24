@@ -13,6 +13,7 @@ import {
 	setPendingCopilotCLIRequestContext,
 } from '../../chatSessions/copilotcli/common/pendingRequestContext';
 import type { RemoteRequestOrigin } from '../common/remoteControlTypes';
+import { TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY, type TelegramModelSource } from '../common/telegramLanguageModelBridgeTypes';
 import { SessionIdForCLI } from '../../chatSessions/copilotcli/common/utils';
 
 export interface IRemotePromptDispatchResult {
@@ -21,9 +22,15 @@ export interface IRemotePromptDispatchResult {
 	readonly completion: Promise<void>;
 }
 
+export interface IRemotePromptRequestOptions {
+	readonly modelId?: string;
+	readonly modelSource?: TelegramModelSource;
+	readonly reasoningEffort?: string;
+}
+
 export interface IRemotePromptDispatcher {
 	readonly _serviceBrand: undefined;
-	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin): IRemotePromptDispatchResult;
+	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: IRemotePromptRequestOptions): IRemotePromptDispatchResult;
 }
 
 export const IRemotePromptDispatcher = createServiceIdentifier<IRemotePromptDispatcher>('IRemotePromptDispatcher');
@@ -35,7 +42,7 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 		@ILogService private readonly logService: ILogService,
 	) { }
 
-	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin): IRemotePromptDispatchResult {
+	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: IRemotePromptRequestOptions): IRemotePromptDispatchResult {
 		const correlationId = createPendingCopilotCLIRequestCorrelationId();
 		const marker = createPendingCopilotCLIRequestMarker(correlationId);
 		const source: `command-${string}` | undefined = origin.kind === 'missionControl'
@@ -51,6 +58,11 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 
 		let dispatched: Thenable<unknown>;
 		try {
+			const isVSCodeModel = options?.modelSource === 'vscode-lm';
+			const modelConfiguration = {
+				...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+				...(isVSCodeModel && options.modelId ? { [TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY]: options.modelId } : {}),
+			};
 			dispatched = vscode.commands.executeCommand(
 				'workbench.action.chat.openSessionWithPrompt.copilotcli',
 				{
@@ -58,6 +70,8 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 					prompt,
 					queue: 'steering',
 					attachedContext: [marker],
+					userSelectedModelId: options?.modelId && !isVSCodeModel ? `copilotcli/${options.modelId}` : undefined,
+					userSelectedModelConfiguration: Object.keys(modelConfiguration).length ? modelConfiguration : undefined,
 				}
 			);
 		} catch (error) {

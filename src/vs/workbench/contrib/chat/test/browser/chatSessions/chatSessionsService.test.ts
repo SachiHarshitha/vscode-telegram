@@ -11,7 +11,7 @@ import { ContextKeyService } from '../../../../../../platform/contextkey/browser
 import { ContextKeyExpr, IContextKey, RawContextKey } from '../../../../../../platform/contextkey/common/contextkey.js';
 import { TestConfigurationService } from '../../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
-import { applyCodexAgentHostPreference, ChatSessionsService, getChatSessionPromptQueueKind, waitForChatSessionPromptResult } from '../../../browser/chatSessions/chatSessions.contribution.js';
+import { applyCodexAgentHostPreference, ChatSessionsService, getChatSessionPromptQueueKind, getChatSessionPromptSendOptions, waitForChatSessionPromptResult } from '../../../browser/chatSessions/chatSessions.contribution.js';
 import { ChatSessionOptionsMap, IChatSessionHistoryItem, IChatSessionItem, IChatSessionItemController, IChatSessionItemsDelta, IChatSessionsExtensionPoint, ReadonlyChatSessionOptionsMap, SessionType } from '../../../common/chatSessionsService.js';
 import { workbenchInstantiationService } from '../../../../../test/browser/workbenchTestServices.js';
 import { AGENT_HOST_ENABLED_CONTEXT_KEY } from '../../../../../../platform/agentHost/common/agentHostEnablementService.js';
@@ -21,11 +21,30 @@ import { IsSessionsWindowContext } from '../../../../../common/contextkeys.js';
 import { ChatRequestQueueKind, type ChatSendResult } from '../../../common/chatService/chatService.js';
 
 suite('Chat session native prompt submission', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('maps explicit queue options to the chat service queue kind', () => {
 		assert.strictEqual(getChatSessionPromptQueueKind(undefined), undefined);
 		assert.strictEqual(getChatSessionPromptQueueKind('queued'), ChatRequestQueueKind.Queued);
 		assert.strictEqual(getChatSessionPromptQueueKind('steering'), ChatRequestQueueKind.Steering);
+	});
+
+	test('forwards external model configuration into native chat send options', () => {
+		const options = getChatSessionPromptSendOptions('copilotcli', {
+			resource: URI.parse('vscode-chat-session://copilotcli/session-1'),
+			prompt: 'plan this change',
+			queue: 'steering',
+			userSelectedModelId: 'copilotcli/claude-sonnet',
+			userSelectedModelConfiguration: { reasoningEffort: 'high' },
+		}, undefined);
+
+		assert.deepStrictEqual(options, {
+			agentIdSilent: 'copilotcli',
+			attachedContext: undefined,
+			queue: ChatRequestQueueKind.Steering,
+			userSelectedModelId: 'copilotcli/claude-sonnet',
+			userSelectedModelConfiguration: { reasoningEffort: 'high' },
+		});
 	});
 
 	test('waits for sent completion and surfaces immediate and deferred rejection', async () => {

@@ -46,9 +46,13 @@ import { CopilotCLIContrib, getServices } from '../copilotcli/vscode-node/contri
 import { MissionControlTransport } from '../../telegramRemote/vscode-node/missionControlTransport';
 import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../telegramRemote/vscode-node/remotePromptDispatcher';
 import { IRemoteControlRegistry } from '../../telegramRemote/common/remoteControlTypes';
+import { ITelegramLanguageModelBridge } from '../../telegramRemote/common/telegramLanguageModelBridgeTypes';
+import { TelegramLanguageModelBridge } from '../../telegramRemote/vscode-node/telegramLanguageModelBridge';
 import { TelegramRemoteContribution } from '../../telegramRemote/vscode-node/telegramRemoteContribution';
 import { TelegramCommandRouter } from '../../telegramRemote/node/telegramCommandRouter';
 import { TelegramActivityTimeline } from '../../telegramRemote/node/telegramActivityTimeline';
+import { TelegramPlanBridge } from '../../telegramRemote/node/telegramPlanBridge';
+import { TelegramRequestPreferences } from '../../telegramRemote/node/telegramRequestPreferences';
 import { TelegramSessionState } from '../../telegramRemote/node/telegramSessionState';
 import { getTelegramRemoteEnvironment } from '../../telegramRemote/vscode-node/telegramRemoteEnvironment';
 import { CurrentWorkspaceTelegramSessionScopePolicy } from '../../telegramRemote/vscode-node/telegramSessionScope';
@@ -159,6 +163,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 				[IPullRequestDetectionService, new SyncDescriptor(PullRequestDetectionService)],
 				[ISessionOptionGroupBuilder, new SyncDescriptor(SessionOptionGroupBuilder)],
 				[ISessionRequestLifecycle, new SyncDescriptor(SessionRequestLifecycle)],
+				[ITelegramLanguageModelBridge, new SyncDescriptor(TelegramLanguageModelBridge, [vscode.lm])],
 				[ICopilotCLIChatSessionInitializer, new SyncDescriptor(CopilotCLIChatSessionInitializer)],
 				...getServices()
 			));
@@ -230,6 +235,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 		const telegramSessionState = this._register(instantiationService.createInstance(TelegramSessionState, telegramEnvironment.consentScopeFingerprint));
 		const sessionService = instantiationService.invokeFunction(accessor => accessor.get(ICopilotCLISessionService));
 		const registry = instantiationService.invokeFunction(accessor => accessor.get(IRemoteControlRegistry));
+		const models = this._register(instantiationService.invokeFunction(accessor => accessor.get(ITelegramLanguageModelBridge)));
 		const configurationService = instantiationService.invokeFunction(accessor => accessor.get(IConfigurationService));
 		const sessionScopePolicy = new CurrentWorkspaceTelegramSessionScopePolicy(telegramEnvironment.consentScopeFingerprint);
 		const telegramCommandEnvironment = {
@@ -246,7 +252,21 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			() => configurationService.getConfig(ConfigKey.Advanced.CLITelegramActivityDetail),
 			undefined,
 		));
-		this._register(telegramContribution.transport.setEventPublisher(activityTimeline));
+		const telegramPlanBridge = this._register(instantiationService.createInstance(
+			TelegramPlanBridge,
+			telegramContribution,
+			telegramSessionState,
+			sessionService,
+			sessionScopePolicy,
+		));
+		this._register(activityTimeline.setPlanInteractionHandler(telegramPlanBridge));
+		this._register(telegramContribution.transport.setEventPublisher({
+			publish: (sessionId, event) => activityTimeline.publish(sessionId, event),
+			requestPermission: (sessionId, request, token) => activityTimeline.requestPermission(sessionId, request, token),
+			requestUserInput: (sessionId, request, token) => activityTimeline.requestUserInput(sessionId, request, token),
+			requestExitPlanMode: (sessionId, request, token) => telegramPlanBridge.requestExitPlanMode(sessionId, request, token),
+		}));
+		const requestPreferences = new TelegramRequestPreferences(models, sessionService, registry, configurationService, logService);
 		this._register(instantiationService.createInstance(
 			TelegramCommandRouter,
 			telegramContribution,
@@ -260,10 +280,11 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			telegramCommandEnvironment,
 			sessionScopePolicy,
 			activityTimeline,
+			requestPreferences,
 		));
 		const telegramSetupWizard = this._register(instantiationService.createInstance(TelegramSetupWizard, telegramContribution));
 		this._register(instantiationService.createInstance(TelegramStatusBar, telegramContribution, telegramSetupWizard));
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=5.3; remote-control-registry=ready; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-routing=authorized-only; telegram-activity=rich-timeline; telegram-network=consent-gated`);
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=7; remote-control-registry=ready; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-routing=authorized-only; telegram-activity=rich-timeline; telegram-plan-response=safe-actions-only; telegram-models=combined-vscode-lm-bridge; telegram-modes=non-elevating; telegram-network=consent-gated`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

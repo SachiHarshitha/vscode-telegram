@@ -4,7 +4,7 @@
 >
 > Baseline validated against VS Code/Copilot source commit `58af001e0c7b342016db51cef2a026c7791f5d58` (August 2026).
 
-Phases 0-5.3 are implemented. Telegram networking is gated by versioned token-and-workspace consent, private-chat numeric authorization and native setup/enable/reconnect/kill-switch controls. An authorized chat can list, create and select controller sessions whose working directory is inside a root of the currently consented VS Code window; send native prompts and steering; stop its current Telegram-started task; answer per-request permissions/questions; and follow a granular Rich Message activity timeline. Each meaningful activity round owns one expandable Telegram bubble, and running rounds are edited in place.
+Phases 0-7 are implemented. Telegram networking is gated by versioned token-and-workspace consent, private-chat numeric authorization and native setup/enable/reconnect/kill-switch controls. An authorized chat can list, create and select controller sessions whose working directory is inside a root of the currently consented VS Code window; send native prompts and steering; stop its current Telegram-started task; answer per-request permissions/questions/plan approvals; select native or configured Agent Chat models and supported reasoning effort; and follow a granular Rich Message activity timeline. Plan approval is limited to `interactive` or `exit_only`; Telegram and Mission Control cannot select `autopilot` or `autopilot_fleet` through the plan-response bridge.
 
 For the Phase 2 mock and opt-in real-bot tests, see [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md#real-bot-smoke-test) or run `script/telegram-remote/test-phase2.ps1` from the Copilot extension directory.
 
@@ -14,7 +14,7 @@ For the complete consent, visibility and Phase 4 routing regression suite, run `
 
 For the complete Phase 5 event projection/activity suite, run `script/telegram-remote/test-phase5.ps1` from the Copilot extension directory. It includes all Phase 4 regressions and uses deterministic in-memory Telegram activity tests only.
 
-For the current deterministic Telegram regression suite, run `npx vitest run src/extension/telegramRemote` from the Copilot extension directory. The Phase 5.3 source-level record is 26 files / 148 tests. It does not read `.env` or contact Telegram.
+For the current deterministic suite, run `script/telegram-remote/test-phase7.ps1` from the Copilot extension directory. It covers the Telegram Remote aggregate, combined/paginated native and configured model catalogue, authenticated VS Code-LM bridge, native model/reasoning pipeline, inactive model inspection, safe mode provenance, and the targeted workbench command seam. It does not read `.env` or contact Telegram.
 
 ## Purpose
 
@@ -57,6 +57,7 @@ flowchart LR
     TG[Telegram Client] <-->|Bot API / long polling| TA[TelegramTransport]
     GH[GitHub web/mobile] <--> MC[MissionControlTransport]
     TA <--> TL[ActivityAggregator / Rich timeline]
+    TA <--> PB[TelegramPlanBridge]
     TL <--> RC[RemoteControlRegistry]
     MC <--> RC
     RC <--> CS[CopilotCLISession]
@@ -92,7 +93,7 @@ V1 targets **VS Code Desktop with a local extension host** and Telegram long pol
 - Session discovery, selection, creation and resume.
 - Prompting and mid-turn steering.
 - Live agent activity projection.
-- Approve-once/deny permission responses and choice/freeform user-question responses from Telegram, raced with the existing local/Mission Control paths.
+- Approve-once/deny permission responses, choice/freeform user-question responses, and non-elevating plan-exit responses from Telegram, raced with the existing local/Mission Control paths.
 - Abort/stop.
 - Mode and model selection where the underlying session supports it.
 - Workspace/session metadata.

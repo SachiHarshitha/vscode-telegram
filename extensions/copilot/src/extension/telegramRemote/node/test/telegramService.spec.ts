@@ -93,6 +93,7 @@ describe('TelegramService', () => {
 	beforeEach(async () => {
 		storageRoot = await mkdtemp(join(tmpdir(), 'telegram-service-'));
 		logService = new class extends mock<ILogService>() {
+			override info = vi.fn();
 			override warn = vi.fn();
 		};
 	});

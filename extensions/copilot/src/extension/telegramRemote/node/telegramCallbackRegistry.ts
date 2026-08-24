@@ -19,6 +19,9 @@ const allowedCallbackActions = new Set<TelegramCallbackAction>([
 	'permission.approveOnce',
 	'permission.deny',
 	'input.choice',
+	'plan.interactive',
+	'plan.exitOnly',
+	'plan.deny',
 	'model.select',
 	'mode.select',
 ]);
@@ -31,6 +34,9 @@ export type TelegramCallbackAction =
 	| 'permission.approveOnce'
 	| 'permission.deny'
 	| 'input.choice'
+	| 'plan.interactive'
+	| 'plan.exitOnly'
+	| 'plan.deny'
 	| 'model.select'
 	| 'mode.select';
 

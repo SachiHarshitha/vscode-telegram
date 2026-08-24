@@ -16,11 +16,14 @@ import {
 	IRemoteControlSession,
 	IRemoteControlSessionEvent,
 	IRemoteControlTransport,
+	IRemoteExitPlanModeRequest,
+	IRemoteExitPlanModeResponse,
 	IRemotePermissionRequest,
 	IRemoteUserInputRequest,
 	IRemoteUserInputResponse,
 	RemoteCommandHandler,
 	RemoteControlMode,
+	RemoteNonElevatingMode,
 	RemotePermissionResult,
 	RemoteRequestOrigin,
 } from '../common/remoteControlTypes';
@@ -263,14 +266,26 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		return origin;
 	}
 
-	createTelegramOrigin(updateId: string): RemoteRequestOrigin {
-		const origin: RemoteRequestOrigin = Object.freeze({ kind: 'telegram', transportId: 'telegram', updateId });
+	createTelegramOrigin(updateId: string, mode: RemoteNonElevatingMode = 'interactive'): RemoteRequestOrigin {
+		if (mode !== 'interactive' && mode !== 'plan') {
+			throw new Error('Telegram cannot create a permission-elevating request origin.');
+		}
+		const origin: RemoteRequestOrigin = Object.freeze({ kind: 'telegram', transportId: 'telegram', updateId, mode });
 		this.trustedOrigins.add(origin);
 		return origin;
 	}
 
 	getValidatedMissionControlMode(origin: RemoteRequestOrigin | undefined): RemoteControlMode | undefined {
 		return origin && this.trustedOrigins.has(origin) && origin.kind === 'missionControl' ? origin.mode : undefined;
+	}
+
+	getValidatedRemoteMode(origin: RemoteRequestOrigin | undefined): RemoteControlMode | undefined {
+		if (!origin || !this.trustedOrigins.has(origin)) {
+			return undefined;
+		}
+		return origin.kind === 'telegram'
+			? (origin.mode === 'plan' || origin.mode === 'interactive' ? origin.mode : undefined)
+			: origin.mode;
 	}
 
 	requestPermission(sessionId: string, request: IRemotePermissionRequest, token: CancellationToken): Promise<RemotePermissionResult | undefined> {
@@ -285,6 +300,14 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		return this.firstValidResponse(
 			sessionId,
 			transport => transport.requestUserInput ? childToken => transport.requestUserInput!(sessionId, request, childToken) : undefined,
+			token,
+		);
+	}
+
+	requestExitPlanMode(sessionId: string, request: IRemoteExitPlanModeRequest, token: CancellationToken): Promise<IRemoteExitPlanModeResponse | undefined> {
+		return this.firstValidResponse(
+			sessionId,
+			transport => transport.requestExitPlanMode ? async childToken => sanitizeExitPlanModeResponse(request, await transport.requestExitPlanMode!(sessionId, request, childToken)) : undefined,
 			token,
 		);
 	}
@@ -460,4 +483,18 @@ export class RemoteControlRegistry extends Disposable implements IRemoteControlR
 		this.transports.clear();
 		super.dispose();
 	}
+}
+
+function sanitizeExitPlanModeResponse(request: IRemoteExitPlanModeRequest, response: IRemoteExitPlanModeResponse | undefined): IRemoteExitPlanModeResponse | undefined {
+	if (!response || typeof response.approved !== 'boolean') {
+		return undefined;
+	}
+	const feedback = typeof response.feedback === 'string' ? response.feedback.trim().slice(0, 4_096) || undefined : undefined;
+	if (!response.approved) {
+		return { approved: false, feedback };
+	}
+	if ((response.selectedAction !== 'interactive' && response.selectedAction !== 'exit_only') || !request.actions.includes(response.selectedAction)) {
+		return undefined;
+	}
+	return { approved: true, selectedAction: response.selectedAction };
 }

@@ -18,6 +18,7 @@ import { ActivityAggregator } from './activityAggregator';
 import type { TelegramPairedIdentity } from './telegramAuthorization';
 import type { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration } from './telegramCallbackRegistry';
 import type { TelegramActivityReplyResolution, TelegramRequestActivity, TelegramRequestTerminalEvent } from './telegramCommandRouter';
+import type { TelegramPlanInteractionHandler } from './telegramPlanBridge';
 import { renderTelegramActivityRound, type TelegramRichActivityDetail } from './telegramRichRenderer';
 import { TelegramSessionState } from './telegramSessionState';
 
@@ -110,6 +111,7 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 	private readonly correlations = new Map<string, ActivityCorrelation>();
 	private readonly pendingPermissions = new Map<string, PendingInteraction<RemotePermissionResult>>();
 	private readonly pendingQuestions = new Map<string, PendingInteraction<IRemoteUserInputResponse>>();
+	private planInteractionHandler: TelegramPlanInteractionHandler | undefined;
 	private activeState: TimelineState | undefined;
 	private generation = 0;
 	private deliveryQueue = Promise.resolve();
@@ -131,6 +133,18 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 				this.dropActiveState(true);
 			}
 		}));
+	}
+
+	setPlanInteractionHandler(handler: TelegramPlanInteractionHandler): IDisposable {
+		if (this.planInteractionHandler) {
+			throw new Error('A Telegram plan interaction handler is already registered.');
+		}
+		this.planInteractionHandler = handler;
+		return toDisposable(() => {
+			if (this.planInteractionHandler === handler) {
+				this.planInteractionHandler = undefined;
+			}
+		});
 	}
 
 	async beginRequest(identity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, replyMarkup: TelegramInlineKeyboardMarkup): Promise<{ readonly generation: number; readonly messageId: number } | undefined> {
@@ -310,7 +324,13 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 
 	async handleCallback(update: TelegramUpdate, identity: TelegramPairedIdentity): Promise<boolean> {
 		const context = this.host.consumeCallback(update);
-		if (!context || (context.action !== 'permission.approveOnce' && context.action !== 'permission.deny' && context.action !== 'input.choice')) {
+		if (!context) {
+			return false;
+		}
+		if (this.planInteractionHandler && await this.planInteractionHandler.handlePlanCallback(update, identity, context)) {
+			return true;
+		}
+		if (context.action !== 'permission.approveOnce' && context.action !== 'permission.deny' && context.action !== 'input.choice') {
 			return false;
 		}
 		const callbackId = update.callback_query?.id;
@@ -339,6 +359,12 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 	}
 
 	async resolveReply(update: TelegramUpdate, identity: TelegramPairedIdentity): Promise<TelegramActivityReplyResolution> {
+		if (this.planInteractionHandler) {
+			const planReply = await this.planInteractionHandler.resolvePlanReply(update, identity);
+			if (planReply.kind !== 'none') {
+				return planReply;
+			}
+		}
 		const replyMessageId = update.message?.reply_to_message?.message_id;
 		const text = update.message?.text?.trim();
 		if (replyMessageId === undefined || !text) {

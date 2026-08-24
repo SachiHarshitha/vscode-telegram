@@ -12,6 +12,7 @@ import type { IWorkspaceInfo } from '../../chatSessions/common/workspaceInfo';
 import type { Session } from '../../chatSessions/copilotcli/common/utils';
 
 export type RemoteControlMode = 'plan' | 'autopilot' | 'interactive';
+export type RemoteNonElevatingMode = Exclude<RemoteControlMode, 'autopilot'>;
 
 /**
  * Provenance attached to requests submitted by a remote-control transport.
@@ -29,6 +30,7 @@ export type RemoteRequestOrigin =
 		readonly kind: 'telegram';
 		readonly transportId: 'telegram';
 		readonly updateId: string;
+		readonly mode: RemoteNonElevatingMode;
 	};
 
 export interface IRemoteControlSessionEvent {
@@ -53,6 +55,25 @@ export interface IRemoteUserInputRequest {
 export interface IRemoteUserInputResponse {
 	readonly answer: string;
 	readonly wasFreeform: boolean;
+}
+
+/** Plan-exit actions that preserve the current permission level. */
+export type RemoteExitPlanModeAction = 'interactive' | 'exit_only';
+
+export interface IRemoteExitPlanModeRequest {
+	readonly requestId: string;
+	readonly toolCallId?: string;
+	readonly summary: string;
+	readonly planContent?: string;
+	readonly actions: readonly RemoteExitPlanModeAction[];
+	readonly recommendedAction?: RemoteExitPlanModeAction;
+}
+
+/** A remote plan decision cannot represent permission-elevating SDK fields. */
+export interface IRemoteExitPlanModeResponse {
+	readonly approved: boolean;
+	readonly selectedAction?: RemoteExitPlanModeAction;
+	readonly feedback?: string;
 }
 
 export type RemotePermissionResult = Parameters<Session['respondToPermission']>[1];
@@ -112,6 +133,7 @@ export interface IRemoteControlTransport extends IDisposable {
 	publish(sessionId: string, event: IRemoteControlSessionEvent): void | Promise<void>;
 	requestPermission?(sessionId: string, request: IRemotePermissionRequest, token: CancellationToken): Promise<RemotePermissionResult | undefined>;
 	requestUserInput?(sessionId: string, request: IRemoteUserInputRequest, token: CancellationToken): Promise<IRemoteUserInputResponse | undefined>;
+	requestExitPlanMode?(sessionId: string, request: IRemoteExitPlanModeRequest, token: CancellationToken): Promise<IRemoteExitPlanModeResponse | undefined>;
 }
 
 export interface IRemoteControlRegistry {
@@ -134,11 +156,13 @@ export interface IRemoteControlRegistry {
 	handleCommand(command: string, context: IRemoteCommandContext): Promise<boolean>;
 
 	createMissionControlOrigin(commandId: string, mode?: RemoteControlMode): RemoteRequestOrigin;
-	createTelegramOrigin(updateId: string): RemoteRequestOrigin;
+	createTelegramOrigin(updateId: string, mode?: RemoteNonElevatingMode): RemoteRequestOrigin;
 	getValidatedMissionControlMode(origin: RemoteRequestOrigin | undefined): RemoteControlMode | undefined;
+	getValidatedRemoteMode(origin: RemoteRequestOrigin | undefined): RemoteControlMode | undefined;
 
 	requestPermission(sessionId: string, request: IRemotePermissionRequest, token: CancellationToken): Promise<RemotePermissionResult | undefined>;
 	requestUserInput(sessionId: string, request: IRemoteUserInputRequest, token: CancellationToken): Promise<IRemoteUserInputResponse | undefined>;
+	requestExitPlanMode(sessionId: string, request: IRemoteExitPlanModeRequest, token: CancellationToken): Promise<IRemoteExitPlanModeResponse | undefined>;
 	abort(sessionId: string): Promise<boolean>;
 }
 

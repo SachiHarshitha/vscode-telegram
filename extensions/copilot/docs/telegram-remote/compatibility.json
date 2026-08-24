@@ -81,8 +81,8 @@
     "chatSessionCustomizationProvider"
   ],
   "telegramRemote": {
-    "implementationPhase": 5.3,
-    "patchRevision": 11,
+    "implementationPhase": 7,
+    "patchRevision": 14,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
@@ -105,7 +105,15 @@
     "telegramRichMessagesRegistered": true,
     "activityReplySteeringRegistered": true,
     "remotePermissionResponsesRegistered": true,
-    "remoteUserInputResponsesRegistered": true
+    "remoteUserInputResponsesRegistered": true,
+    "remotePlanExitResponsesRegistered": true,
+    "nativeModelSelectionRegistered": true,
+    "combinedModelCatalogRegistered": true,
+    "vscodeLmModelBridgeRegistered": true,
+    "modelPickerPaginationRegistered": true,
+    "reasoningEffortSelectionRegistered": true,
+    "safeModeSelectionRegistered": true,
+    "byokCompatibilityClaimed": false
   },
   "baselineValidation": {
     "environment": {
@@ -601,6 +609,103 @@
     "realBotRichMessageEndToEnd": {
       "status": "not-run",
       "reason": "The configured private bot/chat and current Telegram client must be exercised manually; automated tests use deterministic Bot API mocks."
+    }
+  },
+  "phase6Validation": {
+    "capturedAt": "2026-08-24",
+    "phase6Runner": {
+      "command": ".\\script\\telegram-remote\\test-phase6.ps1",
+      "status": "passed",
+      "telegramRemoteTestFilesPassed": 27,
+      "telegramRemoteTestsPassed": 169,
+      "focusedCopilotCLISessionTestsPassed": 14
+    },
+    "extensionTypecheck": {
+      "command": "npx tsc --noEmit --project tsconfig.json --pretty false",
+      "status": "passed"
+    },
+    "extensionLint": {
+      "command": "targeted eslint for changed TypeScript files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "extensionBundle": {
+      "command": "npm run compile",
+      "status": "passed",
+      "errors": 0
+    },
+    "coverage": [
+      "single Copilot SDK exit-plan response after local/remote first-valid-response race",
+      "Telegram paired identity, session, request, optional tool-call, message and one-shot nonce correlation",
+      "expired, replayed, wrong-user, wrong-session and wrong-tool callback rejection",
+      "reply-bound bounded plan feedback and exact workspace-scope revalidation",
+      "Mission Control correlated exit_plan_mode_response commands",
+      "compile-time omission and runtime rejection of autopilot, autopilot_fleet and autoApproveEdits remote elevation"
+    ],
+    "realBotPlanExitEndToEnd": {
+      "status": "not-run",
+      "reason": "A configured private bot, selected plan-mode Copilot session and current Telegram client are required; automated tests use deterministic in-memory hosts."
+    }
+  },
+  "phase7Validation": {
+    "capturedAt": "2026-08-24",
+    "phase7Runner": {
+      "command": ".\\script\\telegram-remote\\test-phase7.ps1",
+      "status": "passed",
+      "telegramRemoteTestFilesPassed": 29,
+      "telegramRemoteTestsPassed": 189,
+      "focusedNativeTestFilesPassed": 3,
+      "focusedNativeTestsPassed": 19,
+      "focusedNativeTestsSkipped": 143
+    },
+    "extensionTypecheck": {
+      "command": "npx tsc --noEmit --project tsconfig.json --pretty false",
+      "status": "passed"
+    },
+    "extensionLint": {
+      "command": "targeted eslint for changed extension TypeScript files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "extensionBundle": {
+      "command": "npm run compile",
+      "status": "passed",
+      "errors": 0
+    },
+    "coreWorkbenchBuild": {
+      "command": "npm run gulp compile",
+      "status": "passed",
+      "errors": 0
+    },
+    "coreWorkbenchTests": {
+      "command": ".\\scripts\\test.bat --run src/vs/workbench/contrib/chat/test/browser/chatSessions/chatSessionsService.test.ts",
+      "status": "passed",
+      "testsPassed": 31,
+      "testsPending": 13
+    },
+    "coverage": [
+      "combined ICopilotCLIModels and visible vscode.lm enumeration with provider-qualified opaque callback state",
+      "complete model-picker pagination including configured models beyond the first page",
+      "Telegram-safe structured HTML status and picker cards with escaped dynamic values",
+      "model alias and reasoning-effort validation at selection and immediately before dispatch",
+      "visible stale-catalog failure with no native prompt fallback",
+      "workbench userSelectedModelId and userSelectedModelConfiguration forwarding",
+      "native ChatRequest initializer resolution and SDK setSelectedModel model/effort application",
+      "configured-model private dispatch seam, additive SDK provider registration and idempotent session preservation",
+      "nonce-authenticated 127.0.0.1 Responses proxy invoking the exact VS Code LanguageModelChat without provider credentials",
+      "duplicate/recursive model suppression, group-variant uniqueness and stale custom-model failure without fallback",
+      "active selected-model read without reopen and inactive transient SDK read/close",
+      "actual SDK-selected model and live-mode status after one-request preference consumption",
+      "registry-created Telegram interactive/plan origins and forged/elevating mode rejection"
+    ],
+    "providerCompatibility": {
+      "githubHosted": "native catalogue and request pipeline validated",
+      "byokLocal": "VS Code LM bridge path validated; individual backends not claimed",
+      "reason": "No local/BYOK backend has completed the full prompt, tool, permission, steering and abort matrix."
+    },
+    "realBotModelEndToEnd": {
+      "status": "not-run",
+      "reason": "A configured private bot, selected Copilot session and real configured provider are required; automated tests validate the combined catalogue, authenticated bridge, request translation and SDK registration with deterministic models."
     }
   }
 }

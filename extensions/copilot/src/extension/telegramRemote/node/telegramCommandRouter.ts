@@ -11,17 +11,28 @@ import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
 import { basename } from '../../../util/vs/base/common/resources';
 import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
-import type { IRemoteControlRegistry, RemoteRequestOrigin } from '../common/remoteControlTypes';
+import type { IRemoteControlRegistry, RemoteNonElevatingMode, RemoteRequestOrigin } from '../common/remoteControlTypes';
+import type { TelegramModelSource } from '../common/telegramLanguageModelBridgeTypes';
 import type { TelegramAuthorizedSessionScope, TelegramSessionScopePolicy } from '../common/telegramSessionScope';
 import { TelegramBotApiError, type TelegramAnswerCallbackQueryOptions, type TelegramEditMessageTextOptions, type TelegramInlineKeyboardMarkup, type TelegramMessage, type TelegramSendMessageOptions, type TelegramUpdate } from '../common/telegramTypes';
 import type { TelegramPairedIdentity } from './telegramAuthorization';
 import type { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration } from './telegramCallbackRegistry';
+import { escapeTelegramHtml } from './telegramMarkdown';
+import { formatModel, type TelegramPreferenceValidationError, type TelegramRequestPreferenceController } from './telegramRequestPreferences';
 import { TelegramSessionState } from './telegramSessionState';
 
 const maximumSessionButtons = 30;
+const maximumModelButtonsPerPage = 20;
 const maximumButtonLabelLength = 64;
 const maximumPromptLength = 32_000;
 const emptyInlineKeyboard: TelegramInlineKeyboardMarkup = { inline_keyboard: [] };
+const modelPickerValue = 'picker:model';
+const modePickerValue = 'picker:mode';
+
+type ModelCallbackValue =
+	| { readonly kind: 'model'; readonly modelId: string }
+	| { readonly kind: 'preference'; readonly modelId: string; readonly reasoningEffort?: string }
+	| { readonly kind: 'page'; readonly page: number };
 
 export interface TelegramCommandEnvironment {
 	readonly workstationLabel: string;
@@ -37,7 +48,7 @@ export interface TelegramPromptDispatchResult {
 }
 
 export interface TelegramPromptDispatcher {
-	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin): TelegramPromptDispatchResult;
+	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: { readonly modelId?: string; readonly modelSource?: TelegramModelSource; readonly reasoningEffort?: string }): TelegramPromptDispatchResult;
 }
 
 export interface TelegramSessionCreator {
@@ -106,6 +117,8 @@ interface TrackedStatusMessage {
 export class TelegramCommandRouter extends Disposable {
 	private readonly activePickerRequestIds = new Map<string, string>();
 	private readonly activeNewSessionRequestIds = new Map<string, string>();
+	private readonly activeModelRequestIds = new Map<string, string>();
+	private readonly activeModeRequestIds = new Map<string, string>();
 	private readonly pendingNewSessionPrompts = new Map<string, string | undefined>();
 	private readonly pendingNewSessionRoots = new Map<string, NonNullable<ICopilotCLISessionItem['workingDirectory']>>();
 	private readonly provisionalSessions = new Map<string, ICopilotCLISessionItem>();
@@ -124,6 +137,7 @@ export class TelegramCommandRouter extends Disposable {
 		private readonly environment: TelegramCommandEnvironment,
 		private readonly sessionScopePolicy: TelegramSessionScopePolicy,
 		private readonly activity: TelegramRequestActivity,
+		private readonly requestPreferences: TelegramRequestPreferenceController,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
@@ -161,6 +175,15 @@ export class TelegramCommandRouter extends Disposable {
 				case 'sessions':
 					await this.sendSessionPicker(identity);
 					return;
+				case 'models':
+					await this.sendModelPicker(identity);
+					return;
+				case 'model':
+					await this.handleModelCommand(identity, parseCommandArgument(text));
+					return;
+				case 'mode':
+					await this.handleModeCommand(identity, parseCommandArgument(text));
+					return;
 				case 'deselect':
 					await this.deselect(identity);
 					return;
@@ -168,7 +191,7 @@ export class TelegramCommandRouter extends Disposable {
 					await this.stopActiveDispatch(identity);
 					return;
 				case 'unknown':
-					await this.safeSend(identity.chatId, l10n.t('Unknown Telegram Remote command. Use /start, /new, /status, /sessions, /deselect, or /stop.'));
+					await this.safeSend(identity.chatId, l10n.t('Unknown Telegram Remote command. Use /start, /new, /status, /sessions, /models, /model, /mode, /deselect, or /stop.'));
 					return;
 				case undefined:
 					if (this.activity.resolveReply) {
@@ -253,6 +276,67 @@ export class TelegramCommandRouter extends Disposable {
 				await this.deselect(identity);
 				await this.safeAnswer(callback.id, { text: l10n.t('Session deselected.') });
 				return;
+			}
+		}
+
+		if (selectedSessionId && callbackMessageId !== undefined && statusMessage?.messageId === callbackMessageId && statusMessage.chatId === identity.chatId) {
+			const modelRequestId = this.activeModelRequestIds.get(identity.pairingId);
+			if (modelRequestId) {
+				const selection = this.host.consumeCallback(update, {
+					sessionId: selectedSessionId,
+					requestId: modelRequestId,
+					action: 'model.select',
+				});
+				if (selection) {
+					if (selection.value === modelPickerValue) {
+						this.host.invalidateRequestCallbacks(selectedSessionId, modelRequestId);
+						await this.safeAnswer(callback.id, { text: l10n.t('Choose a model.') });
+						await this.sendModelPicker(identity);
+						return;
+					}
+					const parsed = parseModelCallbackValue(selection.value);
+					if (parsed?.kind === 'page') {
+						this.host.invalidateRequestCallbacks(selectedSessionId, modelRequestId);
+						await this.safeAnswer(callback.id, { text: l10n.t('Model page updated.') });
+						await this.sendModelPicker(identity, parsed.page);
+						return;
+					}
+					const outcome = await this.handleModelCallback(identity, selectedSessionId, modelRequestId, selection.value);
+					await this.safeAnswer(callback.id, outcome === 'updated'
+						? { text: l10n.t('Model preference updated.') }
+						: outcome === 'continued'
+							? { text: l10n.t('Choose reasoning effort.') }
+							: { text: l10n.t('That model choice is stale.'), showAlert: true });
+					return;
+				}
+			}
+
+			const modeRequestId = this.activeModeRequestIds.get(identity.pairingId);
+			if (modeRequestId) {
+				const selection = this.host.consumeCallback(update, {
+					sessionId: selectedSessionId,
+					requestId: modeRequestId,
+					action: 'mode.select',
+				});
+				if (selection) {
+					if (selection.value === modePickerValue) {
+						this.host.invalidateRequestCallbacks(selectedSessionId, modeRequestId);
+						await this.safeAnswer(callback.id, { text: l10n.t('Choose a mode.') });
+						await this.handleModeCommand(identity, undefined);
+						return;
+					}
+					const mode = parseSafeMode(selection.value);
+					if (!mode) {
+						await this.safeAnswer(callback.id, { text: l10n.t('That mode is invalid.'), showAlert: true });
+						return;
+					}
+					this.requestPreferences.setMode(identity, selectedSessionId, mode);
+					this.activeModeRequestIds.delete(identity.pairingId);
+					this.host.invalidateRequestCallbacks(selectedSessionId, modeRequestId);
+					await this.safeAnswer(callback.id, { text: l10n.t('Mode preference updated.') });
+					await this.sendStatus(identity);
+					return;
+				}
 			}
 		}
 
@@ -350,21 +434,22 @@ export class TelegramCommandRouter extends Disposable {
 
 	private async sendStatus(identity: TelegramPairedIdentity): Promise<void> {
 		const selected = await this.getValidSelectedSession(identity);
+		const modelStatus = selected ? await this.requestPreferences.getStatus(identity, selected.item.id) : undefined;
 		const lines = [
-			l10n.t('Telegram Remote'),
-			l10n.t('Workstation: {0}', this.environment.workstationLabel),
-			selected
-				? l10n.t('Authorized workspace: {0}', selected.scope.workingDirectoryLabel)
-				: l10n.t('Authorized workspace scope: {0}', this.environment.workspaceLabel),
-			selected
-				? l10n.t('Session: {0}', selected.item.label)
-				: l10n.t('Session: none selected'),
+			formatSystemTitle('📡', l10n.t('Telegram Remote')),
+			formatSystemField(l10n.t('Workstation'), this.environment.workstationLabel),
+			formatSystemField(selected ? l10n.t('Authorized workspace') : l10n.t('Authorized workspace scope'), selected?.scope.workingDirectoryLabel ?? this.environment.workspaceLabel),
+			formatSystemField(l10n.t('Session'), selected?.item.label ?? l10n.t('None selected')),
+			modelStatus?.selectedModelLabel ? formatSystemField(l10n.t('Model'), modelStatus.selectedModelLabel) : undefined,
+			modelStatus?.currentMode ? formatSystemField(l10n.t('Mode'), modelStatus.currentMode) : undefined,
+			modelStatus?.pending?.modelId ? formatSystemField(l10n.t('Next prompt model'), `${modelStatus.pending.modelId}${modelStatus.pending.reasoningEffort ? ` · ${modelStatus.pending.reasoningEffort}` : ''}`) : undefined,
+			modelStatus?.pending?.mode ? formatSystemField(l10n.t('Next prompt mode'), modelStatus.pending.mode) : undefined,
 			'',
-			this.environment.remotePermissionResponses
-				? l10n.t('Permissions: supported prompts may be answered remotely')
-				: l10n.t('Permissions: approval is required locally in this build'),
-			l10n.t('Commands: /new, /sessions, /status, /deselect, /stop'),
-		];
+			formatSystemField(l10n.t('Permissions'), this.environment.remotePermissionResponses
+				? l10n.t('Supported prompts may be answered remotely')
+				: l10n.t('Approval is required locally in this build')),
+			formatSystemField(l10n.t('Commands'), '/new, /sessions, /models, /model, /mode, /status, /deselect, /stop'),
+		].filter((line): line is string => line !== undefined);
 		let replyMarkup: TelegramInlineKeyboardMarkup | undefined;
 		if (selected) {
 			const revisionId = this.selectionRevisionIds.get(identity.pairingId) ?? this.rotateSelectionRevision(identity);
@@ -374,9 +459,175 @@ export class TelegramCommandRouter extends Disposable {
 				requestId: revisionId,
 				action: 'session.deselect',
 			});
-			replyMarkup = { inline_keyboard: [[{ text: l10n.t('Deselect session'), callback_data: deselect.callbackData }]] };
+			const modelRequestId = randomUUID();
+			const modeRequestId = randomUUID();
+			this.activeModelRequestIds.set(identity.pairingId, modelRequestId);
+			this.activeModeRequestIds.set(identity.pairingId, modeRequestId);
+			const model = this.host.registerCallback({ identity, sessionId: selected.item.id, requestId: modelRequestId, action: 'model.select', value: modelPickerValue });
+			const mode = this.host.registerCallback({ identity, sessionId: selected.item.id, requestId: modeRequestId, action: 'mode.select', value: modePickerValue });
+			replyMarkup = { inline_keyboard: [
+				[
+					{ text: l10n.t('Model'), callback_data: model.callbackData },
+					{ text: l10n.t('Mode'), callback_data: mode.callbackData },
+				],
+				[{ text: l10n.t('Deselect session'), callback_data: deselect.callbackData }],
+			] };
 		}
-		await this.sendOrEditStatus(identity, lines.join('\n'), { replyMarkup });
+		await this.sendOrEditStatus(identity, lines.join('\n'), { parseMode: 'HTML', replyMarkup });
+	}
+
+	private async sendModelPicker(identity: TelegramPairedIdentity, requestedPage = 0): Promise<void> {
+		const selected = await this.getValidSelectedSession(identity);
+		if (!selected) {
+			await this.safeSend(identity.chatId, l10n.t('No Copilot session is selected. Use /sessions before choosing a model.'));
+			return;
+		}
+		const models = await this.requestPreferences.getModels().catch(() => []);
+		if (models.length === 0) {
+			await this.safeSend(identity.chatId, preferenceErrorMessage('catalog-unavailable'));
+			return;
+		}
+		const requestId = randomUUID();
+		this.activeModelRequestIds.set(identity.pairingId, requestId);
+		const pageCount = Math.max(1, Math.ceil(models.length / maximumModelButtonsPerPage));
+		const page = Math.max(0, Math.min(Math.trunc(requestedPage), pageCount - 1));
+		const pageModels = models.slice(page * maximumModelButtonsPerPage, (page + 1) * maximumModelButtonsPerPage);
+		const rows = pageModels.map(model => {
+			const callback = this.host.registerCallback({
+				identity,
+				sessionId: selected.item.id,
+				requestId,
+				action: 'model.select',
+				value: JSON.stringify({ kind: 'model', modelId: model.id } satisfies ModelCallbackValue),
+			});
+			return [{ text: truncate(formatModel(model), maximumButtonLabelLength), callback_data: callback.callbackData }];
+		});
+		if (pageCount > 1) {
+			const navigation = [];
+			if (page > 0) {
+				const previous = this.host.registerCallback({ identity, sessionId: selected.item.id, requestId, action: 'model.select', value: JSON.stringify({ kind: 'page', page: page - 1 } satisfies ModelCallbackValue) });
+				navigation.push({ text: l10n.t('Previous'), callback_data: previous.callbackData });
+			}
+			if (page + 1 < pageCount) {
+				const next = this.host.registerCallback({ identity, sessionId: selected.item.id, requestId, action: 'model.select', value: JSON.stringify({ kind: 'page', page: page + 1 } satisfies ModelCallbackValue) });
+				navigation.push({ text: l10n.t('Next'), callback_data: next.callbackData });
+			}
+			rows.push(navigation);
+		}
+		await this.sendOrEditStatus(identity, [
+			formatSystemTitle('🤖', l10n.t('Choose a model')),
+			escapeTelegramHtml(l10n.t('Select the model for the next Telegram prompt.')),
+			pageCount > 1 ? formatSystemField(l10n.t('Page'), l10n.t('{0} of {1} · {2} models', page + 1, pageCount, models.length)) : undefined,
+		].filter((line): line is string => !!line).join('\n'), { parseMode: 'HTML', replyMarkup: { inline_keyboard: rows } });
+	}
+
+	private async handleModelCommand(identity: TelegramPairedIdentity, argument: string | undefined): Promise<void> {
+		if (!argument) {
+			await this.sendModelPicker(identity);
+			return;
+		}
+		const selected = await this.getValidSelectedSession(identity);
+		if (!selected) {
+			await this.safeSend(identity.chatId, l10n.t('No Copilot session is selected. Use /sessions before choosing a model.'));
+			return;
+		}
+		let result = await this.requestPreferences.setModel(identity, selected.item.id, argument);
+		if (result.kind === 'invalid' && result.error === 'unsupported-model') {
+			const separator = argument.lastIndexOf(' ');
+			if (separator > 0) {
+				result = await this.requestPreferences.setModel(identity, selected.item.id, argument.slice(0, separator).trim(), argument.slice(separator + 1).trim());
+			}
+		}
+		if (result.kind === 'invalid') {
+			await this.safeSend(identity.chatId, preferenceErrorMessage(result.error));
+			return;
+		}
+		await this.sendStatus(identity);
+	}
+
+	private async handleModelCallback(identity: TelegramPairedIdentity, sessionId: string, requestId: string, value: string | undefined): Promise<'updated' | 'continued' | 'invalid'> {
+		const parsed = parseModelCallbackValue(value);
+		if (!parsed) {
+			return 'invalid';
+		}
+		if (parsed.kind === 'page') {
+			return 'invalid';
+		}
+		if (parsed.kind === 'model') {
+			const models = await this.requestPreferences.getModels();
+			const model = models.find(candidate => candidate.id === parsed.modelId);
+			if (!model) {
+				this.activeModelRequestIds.delete(identity.pairingId);
+				this.host.invalidateRequestCallbacks(sessionId, requestId);
+				await this.safeSend(identity.chatId, preferenceErrorMessage('unsupported-model'));
+				return 'invalid';
+			}
+			const efforts = this.requestPreferences.isReasoningEffortSelectionEnabled() && model.supportsReasoningEffort
+				? model.supportedReasoningEfforts ?? []
+				: [];
+			if (efforts.length > 0) {
+				this.host.invalidateRequestCallbacks(sessionId, requestId);
+				const reasoningRequestId = randomUUID();
+				this.activeModelRequestIds.set(identity.pairingId, reasoningRequestId);
+				const choices: Array<{ readonly label: string; readonly effort?: string }> = [
+					{ label: model.defaultReasoningEffort ? l10n.t('Default ({0})', model.defaultReasoningEffort) : l10n.t('Default') },
+					...efforts.map(effort => ({ label: effort, effort })),
+				];
+				const row = choices.map(choice => {
+					const callback = this.host.registerCallback({
+						identity,
+						sessionId,
+						requestId: reasoningRequestId,
+						action: 'model.select',
+						value: JSON.stringify({ kind: 'preference', modelId: model.id, reasoningEffort: choice.effort } satisfies ModelCallbackValue),
+					});
+					return { text: truncate(choice.label, maximumButtonLabelLength), callback_data: callback.callbackData };
+				});
+				await this.sendOrEditStatus(identity, [
+					formatSystemTitle('🧠', l10n.t('Choose reasoning effort')),
+					formatSystemField(l10n.t('Model'), formatModel(model)),
+				].join('\n'), { parseMode: 'HTML', replyMarkup: { inline_keyboard: [row] } });
+				return 'continued';
+			}
+		}
+
+		const result = await this.requestPreferences.setModel(identity, sessionId, parsed.modelId, parsed.kind === 'preference' ? parsed.reasoningEffort : undefined);
+		this.activeModelRequestIds.delete(identity.pairingId);
+		this.host.invalidateRequestCallbacks(sessionId, requestId);
+		if (result.kind === 'invalid') {
+			await this.safeSend(identity.chatId, preferenceErrorMessage(result.error));
+			return 'invalid';
+		}
+		await this.sendStatus(identity);
+		return 'updated';
+	}
+
+	private async handleModeCommand(identity: TelegramPairedIdentity, argument: string | undefined): Promise<void> {
+		const selected = await this.getValidSelectedSession(identity);
+		if (!selected) {
+			await this.safeSend(identity.chatId, l10n.t('No Copilot session is selected. Use /sessions before choosing a mode.'));
+			return;
+		}
+		const mode = parseSafeMode(argument);
+		if (argument && !mode) {
+			await this.safeSend(identity.chatId, l10n.t('Unsupported remote mode. Choose interactive or plan. Autopilot modes cannot be enabled from Telegram.'));
+			return;
+		}
+		if (mode) {
+			this.requestPreferences.setMode(identity, selected.item.id, mode);
+			await this.sendStatus(identity);
+			return;
+		}
+		const requestId = randomUUID();
+		this.activeModeRequestIds.set(identity.pairingId, requestId);
+		const rows = (['interactive', 'plan'] as const).map(candidate => {
+			const callback = this.host.registerCallback({ identity, sessionId: selected.item.id, requestId, action: 'mode.select', value: candidate });
+			return [{ text: candidate === 'interactive' ? l10n.t('Interactive') : l10n.t('Plan'), callback_data: callback.callbackData }];
+		});
+		await this.sendOrEditStatus(identity, [
+			formatSystemTitle('🛡️', l10n.t('Choose a mode')),
+			escapeTelegramHtml(l10n.t('Choose the non-elevating mode for the next Telegram prompt.')),
+		].join('\n'), { parseMode: 'HTML', replyMarkup: { inline_keyboard: rows } });
 	}
 
 	private async sendSessionPicker(identity: TelegramPairedIdentity): Promise<void> {
@@ -399,12 +650,12 @@ export class TelegramCommandRouter extends Disposable {
 		});
 		const omitted = sessions.length - rows.length;
 		const text = [
-			l10n.t('Select a Copilot session.'),
-			l10n.t('Workstation: {0}', this.environment.workstationLabel),
-			l10n.t('Workspace: {0}', this.environment.workspaceLabel),
-			omitted > 0 ? l10n.t('{0} additional sessions are not shown.', omitted) : undefined,
+			formatSystemTitle('🧭', l10n.t('Select a Copilot session')),
+			formatSystemField(l10n.t('Workstation'), this.environment.workstationLabel),
+			formatSystemField(l10n.t('Workspace'), this.environment.workspaceLabel),
+			omitted > 0 ? escapeTelegramHtml(l10n.t('{0} additional sessions are not shown.', omitted)) : undefined,
 		].filter((line): line is string => !!line).join('\n');
-		await this.sendOrEditStatus(identity, text, { replyMarkup: { inline_keyboard: rows } });
+		await this.sendOrEditStatus(identity, text, { parseMode: 'HTML', replyMarkup: { inline_keyboard: rows } });
 	}
 
 	private async selectSession(identity: TelegramPairedIdentity, sessionId: string): Promise<boolean> {
@@ -446,13 +697,21 @@ export class TelegramCommandRouter extends Disposable {
 			await this.safeSend(identity.chatId, l10n.t('No Copilot session is selected. Use /sessions before sending a prompt.'));
 			return;
 		}
+		const preference = await this.requestPreferences.consumeForDispatch(identity, selected.item.id);
+		if (preference.kind === 'invalid') {
+			await this.safeSend(identity.chatId, preferenceErrorMessage(preference.error));
+			return;
+		}
 
 		const previous = this.activeDispatches.get(identity.pairingId);
 		if (previous) {
 			this.host.invalidateRequestCallbacks(previous.sessionId, previous.requestId);
 			await this.activity.completeRequest(identity, previous.sessionId, previous.requestId, 'superseded');
 		}
-		const result = this.promptDispatcher.dispatch(selected.item.id, prompt, this.registry.createTelegramOrigin(String(update.update_id)));
+		const origin = this.registry.createTelegramOrigin(String(update.update_id), preference.value.mode);
+		const result = preference.value.modelId
+			? this.promptDispatcher.dispatch(selected.item.id, prompt, origin, { modelId: preference.value.modelId, modelSource: preference.value.modelSource, reasoningEffort: preference.value.reasoningEffort })
+			: this.promptDispatcher.dispatch(selected.item.id, prompt, origin);
 		const stop = this.host.registerCallback({
 			identity,
 			sessionId: selected.item.id,
@@ -571,6 +830,9 @@ export class TelegramCommandRouter extends Disposable {
 	private invalidateRoutingState(identity: TelegramPairedIdentity): void {
 		this.host.invalidateAllCallbacks();
 		this.activePickerRequestIds.delete(identity.pairingId);
+		this.activeModelRequestIds.delete(identity.pairingId);
+		this.activeModeRequestIds.delete(identity.pairingId);
+		this.requestPreferences.clear(identity);
 		const newSessionRequestId = this.activeNewSessionRequestIds.get(identity.pairingId);
 		if (newSessionRequestId) {
 			this.pendingNewSessionPrompts.delete(newSessionRequestId);
@@ -660,7 +922,15 @@ export class TelegramCommandRouter extends Disposable {
 	}
 }
 
-function parseCommand(text: string): 'start' | 'new' | 'status' | 'sessions' | 'deselect' | 'stop' | 'unknown' | undefined {
+function formatSystemTitle(emoji: string, title: string): string {
+	return `<b>${escapeTelegramHtml(`${emoji} ${title}`)}</b>`;
+}
+
+function formatSystemField(label: string, value: string): string {
+	return `<b>${escapeTelegramHtml(label)}</b>: ${escapeTelegramHtml(value)}`;
+}
+
+function parseCommand(text: string): 'start' | 'new' | 'status' | 'sessions' | 'models' | 'model' | 'mode' | 'deselect' | 'stop' | 'unknown' | undefined {
 	if (!text.startsWith('/')) {
 		return undefined;
 	}
@@ -669,9 +939,50 @@ function parseCommand(text: string): 'start' | 'new' | 'status' | 'sessions' | '
 		return 'unknown';
 	}
 	const command = match[1].toLowerCase();
-	return command === 'start' || command === 'new' || command === 'status' || command === 'sessions' || command === 'deselect' || command === 'stop'
+	return command === 'start' || command === 'new' || command === 'status' || command === 'sessions' || command === 'models' || command === 'model' || command === 'mode' || command === 'deselect' || command === 'stop'
 		? command
 		: 'unknown';
+}
+
+function parseSafeMode(value: string | undefined): RemoteNonElevatingMode | undefined {
+	const mode = value?.trim().toLocaleLowerCase();
+	return mode === 'interactive' || mode === 'plan' ? mode : undefined;
+}
+
+function parseModelCallbackValue(value: string | undefined): ModelCallbackValue | undefined {
+	if (!value || value.length > 2048) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(value) as Partial<ModelCallbackValue>;
+		if (parsed.kind === 'page') {
+			return typeof parsed.page === 'number' && Number.isInteger(parsed.page) && parsed.page >= 0 && parsed.page <= 10_000
+				? parsed as ModelCallbackValue
+				: undefined;
+		}
+		if ((parsed.kind !== 'model' && parsed.kind !== 'preference') || typeof parsed.modelId !== 'string' || parsed.modelId.length === 0 || parsed.modelId.length > 1024) {
+			return undefined;
+		}
+		if (parsed.kind === 'preference' && parsed.reasoningEffort !== undefined && (typeof parsed.reasoningEffort !== 'string' || parsed.reasoningEffort.length === 0 || parsed.reasoningEffort.length > 128)) {
+			return undefined;
+		}
+		return parsed as ModelCallbackValue;
+	} catch {
+		return undefined;
+	}
+}
+
+function preferenceErrorMessage(error: TelegramPreferenceValidationError): string {
+	switch (error) {
+		case 'catalog-unavailable':
+			return l10n.t('The Copilot model catalog is unavailable. No prompt was dispatched. Refresh the native Copilot sign-in and try again.');
+		case 'unsupported-model':
+			return l10n.t('That model is unsupported or no longer available. No prompt was dispatched. Use /models to refresh the list.');
+		case 'reasoning-disabled':
+			return l10n.t('Reasoning-effort selection is not enabled in this build. No prompt was dispatched.');
+		case 'unsupported-reasoning':
+			return l10n.t('That reasoning effort is not supported by the selected model. No prompt was dispatched. Use /models to refresh the choices.');
+	}
 }
 
 function parseCommandArgument(text: string): string | undefined {

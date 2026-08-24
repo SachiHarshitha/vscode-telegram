@@ -24,7 +24,7 @@ describe('RemotePromptDispatcher', () => {
 	it('returns accepted immediately and dispatches a correlated steering request', () => {
 		vscodeMocks.executeCommand.mockReturnValue(new Promise<void>(() => { }));
 		const dispatcher = new RemotePromptDispatcher(new class extends mock<ILogService>() { });
-		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: '42' };
+		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: '42', mode: 'interactive' };
 
 		const result = dispatcher.dispatch('session-1', 'steer this', origin);
 
@@ -35,6 +35,38 @@ describe('RemotePromptDispatcher', () => {
 		const correlationId = getPendingCopilotCLIRequestCorrelationId(options.attachedContext);
 		expect(correlationId).toBe(result.correlationId);
 		expect(takePendingCopilotCLIRequestContext('session-1', correlationId!)?.origin).toBe(origin);
+	});
+
+	it('forwards a validated model and reasoning effort through the native ChatRequest options', () => {
+		vscodeMocks.executeCommand.mockResolvedValue(undefined);
+		const dispatcher = new RemotePromptDispatcher(new class extends mock<ILogService>() { });
+		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: 'model-1', mode: 'plan' };
+
+		dispatcher.dispatch('session-model', 'plan this change', origin, { modelId: 'claude-sonnet', reasoningEffort: 'high' });
+
+		expect(vscodeMocks.executeCommand).toHaveBeenCalledWith(
+			'workbench.action.chat.openSessionWithPrompt.copilotcli',
+			expect.objectContaining({
+				userSelectedModelId: 'copilotcli/claude-sonnet',
+				userSelectedModelConfiguration: { reasoningEffort: 'high' },
+			}),
+		);
+	});
+
+	it('forwards a VS Code model through the private configuration seam without forging a Copilot CLI id', () => {
+		vscodeMocks.executeCommand.mockResolvedValue(undefined);
+		const dispatcher = new RemotePromptDispatcher(new class extends mock<ILogService>() { });
+		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: 'model-custom', mode: 'interactive' };
+
+		dispatcher.dispatch('session-custom', 'use my configured model', origin, { modelId: 'openai/work', modelSource: 'vscode-lm' });
+
+		expect(vscodeMocks.executeCommand).toHaveBeenCalledWith(
+			'workbench.action.chat.openSessionWithPrompt.copilotcli',
+			expect.objectContaining({
+				userSelectedModelId: undefined,
+				userSelectedModelConfiguration: { telegramRemoteModelId: 'openai/work' },
+			}),
+		);
 	});
 
 	it('clears only its correlation when the native command rejects', async () => {
@@ -58,7 +90,7 @@ describe('RemotePromptDispatcher', () => {
 			override error = vi.fn();
 		};
 		const dispatcher = new RemotePromptDispatcher(logService);
-		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: '43' };
+		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: '43', mode: 'interactive' };
 
 		expect(() => dispatcher.dispatch('session-sync', 'prompt', origin)).toThrow('sync rejection');
 		expect(logService.error).toHaveBeenCalledOnce();

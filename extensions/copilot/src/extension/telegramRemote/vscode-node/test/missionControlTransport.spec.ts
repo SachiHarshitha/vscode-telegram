@@ -26,6 +26,7 @@ function createState() {
 		pendingCommandCompletionIds: new Set<string>(),
 		pendingPermissionRequests: new Map(),
 		pendingUserInputRequests: new Set(),
+		pendingExitPlanModeRequests: new Set(),
 		attachment: Disposable.None,
 		lastEventId: null,
 		lastSubmitAttemptTimeMs: Date.now(),
@@ -148,6 +149,50 @@ describe('MissionControlTransport', () => {
 		expect(state.pendingUserInputRequests.size).toBe(0);
 	});
 
+	it('accepts a correlated safe plan action through command polling', async () => {
+		const commands = [{
+			id: 'plan-response-1',
+			content: JSON.stringify({ requestId: 'plan-1', toolCallId: 'tool-1', approved: true, selectedAction: 'interactive' }),
+			state: 'in_progress',
+			type: 'exit_plan_mode_response',
+		}];
+		const { transport } = createTransport(commands);
+		const state = createState();
+		(transport as unknown as { states: Map<string, unknown> }).states.set(state.sessionId, state);
+		const responsePromise = transport.requestExitPlanMode(state.sessionId, {
+			requestId: 'plan-1',
+			toolCallId: 'tool-1',
+			summary: 'Plan ready',
+			actions: ['interactive', 'exit_only'],
+		}, CancellationToken.None);
+
+		await (transport as unknown as { pollCommands(state: unknown): Promise<void> }).pollCommands(state);
+
+		await expect(responsePromise).resolves.toEqual({ approved: true, selectedAction: 'interactive' });
+		expect(state.completedCommandIds).toEqual(['plan-response-1']);
+	});
+
+	it('keeps waiting after stale or permission-elevating plan responses', async () => {
+		const { transport } = createTransport();
+		const state = createState();
+		(transport as unknown as { states: Map<string, unknown> }).states.set(state.sessionId, state);
+		const responsePromise = transport.requestExitPlanMode(state.sessionId, {
+			requestId: 'plan-1',
+			toolCallId: 'tool-1',
+			summary: 'Plan ready',
+			actions: ['interactive', 'exit_only'],
+		}, CancellationToken.None);
+		const accept = (transport as unknown as { acceptExitPlanModeResponse(state: unknown, command: unknown): void }).acceptExitPlanModeResponse.bind(transport);
+
+		accept(state, { id: 'stale', content: JSON.stringify({ requestId: 'plan-2', toolCallId: 'tool-1', approved: true, selectedAction: 'interactive' }) });
+		accept(state, { id: 'unsafe', content: JSON.stringify({ requestId: 'plan-1', toolCallId: 'tool-1', approved: true, selectedAction: 'autopilot' }) });
+		expect(state.pendingExitPlanModeRequests.size).toBe(1);
+		accept(state, { id: 'denied', content: JSON.stringify({ requestId: 'plan-1', toolCallId: 'tool-1', approved: false, feedback: 'Revise tests' }) });
+
+		await expect(responsePromise).resolves.toEqual({ approved: false, feedback: 'Revise tests' });
+		expect(state.pendingExitPlanModeRequests.size).toBe(0);
+	});
+
 	it('routes abort through the registry and acknowledges the command', async () => {
 		const commands = [{ id: 'abort-1', content: '', state: 'in_progress', type: 'abort' }];
 		const { transport, registry } = createTransport(commands);
@@ -161,7 +206,7 @@ describe('MissionControlTransport', () => {
 		expect(state.completedCommandIds).toContain('abort-1');
 	});
 
-	it('does not retain permission or question waiters for an already-cancelled request', async () => {
+	it('does not retain interactive waiters for an already-cancelled request', async () => {
 		const { transport } = createTransport();
 		const state = createState();
 		(transport as unknown as { states: Map<string, unknown> }).states.set(state.sessionId, state);
@@ -178,9 +223,15 @@ describe('MissionControlTransport', () => {
 			choices: [],
 			allowFreeform: true,
 		}, cancellation.token)).resolves.toBeUndefined();
+		await expect(transport.requestExitPlanMode(state.sessionId, {
+			requestId: 'plan-1',
+			summary: 'Plan ready',
+			actions: ['interactive'],
+		}, cancellation.token)).resolves.toBeUndefined();
 
 		expect(state.pendingPermissionRequests.size).toBe(0);
 		expect(state.pendingUserInputRequests.size).toBe(0);
+		expect(state.pendingExitPlanModeRequests.size).toBe(0);
 		cancellation.dispose();
 	});
 
@@ -213,12 +264,18 @@ describe('MissionControlTransport', () => {
 			choices: [],
 			allowFreeform: true,
 		}, CancellationToken.None);
+		const plan = transport.requestExitPlanMode(state.sessionId, {
+			requestId: 'plan-1',
+			summary: 'Plan ready',
+			actions: ['exit_only'],
+		}, CancellationToken.None);
 
 		await (transport as unknown as { teardown(sessionId: string): Promise<void> }).teardown(state.sessionId);
 
 		expect(disposeAttachment).toHaveBeenCalledOnce();
 		await expect(permission).resolves.toBeUndefined();
 		await expect(userInput).resolves.toBeUndefined();
+		await expect(plan).resolves.toBeUndefined();
 		expect((transport as unknown as { states: Map<string, unknown> }).states.has(state.sessionId)).toBe(false);
 		const submittedEvents = apiClient.submitEvents.mock.calls.flatMap(call => call[1] as Array<{ type: string }>);
 		expect(submittedEvents.map(event => event.type)).toEqual([

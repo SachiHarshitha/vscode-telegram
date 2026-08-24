@@ -33,7 +33,7 @@ import { FakeToolsService, ToolCall } from '../../common/copilotCLITools';
 import { Session } from '../../common/utils';
 import { CopilotCLISession } from '../copilotcliSession';
 import { RemoteControlRegistry } from '../../../../telegramRemote/node/remoteControlRegistry';
-import type { RemoteRequestOrigin } from '../../../../telegramRemote/common/remoteControlTypes';
+import type { IRemoteControlTransport, IRemoteExitPlanModeRequest, RemoteRequestOrigin } from '../../../../telegramRemote/common/remoteControlTypes';
 import { PermissionRequest } from '../permissionHelpers';
 import { IQuestion, IQuestionAnswer, IUserQuestionHandler } from '../userInputHelpers';
 import { NullICopilotCLIImageSupport } from './testHelpers';
@@ -51,6 +51,9 @@ class MockSdkSession {
 	onHandlers: MockSdkEventMap = new Map();
 	public sessionId = 'mock-session-id';
 	public _selectedModel: string | undefined = 'modelA';
+	public selectedReasoningEffort: string | undefined;
+	public readonly byokSelections = new Set<string>();
+	public readonly registeredByokEntries: Array<{ providers: readonly unknown[]; models: readonly { provider: string; id: string }[] }> = [];
 	public authInfo: unknown;
 	private _pendingPermissions = new Map<string, { resolve: (result: unknown) => void }>();
 	private _permissionCounter = 0;
@@ -109,7 +112,7 @@ class MockSdkSession {
 	 * Simulate the SDK emitting an exit_plan_mode.requested event and await the response.
 	 * The session's event handler will call respondToExitPlanMode() which resolves the returned promise.
 	 */
-	async emitExitPlanModeRequest(data: { summary: string; actions?: string[] }): Promise<unknown> {
+	async emitExitPlanModeRequest(data: { summary: string; planContent?: string; actions?: string[]; recommendedAction?: string; toolCallId?: string }): Promise<unknown> {
 		const requestId = `exit-plan-${++this._exitPlanModeCounter}`;
 		return new Promise(resolve => {
 			this._pendingExitPlanMode.set(requestId, { resolve });
@@ -171,7 +174,15 @@ class MockSdkSession {
 		}
 	}
 	async getSelectedModel() { return this._selectedModel; }
-	async setSelectedModel(model: string, _reasoningEffort?: string) { this._selectedModel = model; }
+	async setSelectedModel(model: string, reasoningEffort?: string) { this._selectedModel = model; this.selectedReasoningEffort = reasoningEffort; }
+	isByokSelection(model: string | undefined) { return !!model && this.byokSelections.has(model); }
+	registerByokEntries(providers: readonly unknown[], models: readonly { provider: string; id: string }[]) {
+		this.registeredByokEntries.push({ providers, models });
+		for (const model of models) {
+			this.byokSelections.add(`${model.provider}/${model.id}`);
+		}
+		return [];
+	}
 	getReasoningEffort(): string | undefined { return undefined; }
 	getEvents() { return [...this.events]; }
 	getPlanPath(): string | null { return null; }
@@ -319,6 +330,20 @@ describe('CopilotCLISession', () => {
 		expect(session.status).toBe(ChatSessionStatus.Completed);
 		expect(stream.output.join('\n')).toContain('Echo: Hello');
 		// Listeners are disposed after completion, so we only assert original streamed content.
+	});
+
+	it('registers an additive Telegram model registry idempotently', async () => {
+		const session = await createSession();
+		const registry = {
+			providers: [{ name: 'telegram-vscode-lm', type: 'openai' as const, wireApi: 'responses' as const, baseUrl: 'http://127.0.0.1:1234/vscode-lm', bearerToken: 'nonce' }],
+			models: [{ provider: 'telegram-vscode-lm', id: 'm-custom', wireModel: 'm-custom', name: 'Custom' }],
+		};
+
+		session.ensureAdditionalModels(registry);
+		session.ensureAdditionalModels(registry);
+
+		expect(sdkSession.registeredByokEntries).toHaveLength(1);
+		expect(sdkSession.registeredByokEntries[0]).toEqual({ providers: registry.providers, models: registry.models });
 	});
 
 	it('synthesizes chat and execute_tool spans for the in-process CLI turn', async () => {
@@ -479,6 +504,16 @@ describe('CopilotCLISession', () => {
 		await session.handleRequest({ id: '', toolInvocationToken: undefined as never }, { prompt: 'Hi' }, [], { model: 'modelB' }, authInfo, CancellationToken.None);
 
 		expect(sdkSession._selectedModel).toBe('modelB');
+	});
+
+	it('applies the request model and reasoning effort through the SDK session', async () => {
+		await configurationService.setConfig(ConfigKey.Advanced.CLIThinkingEffortEnabled, true);
+		const session = await createSession();
+		session.attachStream(new MockChatResponseStream());
+
+		await session.handleRequest({ id: '', toolInvocationToken: undefined as never }, { prompt: 'Hi' }, [], { model: 'modelB', reasoningEffort: 'high' }, authInfo, CancellationToken.None);
+
+		expect({ model: sdkSession._selectedModel, reasoningEffort: sdkSession.selectedReasoningEffort }).toEqual({ model: 'modelB', reasoningEffort: 'high' });
 	});
 
 	it('fails request when underlying send throws', async () => {
@@ -1112,6 +1147,33 @@ describe('CopilotCLISession', () => {
 		expect(sdkSession.lastSendOptions?.agentMode).toBe('plan');
 	});
 
+	it('applies only registry-created non-elevating Telegram modes', async () => {
+		const registry = disposables.add(new RemoteControlRegistry(logger));
+		const session = await createSession({ remoteControlRegistry: registry });
+		session.setPermissionLevel('autopilot');
+		session.attachStream(new MockChatResponseStream());
+
+		await session.handleRequest(
+			{ id: 'telegram-plan', toolInvocationToken: undefined as never },
+			{ prompt: 'create a plan', origin: registry.createTelegramOrigin('update-1', 'plan') },
+			[],
+			undefined,
+			authInfo,
+			CancellationToken.None,
+		);
+		expect(sdkSession.lastSendOptions?.agentMode).toBe('plan');
+
+		await session.handleRequest(
+			{ id: 'telegram-interactive', toolInvocationToken: undefined as never },
+			{ prompt: 'continue interactively', origin: registry.createTelegramOrigin('update-2') },
+			[],
+			undefined,
+			authInfo,
+			CancellationToken.None,
+		);
+		expect(sdkSession.lastSendOptions?.agentMode).toBe('interactive');
+	});
+
 	it('immediately pushes invocation messages for non-permission-requiring tools like MCP', async () => {
 		let resolveSend: () => void;
 		sdkSession.send = async () => new Promise<void>(r => { resolveSend = r; });
@@ -1727,7 +1789,7 @@ describe('CopilotCLISession', () => {
 			await session.handleRequest({ id: '', toolInvocationToken: undefined as never }, { prompt: 'Plan' }, [], undefined, authInfo, CancellationToken.None);
 		});
 
-		function setupSendWithExitPlanMode(data: { summary: string; actions?: string[] }, resultHolder: { value: unknown }) {
+		function setupSendWithExitPlanMode(data: { summary: string; planContent?: string; actions?: string[]; recommendedAction?: string; toolCallId?: string }, resultHolder: { value: unknown }) {
 			sdkSession.send = async (options: any) => {
 				sdkSession.emit('assistant.turn_start', {});
 				sdkSession.emit('assistant.message', { content: `Echo: ${options.prompt}` });
@@ -1735,6 +1797,61 @@ describe('CopilotCLISession', () => {
 				sdkSession.emit('assistant.turn_end', {});
 			};
 		}
+
+		it('takes one safe remote response and cancels the losing local plan prompt', async () => {
+			const result = { value: undefined as unknown };
+			setupSendWithExitPlanMode({
+				summary: 'Plan ready',
+				planContent: '1. Edit\n2. Test',
+				actions: ['autopilot', 'interactive', 'exit_only'],
+				recommendedAction: 'autopilot',
+				toolCallId: 'tool-1',
+			}, result);
+			toolsService.invokeTool = vi.fn(async () => new Promise<never>(() => { }));
+			const registry = disposables.add(new RemoteControlRegistry(logger));
+			const requestExitPlanMode = vi.fn(async (_sessionId: string, _request: IRemoteExitPlanModeRequest) => ({ approved: true as const, selectedAction: 'interactive' as const }));
+			const transport: IRemoteControlTransport = {
+				id: 'testRemote', label: 'Test Remote', themeIcon: 'remote',
+				publish: () => { }, requestExitPlanMode, dispose: () => { },
+			};
+			disposables.add(registry.registerTransport(transport));
+			const session = await createSession({ remoteControlRegistry: registry });
+			disposables.add(registry.attachTransport(sdkSession.sessionId, transport.id));
+			const respond = vi.spyOn(sdkSession, 'respondToExitPlanMode');
+			session.attachStream(new MockChatResponseStream());
+
+			await session.handleRequest({ id: '', toolInvocationToken: {} as ChatParticipantToolToken }, { prompt: 'Plan' }, [], undefined, authInfo, CancellationToken.None);
+
+			expect(result.value).toEqual({ approved: true, selectedAction: 'interactive' });
+			expect(respond).toHaveBeenCalledOnce();
+			expect(requestExitPlanMode.mock.calls[0][1]).toMatchObject({
+				requestId: 'exit-plan-1',
+				toolCallId: 'tool-1',
+				actions: ['interactive', 'exit_only'],
+				recommendedAction: undefined,
+			});
+		});
+
+		it('never offers an attached remote transport the autopilot plan decision', async () => {
+			const result = { value: undefined as unknown };
+			setupSendWithExitPlanMode({ summary: 'Plan ready', actions: ['autopilot', 'interactive'], recommendedAction: 'autopilot' }, result);
+			const registry = disposables.add(new RemoteControlRegistry(logger));
+			const requestExitPlanMode = vi.fn(async (_sessionId: string, _request: IRemoteExitPlanModeRequest) => ({ approved: true as const, selectedAction: 'interactive' as const }));
+			const transport: IRemoteControlTransport = {
+				id: 'testRemote', label: 'Test Remote', themeIcon: 'remote',
+				publish: () => { }, requestExitPlanMode, dispose: () => { },
+			};
+			disposables.add(registry.registerTransport(transport));
+			const session = await createSession({ remoteControlRegistry: registry });
+			disposables.add(registry.attachTransport(sdkSession.sessionId, transport.id));
+			session.setPermissionLevel('autopilot');
+			session.attachStream(new MockChatResponseStream());
+
+			await session.handleRequest({ id: '', toolInvocationToken: undefined as never }, { prompt: 'Plan' }, [], undefined, authInfo, CancellationToken.None);
+
+			expect(result.value).toEqual({ approved: true, selectedAction: 'autopilot', autoApproveEdits: true });
+			expect(requestExitPlanMode).not.toHaveBeenCalled();
+		});
 
 		it('auto-approves with autopilot action when choices include "autopilot"', async () => {
 			const result = { value: undefined as unknown };
