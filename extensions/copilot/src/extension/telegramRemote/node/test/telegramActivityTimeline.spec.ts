@@ -103,6 +103,138 @@ describe('TelegramActivityTimeline', () => {
 		expect(richMessage).toContain('The routing marker must stay internal.');
 	});
 
+	it('sends identical reasoning only once when the SDK repeats it after a turn boundary', async () => {
+		const test = await createTimeline();
+		const reasoning = 'The build script packages with vsce. I will run it now.';
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		await test.timeline.publish(session.id, event('intent', 'assistant.intent', { intent: reasoning }));
+		const sendsAfterReasoning = test.host.sendRichMessage.mock.calls.length;
+
+		await test.timeline.publish(session.id, event('turn-end', 'assistant.turn_end', { turnId: 'turn-1' }));
+		await test.timeline.publish(session.id, event('reasoning', 'assistant.reasoning', {
+			reasoningId: 'reasoning-1', content: reasoning,
+		}));
+		await test.scheduler.runAll();
+
+		expect(test.host.sendRichMessage).toHaveBeenCalledTimes(sendsAfterReasoning);
+		expect(test.host.editRichMessage).not.toHaveBeenCalled();
+	});
+
+	it('flushes a completed tool before publishing the terminal answer', async () => {
+		const test = await createTimeline();
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		await test.timeline.publish(session.id, event('start', 'tool.execution_start', {
+			toolCallId: 'tool-1', toolName: 'run_in_terminal', arguments: { command: 'npm run build' },
+		}));
+		await test.timeline.publish(session.id, event('complete', 'tool.execution_complete', {
+			toolCallId: 'tool-1', success: true, result: { detailedContent: 'Build passed' },
+		}));
+		await test.timeline.publish(session.id, event('answer', 'assistant.message', {
+			messageId: 'answer-1', content: 'The build completed successfully.',
+		}));
+
+		await test.timeline.publish(session.id, event('idle', 'session.idle', { aborted: false }));
+
+		expect(test.host.editRichMessage).toHaveBeenCalledOnce();
+		const toolEditOrder = test.host.editRichMessage.mock.invocationCallOrder[0];
+		const finalSendOrder = test.host.sendRichMessage.mock.invocationCallOrder.at(-1)!;
+		expect(toolEditOrder).toBeLessThan(finalSendOrder);
+		expect(JSON.stringify(test.host.editRichMessage.mock.calls[0][2])).toContain('Build passed');
+		expect(JSON.stringify(test.host.sendRichMessage.mock.calls.at(-1)?.[1])).toContain('The build completed successfully.');
+	});
+
+	it('does not send a late duplicate when a reasoning edit fails at completion', async () => {
+		const test = await createTimeline();
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		await test.timeline.publish(session.id, event('intent', 'assistant.intent', {
+			intent: 'I will run the requested build.',
+		}));
+		const sendsAfterReasoning = test.host.sendRichMessage.mock.calls.length;
+		await test.timeline.publish(session.id, event('reasoning', 'assistant.reasoning', {
+			reasoningId: 'reasoning-1', content: 'The build command is ready.',
+		}));
+		test.host.editRichMessage.mockRejectedValueOnce(new TelegramBotApiError('api', 'edit rejected'));
+		await test.timeline.publish(session.id, event('answer', 'assistant.message', {
+			messageId: 'answer-1', content: 'Build complete.',
+		}));
+
+		await test.timeline.publish(session.id, event('idle', 'session.idle', { aborted: false }));
+
+		expect(test.host.sendRichMessage).toHaveBeenCalledTimes(sendsAfterReasoning + 1);
+		expect(JSON.stringify(test.host.sendRichMessage.mock.calls.at(-1)?.[1])).toContain('Build complete.');
+		expect(test.logService.warn).toHaveBeenCalledWith('[TelegramRemote] Rich reasoning edit failed; duplicate replacement suppressed.');
+	});
+
+	it('does not repeat reasoning after a permission is answered locally', async () => {
+		const test = await createTimeline();
+		const cancellation = new CancellationTokenSource();
+		const reasoning = 'I will run the requested versioned build.';
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		await test.timeline.publish(session.id, event('intent', 'assistant.intent', { intent: reasoning }));
+		const permission = test.timeline.requestPermission(session.id, {
+			requestId: 'permission-1', permissionRequest: { kind: 'shell', toolCallId: 'tool-1' },
+		}, cancellation.token);
+		await vi.waitFor(() => expect(test.host.sendRichMessage.mock.calls.length).toBeGreaterThan(2));
+		cancellation.cancel();
+		await expect(permission).resolves.toBeUndefined();
+
+		await test.timeline.publish(session.id, event('reasoning', 'assistant.reasoning', {
+			reasoningId: 'reasoning-1', content: reasoning,
+		}));
+		await test.timeline.publish(session.id, event('answer', 'assistant.message', {
+			messageId: 'answer-1', content: 'Build complete.',
+		}));
+		await test.timeline.publish(session.id, event('idle', 'session.idle', { aborted: false }));
+
+		const reasoningMessages = test.host.sendRichMessage.mock.calls.filter(call => JSON.stringify(call[1]).includes(reasoning));
+		expect(reasoningMessages).toHaveLength(1);
+		cancellation.dispose();
+	});
+
+	it('keeps agent-scoped assistant events out of the top-level reasoning timeline', async () => {
+		const test = await createTimeline();
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		await test.timeline.publish(session.id, event('root-intent', 'assistant.intent', {
+			intent: 'Inspect the workspace.',
+		}));
+		const reasoningMessageId = test.host.sendRichMessage.mock.calls.length;
+		const sendsAfterRootIntent = test.host.sendRichMessage.mock.calls.length;
+
+		await test.timeline.publish(session.id, event('agent-intent', 'assistant.intent', {
+			intent: 'Inspect the workspace.',
+		}, 'agent-1'));
+		await test.timeline.publish(session.id, event('agent-turn-end', 'assistant.turn_end', {
+			turnId: 'agent-turn-1',
+		}, 'agent-1'));
+		await test.timeline.publish(session.id, event('root-reasoning', 'assistant.reasoning', {
+			reasoningId: 'root-reasoning-1', content: 'The relevant script is in the repository root.',
+		}));
+		await test.scheduler.runAll();
+
+		expect(test.host.sendRichMessage).toHaveBeenCalledTimes(sendsAfterRootIntent);
+		expect(test.host.editRichMessage).toHaveBeenCalledWith(identity.chatId, reasoningMessageId, expect.anything(), expect.anything());
+		const richMessage = JSON.stringify(test.host.editRichMessage.mock.calls.at(-1)?.[2]);
+		expect(richMessage).toContain('Inspect the workspace.');
+		expect(richMessage).toContain('The relevant script is in the repository root.');
+	});
+
+	it('keeps agent-scoped tool execution and results visible', async () => {
+		const test = await createTimeline();
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+
+		await test.timeline.publish(session.id, event('agent-tool-start', 'tool.execution_start', {
+			toolCallId: 'agent-tool-1', toolName: 'run_in_terminal', arguments: { command: 'npm run build' },
+		}, 'agent-1'));
+		const toolMessageId = test.host.sendRichMessage.mock.calls.length;
+		await test.timeline.publish(session.id, event('agent-tool-complete', 'tool.execution_complete', {
+			toolCallId: 'agent-tool-1', success: true, result: { detailedContent: 'Build passed' },
+		}, 'agent-1'));
+		await test.scheduler.runAll();
+
+		expect(test.host.editRichMessage).toHaveBeenCalledWith(identity.chatId, toolMessageId, expect.anything(), expect.anything());
+		expect(JSON.stringify(test.host.editRichMessage.mock.calls.at(-1)?.[2])).toContain('Build passed');
+	});
+
 	it('keeps Stop attached when a stale idle event arrives before the new turn starts', async () => {
 		const test = await createTimeline();
 		const request = await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
@@ -256,8 +388,8 @@ async function createTimeline() {
 	return { timeline, host, state, scheduler, sessionService, logService };
 }
 
-function event(id: string, type: string, data: unknown): IRemoteControlSessionEvent {
-	return { id, timestamp: '2026-08-23T12:00:00.000Z', parentId: null, type, data };
+function event(id: string, type: string, data: unknown, agentId?: string): IRemoteControlSessionEvent {
+	return { id, timestamp: '2026-08-23T12:00:00.000Z', parentId: null, agentId, type, data };
 }
 
 function replyUpdate(updateId: number, replyToMessageId: number, text: string): TelegramUpdate {

@@ -44,7 +44,11 @@ function createTransport(commands: unknown[] = []) {
 		correlationId: 'correlation-1',
 		completion: Promise.resolve(),
 	}));
-	const promptDispatcher = { _serviceBrand: undefined, dispatch } as IRemotePromptDispatcher;
+	const promptDispatcher = {
+		_serviceBrand: undefined,
+		dispatch,
+		prepare: vi.fn(() => ({ correlationId: 'correlation-1', start: () => dispatch('', '', undefined) })),
+	} as unknown as IRemotePromptDispatcher;
 	const apiClient = {
 		getPendingCommands: vi.fn(async () => commands),
 		submitEvents: vi.fn(async (_sessionId: string, _events: unknown[], _completedCommandIds: string[]) => true),

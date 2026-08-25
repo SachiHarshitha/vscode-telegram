@@ -168,7 +168,9 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		if (!state || !sameIdentity(state.identity, identity) || state.sessionId !== sessionId || state.requestId !== requestId || state.complete) {
 			return;
 		}
+		await this.flushPendingActivityBeforeTerminal(state);
 		state.complete = true;
+		this.cancelScheduledFlushes(state);
 		state.terminalOutcome = outcome === 'superseded' ? undefined : outcome;
 		await this.removeStopControl(state);
 		const mutation = state.aggregator.completeRequest(outcome);
@@ -228,11 +230,15 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 				state.requestStarted = true;
 			}
 		}
+		if (isTerminalEvent(event)) {
+			await this.flushPendingActivityBeforeTerminal(state);
+		}
 		for (const mutation of state.aggregator.accept(event)) {
 			await this.publishMutation(state, mutation, undefined, isUrgent(event, mutation.round));
 		}
 		if (isTerminalEvent(event) && !state.complete) {
 			state.complete = true;
+			this.cancelScheduledFlushes(state);
 			state.terminalOutcome = terminalOutcome(event);
 			await this.removeStopControl(state);
 			this.notifyTerminal(state);
@@ -457,6 +463,24 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		}, delay);
 	}
 
+	private async flushPendingActivityBeforeTerminal(state: TimelineState): Promise<void> {
+		for (const delivery of state.rounds.values()) {
+			delivery.flushTimer?.dispose();
+			delivery.flushTimer = undefined;
+			if (!delivery.dirty || (delivery.round.type === 'answer' && delivery.round.status === 'running')) {
+				continue;
+			}
+			await this.enqueueFlush(state, delivery);
+		}
+	}
+
+	private cancelScheduledFlushes(state: TimelineState): void {
+		for (const delivery of state.rounds.values()) {
+			delivery.flushTimer?.dispose();
+			delivery.flushTimer = undefined;
+		}
+	}
+
 	private enqueueFlush(state: TimelineState, delivery: RoundDelivery): Promise<void> {
 		const result = this.deliveryQueue.then(() => this.flush(state, delivery));
 		this.deliveryQueue = result.catch(() => { });
@@ -482,6 +506,13 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 					if (error instanceof TelegramBotApiError && error.apiFailureReason === 'message-not-modified') {
 						delivery.lastSignature = signature;
 						delivery.dirty = false;
+						return;
+					}
+					if (delivery.round.type === 'reasoning') {
+						delivery.lastSignature = signature;
+						delivery.lastFlushAt = this.scheduler.now();
+						delivery.dirty = false;
+						this.logService.warn('[TelegramRemote] Rich reasoning edit failed; duplicate replacement suppressed.');
 						return;
 					}
 					const replacement = await this.host.sendRichMessage(state.identity.chatId, richMessage, {
@@ -705,6 +736,5 @@ function isUrgent(event: RemoteAgentEvent, round: ActivityRound): boolean {
 }
 
 function isAgentScopedStream(event: RemoteAgentEvent): boolean {
-	return !!event.agentId && (event.kind === 'assistant.message' || event.kind === 'assistant.message_delta'
-		|| event.kind === 'assistant.reasoning' || event.kind === 'assistant.reasoning_delta');
+	return !!event.agentId && event.kind.startsWith('assistant.');
 }

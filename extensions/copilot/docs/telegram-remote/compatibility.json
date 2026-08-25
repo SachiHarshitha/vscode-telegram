@@ -112,6 +112,7 @@
     "vscodeLmModelBridgeRegistered": true,
     "modelPickerPaginationRegistered": true,
     "reasoningEffortSelectionRegistered": true,
+    "scopedModelPreferencePersistenceRegistered": true,
     "safeModeSelectionRegistered": true,
     "byokCompatibilityClaimed": false
   },
@@ -658,6 +659,56 @@
       "focusedNativeTestsPassed": 19,
       "focusedNativeTestsSkipped": 143
     },
+    "activityDeduplicationAmendment": {
+      "capturedAt": "2026-08-24",
+      "telegramRemoteAggregate": {
+        "command": "npx vitest run src/extension/telegramRemote",
+        "status": "passed",
+        "testFilesPassed": 29,
+        "testsPassed": 193
+      },
+      "extensionTypecheck": {
+        "command": "npm run typecheck",
+        "status": "passed"
+      },
+      "extensionLint": {
+        "command": "targeted eslint for activity aggregation/timeline changes",
+        "status": "passed",
+        "warnings": 0
+      },
+      "coverage": [
+        "request-scoped semantic deduplication across assistant intent, reasoning and embedded reasoning representations",
+        "duplicate assistant preface suppression at tool boundaries",
+        "nested-agent assistant stream isolation without closing the root reasoning round"
+      ]
+    },
+    "fastEventAndModelPersistenceAmendment": {
+      "capturedAt": "2026-08-25",
+      "telegramRemoteAggregate": {
+        "command": "npx vitest run src/extension/telegramRemote --reporter=dot",
+        "status": "passed",
+        "testFilesPassed": 29,
+        "testsPassed": 200
+      },
+      "extensionTypecheck": {
+        "command": "npm run typecheck",
+        "status": "passed"
+      },
+      "extensionLint": {
+        "command": "targeted eslint for changed Telegram activity, dispatch, preference and session-state files",
+        "status": "passed",
+        "warnings": 0
+      },
+      "coverage": [
+        "activity timeline and Stop registration before native prompt execution",
+        "fast locally approved/autopilot tool start and completion retained before terminal answer",
+        "pending activity edits drained before final-answer delivery",
+        "failed reasoning-only edits suppress late duplicate replacement messages",
+        "agent-scoped assistant isolation while correlated agent tool rounds remain visible",
+        "identity, consent-scope and session-bound model persistence across disable/reconnect and reload",
+        "stale persisted model validation and fail-closed removal"
+      ]
+    },
     "extensionTypecheck": {
       "command": "npx tsc --noEmit --project tsconfig.json --pretty false",
       "status": "passed"
@@ -695,7 +746,7 @@
       "nonce-authenticated 127.0.0.1 Responses proxy invoking the exact VS Code LanguageModelChat without provider credentials",
       "duplicate/recursive model suppression, group-variant uniqueness and stale custom-model failure without fallback",
       "active selected-model read without reopen and inactive transient SDK read/close",
-      "actual SDK-selected model and live-mode status after one-request preference consumption",
+      "persisted Telegram-selected model status and repeated dispatch for the exact authorized session",
       "registry-created Telegram interactive/plan origins and forged/elevating mode rejection"
     ],
     "providerCompatibility": {

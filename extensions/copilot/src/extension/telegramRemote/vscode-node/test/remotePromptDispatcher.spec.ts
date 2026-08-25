@@ -37,6 +37,20 @@ describe('RemotePromptDispatcher', () => {
 		expect(takePendingCopilotCLIRequestContext('session-1', correlationId!)?.origin).toBe(origin);
 	});
 
+	it('does not invoke the native command until a prepared dispatch starts', () => {
+		vscodeMocks.executeCommand.mockResolvedValue(undefined);
+		const dispatcher = new RemotePromptDispatcher(new class extends mock<ILogService>() { });
+		const origin: RemoteRequestOrigin = { kind: 'telegram', transportId: 'telegram', updateId: 'prepared-1', mode: 'interactive' };
+
+		const prepared = dispatcher.prepare('session-1', 'build now', origin);
+
+		expect(vscodeMocks.executeCommand).not.toHaveBeenCalled();
+		const result = prepared.start();
+		expect(result.correlationId).toBe(prepared.correlationId);
+		expect(vscodeMocks.executeCommand).toHaveBeenCalledOnce();
+		expect(() => prepared.start()).toThrow('already started');
+	});
+
 	it('forwards a validated model and reasoning effort through the native ChatRequest options', () => {
 		vscodeMocks.executeCommand.mockResolvedValue(undefined);
 		const dispatcher = new RemotePromptDispatcher(new class extends mock<ILogService>() { });

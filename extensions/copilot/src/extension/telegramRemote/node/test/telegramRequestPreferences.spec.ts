@@ -11,7 +11,8 @@ import type { ICopilotCLISessionService } from '../../../chatSessions/copilotcli
 import type { IRemoteControlRegistry, IRemoteControlSession } from '../../common/remoteControlTypes';
 import type { ITelegramLanguageModelBridge, TelegramSelectableModelInfo } from '../../common/telegramLanguageModelBridgeTypes';
 import type { TelegramPairedIdentity } from '../telegramAuthorization';
-import { TelegramRequestPreferences } from '../telegramRequestPreferences';
+import { TelegramRequestPreferences, type TelegramModelPreferenceStore } from '../telegramRequestPreferences';
+import type { TelegramPersistedModelPreference } from '../telegramSessionState';
 
 const identity: TelegramPairedIdentity = { pairingId: 'pairing-1', userId: 101, chatId: 202, firstName: 'First', pairedAt: 1 };
 const catalog: TelegramSelectableModelInfo[] = [
@@ -29,7 +30,7 @@ const catalog: TelegramSelectableModelInfo[] = [
 ];
 
 describe('TelegramRequestPreferences', () => {
-	it('validates model and reasoning against the upstream catalog and consumes the preference once', async () => {
+	it('validates model and reasoning against the upstream catalog and keeps the model selected', async () => {
 		const test = createPreferences();
 
 		await expect(test.preferences.setModel(identity, 'session-1', 'Claude Sonnet', 'HIGH')).resolves.toEqual({
@@ -40,10 +41,13 @@ describe('TelegramRequestPreferences', () => {
 			kind: 'valid',
 			value: { modelId: 'claude-sonnet', modelSource: 'copilotcli', reasoningEffort: 'high', mode: 'interactive' },
 		});
-		expect(await test.preferences.consumeForDispatch(identity, 'session-1')).toEqual({ kind: 'valid', value: { mode: 'interactive' } });
+		expect(await test.preferences.consumeForDispatch(identity, 'session-1')).toEqual({
+			kind: 'valid',
+			value: { modelId: 'claude-sonnet', modelSource: 'copilotcli', reasoningEffort: 'high', mode: 'interactive' },
+		});
 	});
 
-	it('preserves a VS Code-backed model source through one-shot dispatch', async () => {
+	it('preserves a VS Code-backed model source across dispatches', async () => {
 		const test = createPreferences();
 		test.models.getModels.mockResolvedValue([
 			...catalog,
@@ -57,6 +61,23 @@ describe('TelegramRequestPreferences', () => {
 		expect(await test.preferences.consumeForDispatch(identity, 'session-1')).toEqual({
 			kind: 'valid',
 			value: { modelId: 'openai/work-model', modelSource: 'vscode-lm', reasoningEffort: undefined, mode: 'interactive' },
+		});
+		expect(await test.preferences.consumeForDispatch(identity, 'session-1')).toEqual({
+			kind: 'valid',
+			value: { modelId: 'openai/work-model', modelSource: 'vscode-lm', reasoningEffort: undefined, mode: 'interactive' },
+		});
+	});
+
+	it('restores the selected model when the preference controller is recreated', async () => {
+		const store = new TestPreferenceStore();
+		const first = createPreferences({ store });
+		await first.preferences.setModel(identity, 'session-1', 'claude-sonnet', 'medium');
+
+		const recreated = createPreferences({ store });
+
+		expect(await recreated.preferences.consumeForDispatch(identity, 'session-1')).toEqual({
+			kind: 'valid',
+			value: { modelId: 'claude-sonnet', modelSource: 'copilotcli', reasoningEffort: 'medium', mode: 'interactive' },
 		});
 	});
 
@@ -106,27 +127,47 @@ describe('TelegramRequestPreferences', () => {
 		expect(() => test.preferences.setMode(identity, 'session-1', 'autopilot' as never)).toThrow('permission-elevating');
 	});
 
-	it('shows the actual SDK-selected model and live mode instead of retaining a consumed Telegram choice', async () => {
+	it('shows the persistent Telegram model instead of a reconnected SDK Auto selection', async () => {
 		const test = createPreferences({ selectedModelId: 'gpt-fast', currentMode: 'plan' });
 		await test.preferences.setModel(identity, 'session-1', 'claude-sonnet', 'medium');
 
 		expect(await test.preferences.getStatus(identity, 'session-1')).toEqual({
-			selectedModelId: 'gpt-fast',
-			selectedModelLabel: 'GPT Fast',
+			selectedModelId: 'claude-sonnet',
+			selectedModelLabel: 'Claude Sonnet · medium',
 			currentMode: 'plan',
-			pending: { modelId: 'claude-sonnet', modelSource: 'copilotcli', reasoningEffort: 'medium', mode: 'interactive' },
+			pending: undefined,
 		});
 		await test.preferences.consumeForDispatch(identity, 'session-1');
-		test.sessionService.getSelectedModelId.mockResolvedValue('claude-sonnet');
 		expect(await test.preferences.getStatus(identity, 'session-1')).toEqual(expect.objectContaining({
 			selectedModelId: 'claude-sonnet',
-			selectedModelLabel: 'Claude Sonnet',
+			selectedModelLabel: 'Claude Sonnet · medium',
 			pending: undefined,
 		}));
+		expect(test.sessionService.getSelectedModelId).not.toHaveBeenCalled();
 	});
 });
 
-function createPreferences(options: { readonly selectedModelId?: string; readonly currentMode?: string } = {}) {
+class TestPreferenceStore implements TelegramModelPreferenceStore {
+	private stored: { readonly pairingId: string; readonly sessionId: string; readonly preference: TelegramPersistedModelPreference } | undefined;
+
+	getSelectedModelPreference(preferenceIdentity: TelegramPairedIdentity, sessionId: string): TelegramPersistedModelPreference | undefined {
+		return this.stored?.pairingId === preferenceIdentity.pairingId && this.stored.sessionId === sessionId ? this.stored.preference : undefined;
+	}
+
+	async setSelectedModelPreference(preferenceIdentity: TelegramPairedIdentity, sessionId: string, preference: TelegramPersistedModelPreference): Promise<void> {
+		this.stored = { pairingId: preferenceIdentity.pairingId, sessionId, preference };
+	}
+
+	async clearSelectedModelPreference(preferenceIdentity: TelegramPairedIdentity, sessionId: string): Promise<boolean> {
+		if (this.stored?.pairingId !== preferenceIdentity.pairingId || this.stored.sessionId !== sessionId) {
+			return false;
+		}
+		this.stored = undefined;
+		return true;
+	}
+}
+
+function createPreferences(options: { readonly selectedModelId?: string; readonly currentMode?: string; readonly store?: TestPreferenceStore } = {}) {
 	const models = new class extends mock<ITelegramLanguageModelBridge>() {
 		override dispose = vi.fn();
 		override getModels = vi.fn(async () => catalog);
@@ -147,6 +188,7 @@ function createPreferences(options: { readonly selectedModelId?: string; readonl
 	const logService = new class extends mock<ILogService>() {
 		override warn = vi.fn();
 	};
-	const preferences = new TelegramRequestPreferences(models, sessionService, registry, configurationService, logService);
-	return { preferences, models, sessionService, registry, configurationService, logService };
+	const store = options.store ?? new TestPreferenceStore();
+	const preferences = new TelegramRequestPreferences(models, sessionService, registry, store, configurationService, logService);
+	return { preferences, models, sessionService, registry, store, configurationService, logService };
 }

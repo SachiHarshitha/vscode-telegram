@@ -6,11 +6,20 @@
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
 import { IRemoteControlRegistry } from '../common/remoteControlTypes';
+import type { TelegramModelSource } from '../common/telegramLanguageModelBridgeTypes';
 import { TelegramPairedIdentity } from './telegramAuthorization';
 
 const selectedSessionStateKey = 'vscode-telegram.telegram-remote.selected-sessions.v2';
 const maximumStoredSelections = 8;
 const maximumIdentifierLength = 512;
+const maximumModelIdentifierLength = 1_024;
+const maximumReasoningEffortLength = 128;
+
+export interface TelegramPersistedModelPreference {
+	readonly modelId: string;
+	readonly modelSource: TelegramModelSource;
+	readonly reasoningEffort?: string;
+}
 
 interface StoredTelegramSessionSelection {
 	readonly pairingId: string;
@@ -20,10 +29,11 @@ interface StoredTelegramSessionSelection {
 	readonly sessionId: string;
 	readonly sessionScopeFingerprint: string;
 	readonly selectedAt: number;
+	readonly modelPreference?: TelegramPersistedModelPreference;
 }
 
 interface StoredTelegramSessionSelections {
-	readonly version: 2;
+	readonly version: 2 | 3;
 	readonly selections: readonly StoredTelegramSessionSelection[];
 }
 
@@ -58,6 +68,35 @@ export class TelegramSessionState extends Disposable {
 		return selection && this.matchesIdentityAndScope(selection, identity) ? selection.sessionScopeFingerprint : undefined;
 	}
 
+	getSelectedModelPreference(identity: TelegramPairedIdentity, sessionId: string): TelegramPersistedModelPreference | undefined {
+		const selection = this.selections.get(identity.pairingId);
+		if (!selection || !this.matchesIdentityAndScope(selection, identity) || selection.sessionId !== sessionId) {
+			return undefined;
+		}
+		return selection.modelPreference;
+	}
+
+	async setSelectedModelPreference(identity: TelegramPairedIdentity, sessionId: string, preference: TelegramPersistedModelPreference): Promise<void> {
+		const selection = this.selections.get(identity.pairingId);
+		if (!selection || !this.matchesIdentityAndScope(selection, identity) || selection.sessionId !== sessionId || !isStoredModelPreference(preference)) {
+			throw new TelegramSessionStateError();
+		}
+		const next = new Map(this.selections);
+		next.set(identity.pairingId, { ...selection, modelPreference: preference });
+		await this.replaceSelections(next);
+	}
+
+	async clearSelectedModelPreference(identity: TelegramPairedIdentity, sessionId: string): Promise<boolean> {
+		const selection = this.selections.get(identity.pairingId);
+		if (!selection || !this.matchesIdentityAndScope(selection, identity) || selection.sessionId !== sessionId || !selection.modelPreference) {
+			return false;
+		}
+		const next = new Map(this.selections);
+		next.set(identity.pairingId, { ...selection, modelPreference: undefined });
+		await this.replaceSelections(next);
+		return true;
+	}
+
 	/** Restores only the current paired identity and attaches it after metadata validation succeeds. */
 	async restore(identity: TelegramPairedIdentity, validateSession: (sessionId: string, sessionScopeFingerprint: string) => Promise<boolean>): Promise<string | undefined> {
 		const selection = this.selections.get(identity.pairingId);
@@ -85,6 +124,11 @@ export class TelegramSessionState extends Disposable {
 	async select(identity: TelegramPairedIdentity, sessionId: string, sessionScopeFingerprint: string): Promise<void> {
 		validateIdentityAndSession(identity, sessionId, sessionScopeFingerprint);
 		const next = new Map(this.selections);
+		const previous = next.get(identity.pairingId);
+		const modelPreference = previous && this.matchesIdentityAndScope(previous, identity)
+			&& previous.sessionId === sessionId && previous.sessionScopeFingerprint === sessionScopeFingerprint
+			? previous.modelPreference
+			: undefined;
 		next.set(identity.pairingId, {
 			pairingId: identity.pairingId,
 			userId: identity.userId,
@@ -93,6 +137,7 @@ export class TelegramSessionState extends Disposable {
 			sessionId,
 			sessionScopeFingerprint,
 			selectedAt: Date.now(),
+			modelPreference,
 		});
 		for (const pairingId of next.keys()) {
 			if (pairingId !== identity.pairingId) {
@@ -170,7 +215,7 @@ export class TelegramSessionState extends Disposable {
 	private async replaceSelections(next: Map<string, StoredTelegramSessionSelection>): Promise<void> {
 		const value: StoredTelegramSessionSelections | undefined = next.size === 0
 			? undefined
-			: { version: 2, selections: [...next.values()] };
+			: { version: 3, selections: [...next.values()] };
 		try {
 			await this.extensionContext.globalState.update(selectedSessionStateKey, value);
 		} catch {
@@ -195,7 +240,7 @@ function parseStoredSelections(value: unknown): Map<string, StoredTelegramSessio
 		return result;
 	}
 	const record = value as Partial<StoredTelegramSessionSelections>;
-	if (record.version !== 2 || !Array.isArray(record.selections) || record.selections.length > maximumStoredSelections) {
+	if ((record.version !== 2 && record.version !== 3) || !Array.isArray(record.selections) || record.selections.length > maximumStoredSelections) {
 		return result;
 	}
 	for (const selection of record.selections) {
@@ -215,7 +260,18 @@ function isStoredSelection(value: unknown): value is StoredTelegramSessionSelect
 	return isBoundedString(record.pairingId) && isPositiveSafeInteger(record.userId) && isPositiveSafeInteger(record.chatId)
 		&& isConsentScopeFingerprint(record.consentScopeFingerprint)
 		&& isBoundedString(record.sessionId) && isConsentScopeFingerprint(record.sessionScopeFingerprint) && typeof record.selectedAt === 'number'
-		&& Number.isSafeInteger(record.selectedAt) && record.selectedAt >= 0;
+		&& Number.isSafeInteger(record.selectedAt) && record.selectedAt >= 0
+		&& (record.modelPreference === undefined || isStoredModelPreference(record.modelPreference));
+}
+
+function isStoredModelPreference(value: unknown): value is TelegramPersistedModelPreference {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return false;
+	}
+	const record = value as Partial<TelegramPersistedModelPreference>;
+	return typeof record.modelId === 'string' && record.modelId.length > 0 && record.modelId.length <= maximumModelIdentifierLength
+		&& (record.modelSource === 'copilotcli' || record.modelSource === 'vscode-lm')
+		&& (record.reasoningEffort === undefined || (typeof record.reasoningEffort === 'string' && record.reasoningEffort.length > 0 && record.reasoningEffort.length <= maximumReasoningEffortLength));
 }
 
 function matchesIdentity(selection: StoredTelegramSessionSelection, identity: TelegramPairedIdentity): boolean {

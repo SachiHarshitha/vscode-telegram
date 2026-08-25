@@ -35,7 +35,7 @@ The **Target** column records current implementation status, not only the eventu
 | Queue follow-up prompt | P1 | Upstream + Glue | Planned | SDK enqueue/default behavior |
 | Abort active work | P0 | Upstream + Glue | Required | Registry safe-control binding; not exposed on `ICopilotCLISession` today |
 | Live assistant output | P0 | Upstream + Telegram | Implemented | SDK-visible deltas/full messages become semantic Rich Message rounds with bounded edits |
-| Agent intent/status | P0 | Upstream + Telegram | Implemented when exposed | Consecutive SDK-visible intent/reasoning summaries update one expandable **Thinking…** round until a semantic boundary; no hidden chain-of-thought |
+| Agent intent/status | P0 | Upstream + Telegram | Implemented when exposed | Consecutive SDK-visible intent/reasoning summaries update one expandable **Thinking…** round; request-scoped semantic deduplication collapses repeated event representations across boundaries, and nested-agent assistant streams stay out of the root timeline; no hidden chain-of-thought |
 | Tool start/progress/complete | P0 | Upstream + Telegram | Implemented | Tool-call correlation; semantic read/search grouping; command/edit start-to-completion updates |
 | Permission request | P0 | Upstream + Glue | Implemented | Individual Rich Message bubble, callback-correlated with the live SDK request |
 | Permission approve/deny | P0 | Upstream + Glue | Implemented | Approve-once/deny only; first-valid-response-wins; replay/stale controls fail closed |
@@ -50,9 +50,9 @@ The **Target** column records current implementation status, not only the eventu
 
 | Feature | Priority | Ownership | Target | Notes |
 | --- | --- | --- | --- | --- |
-| Show current model | P0 | Upstream + Telegram | Implemented | Reads the active wrapper or transiently reads/closes the inactive SDK session; pending Telegram choices never replace actual SDK state |
+| Show current model | P0 | Upstream + Telegram | Implemented | Shows the persisted Telegram selection for the exact paired identity, consent scope and selected session; otherwise reads the active wrapper or transiently reads/closes the inactive SDK session |
 | List Agent Chat models | P0 | Upstream + Glue | Implemented | Merges `ICopilotCLIModels` with visible `vscode.lm` models; the inline picker is paginated so every entry remains reachable |
-| Select model | P1 | Upstream + Glue | Implemented | Native CLI models use the ordinary model path; configured VS Code models use an additive SDK provider registry backed by the exact selected LM object |
+| Select model | P1 | Upstream + Glue | Implemented | Native CLI models use the ordinary model path; configured VS Code models use an additive SDK provider registry backed by the exact selected LM object; the validated choice persists across disable/reconnect and reload for the same authorized session |
 | Reasoning effort selection | P1 | Upstream + Glue | Implemented where supported | Offered and accepted only when the feature is enabled and the selected catalogue model lists the effort |
 | Show current agent mode | P0 | Upstream + Telegram | Implemented when live | Reads the live session bridge only; inactive/unknown mode is omitted rather than guessed |
 | Change mode | P1 | Upstream + Glue | Implemented | Telegram offers only `interactive` and `plan`; runtime guards reject `autoApprove`, `autopilot`, and `autopilot_fleet` elevation |
@@ -73,9 +73,9 @@ The **Target** column records current implementation status, not only the eventu
 | Permission buttons | P0 | Implemented | Approve once / deny; opaque callback correlation and first-valid-response-wins |
 | User question buttons | P0 | Implemented | Choice buttons + reply-to-question freeform route |
 | Plan review controls | P1 | Implemented | Implement interactively / approve only / reject; reply-to-plan feedback; no remote autopilot action |
-| Granular activity timeline | P0 | Implemented | One semantic `ActivityRound` per meaningful bubble; read/search bursts aggregate without collapsing the whole turn |
+| Granular activity timeline | P0 | Implemented | One semantic `ActivityRound` per meaningful bubble; correlation is installed before native dispatch so fast local approvals/autopilot cannot outrun projection, and pending tool updates drain before the terminal answer |
 | Focused Rich activity bubble | P0 | Implemented | Tool/interaction rounds with useful detail use `InputRichBlockDetails`; short lifecycle/progress updates stay compact and final assistant answers render directly as formatted rich HTML |
-| Running-round in-place update | P0 | Implemented | Command/tool completion edits its original Rich Message; a reply-linked replacement is sent if editing fails |
+| Running-round in-place update | P0 | Implemented | Command/tool completion edits its original Rich Message; a reply-linked replacement is sent if editing fails, while failed reasoning-only edits suppress replacement duplicates |
 | Reply-to-bubble steering | P0 | Implemented | Message correlation resolves the activity, then uses the normal native prompt/steering dispatcher |
 | Rich draft streaming | P1 | Adapter implemented, intentionally unused in V1 timeline | Drafts are 30-second ephemeral previews with no persistent reply target; persistent send/edit is used for steerable rounds |
 | Slash command shortcuts | P1 | Implemented for current phases | `/new`, `/sessions`, `/deselect`, `/stop`, `/status`, `/start`, `/models`, `/model`, and `/mode` |

@@ -10,6 +10,7 @@ import type { IRemotePermissionRequest, IRemoteUserInputRequest } from '../commo
 
 const maximumDetails = 32;
 const maximumDetailLength = 4_000;
+const maximumReasoningFingerprints = 256;
 const maximumSummaryLength = 180;
 
 interface MutableActivityRound {
@@ -36,6 +37,9 @@ export class ActivityAggregator {
 	private currentInspectionRoundId: string | undefined;
 	private currentReasoningRoundId: string | undefined;
 	private readonly currentReasoningSegments = new Map<string, string>();
+	private readonly reasoningSourceTexts = new Map<string, string>();
+	private readonly projectedReasoning = new Set<string>();
+	private readonly projectedReasoningOrder: string[] = [];
 	private currentAssistantRoundId: string | undefined;
 	private readonly currentAssistantSegments = new Map<string, string>();
 	private requestStartedAt: number;
@@ -76,18 +80,21 @@ export class ActivityAggregator {
 				return [];
 			case 'assistant.intent':
 				this.closeInspectionBoundary();
-				return [this.upsertReasoning(event.id, event.intent, false, timestamp)];
+				return optionalMutation(this.upsertReasoning(event.id, event.intent, false, timestamp));
 			case 'assistant.reasoning':
 				this.closeInspectionBoundary();
-				return [this.upsertReasoning(event.reasoningId, event.content, false, timestamp)];
+				return optionalMutation(this.upsertReasoning(event.reasoningId, event.content, false, timestamp));
 			case 'assistant.reasoning_delta':
 				this.closeInspectionBoundary();
-				return [this.upsertReasoning(event.reasoningId, event.delta, true, timestamp)];
+				return optionalMutation(this.upsertReasoning(event.reasoningId, event.delta, true, timestamp));
 			case 'assistant.message': {
 				const mutations: ActivityRoundMutation[] = [];
 				if (event.reasoning?.trim()) {
 					this.closeInspectionBoundary();
-					mutations.push(this.upsertReasoning(`message:${event.messageId}`, event.reasoning, false, timestamp));
+					const reasoning = this.upsertReasoning(`message:${event.messageId}`, event.reasoning, false, timestamp);
+					if (reasoning) {
+						mutations.push(reasoning);
+					}
 				}
 				const assistant = this.upsertAssistantMessage(event.messageId, event.content, false, timestamp);
 				if (assistant) {
@@ -290,7 +297,23 @@ export class ActivityAggregator {
 		return [{ round: snapshot(round), isNew: false }];
 	}
 
-	private upsertReasoning(sourceId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation {
+	private upsertReasoning(sourceId: string, value: string, append: boolean, timestamp: number): ActivityRoundMutation | undefined {
+		const previousSourceText = this.reasoningSourceTexts.get(sourceId) ?? '';
+		const next = appendBounded(append ? `${previousSourceText}${value}` : value);
+		const fingerprint = normalizeText(next);
+		if (!fingerprint || fingerprint === normalizeText(previousSourceText)) {
+			return undefined;
+		}
+		this.reasoningSourceTexts.set(sourceId, next);
+
+		const currentSegment = this.currentReasoningSegments.get(sourceId);
+		if (currentSegment === undefined && this.projectedReasoning.has(fingerprint)) {
+			return undefined;
+		}
+		if (currentSegment === undefined && [...this.currentReasoningSegments.values()].some(segment => normalizeText(segment) === fingerprint)) {
+			return undefined;
+		}
+
 		let round = this.currentReasoningRoundId ? this.rounds.get(this.currentReasoningRoundId) : undefined;
 		let isNew = false;
 		if (!round) {
@@ -302,11 +325,8 @@ export class ActivityAggregator {
 			this.rounds.set(round.id, round);
 			this.currentReasoningRoundId = round.id;
 		}
-		const current = this.currentReasoningSegments.get(sourceId) ?? '';
-		const next = appendBounded(append ? `${current}${value}` : value);
-		if (append || current || ![...this.currentReasoningSegments.values()].some(segment => normalizeText(segment) === normalizeText(next))) {
-			this.currentReasoningSegments.set(sourceId, next);
-		}
+		this.currentReasoningSegments.set(sourceId, next);
+		this.rememberProjectedReasoning(fingerprint);
 		round.details = [{ value: appendBounded([...this.currentReasoningSegments.values()].filter(Boolean).join('\n\n')) }];
 		round.status = 'running';
 		return { round: snapshot(round), isNew };
@@ -327,7 +347,7 @@ export class ActivityAggregator {
 			existing.completedAt = undefined;
 			return { round: snapshot(existing), isNew: false };
 		}
-		let round = this.currentAssistantRoundId ? this.rounds.get(this.currentAssistantRoundId) : undefined;
+		const round = this.currentAssistantRoundId ? this.rounds.get(this.currentAssistantRoundId) : undefined;
 		if (round) {
 			this.currentAssistantSegments.set(messageId, value);
 			round.details = [{ value: appendBounded([...this.currentAssistantSegments.values()].filter(Boolean).join('\n\n')) }];
@@ -369,6 +389,20 @@ export class ActivityAggregator {
 		if (!round) {
 			return undefined;
 		}
+		const fingerprint = normalizeText(round.details.map(detail => detail.value).join('\n\n'));
+		if (fingerprint && this.projectedReasoning.has(fingerprint)) {
+			this.rounds.delete(round.id);
+			for (const [messageId, roundId] of this.messageRoundIds) {
+				if (roundId === round.id) {
+					this.messageRoundIds.delete(messageId);
+				}
+			}
+			this.clearCurrentAssistant();
+			return undefined;
+		}
+		if (fingerprint) {
+			this.rememberProjectedReasoning(fingerprint);
+		}
 		round.type = 'reasoning';
 		round.summary = l10n.t('Thinking…');
 		round.status = 'completed';
@@ -399,6 +433,17 @@ export class ActivityAggregator {
 	private clearCurrentAssistant(): void {
 		this.currentAssistantRoundId = undefined;
 		this.currentAssistantSegments.clear();
+	}
+
+	private rememberProjectedReasoning(fingerprint: string): void {
+		if (this.projectedReasoning.has(fingerprint)) {
+			return;
+		}
+		this.projectedReasoning.add(fingerprint);
+		this.projectedReasoningOrder.push(fingerprint);
+		while (this.projectedReasoningOrder.length > maximumReasoningFingerprints) {
+			this.projectedReasoning.delete(this.projectedReasoningOrder.shift()!);
+		}
 	}
 
 	private create(input: Omit<MutableActivityRound, 'sessionId' | 'requestId'>): ActivityRoundMutation {
@@ -557,6 +602,10 @@ function summaryFromText(value: string, fallback: string): string {
 
 function hasVisibleAssistantText(value: string): boolean {
 	return value.replace(/[\s#>*_`~\-]+/g, '').length > 0;
+}
+
+function optionalMutation(mutation: ActivityRoundMutation | undefined): readonly ActivityRoundMutation[] {
+	return mutation ? [mutation] : [];
 }
 
 function normalizeText(value: string): string {

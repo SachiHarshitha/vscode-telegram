@@ -746,7 +746,7 @@ extensions/copilot/script/telegram-remote/test-phase6.ps1                       
 
 ## 11. Phase 7 — models, reasoning effort and safe modes
 
-**Status:** Implemented on 2026-08-24 and amended with the combined Agent Chat model bridge. Automated source validation is authoritative; provider-specific local/BYOK compatibility remains deliberately unclaimed pending the full runtime matrix.
+**Status:** Implemented on 2026-08-24 and amended through 2026-08-25 with the combined Agent Chat model bridge, request-scoped activity deduplication, fast-event ordering and scoped model persistence. Automated source validation is authoritative; provider-specific local/BYOK compatibility remains deliberately unclaimed pending the full runtime matrix.
 
 ### Stage A — read-only visibility
 
@@ -754,12 +754,12 @@ extensions/copilot/script/telegram-remote/test-phase6.ps1                       
 - Add a read-only session-service helper for an inactive session's selected model if needed; reuse the transient `getEvents()/getSelectedModel()/closeSession()` pattern in `getChatHistoryImpl()` rather than exposing the SDK session.
 - Display current mode from the session bridge only when known.
 
-### Stage B — validated per-request selection
+### Stage B — validated session-scoped model selection
 
 - Extend the internal workbench command options with `userSelectedModelId` and `userSelectedModelConfiguration`, forwarding them to `chatService.sendRequest()`.
 - Validate model ID and reasoning effort against the combined `TelegramLanguageModelBridge` catalogue before storing a Telegram-side preference.
-- Apply the preference to the next Telegram prompt through the real `ChatRequest`; `CopilotCLIChatSessionInitializer.resolveModel()` and `CopilotCLISession.updateModel()` remain authoritative.
-- Reflect the actual selected model after dispatch. A native user change may supersede Telegram state and must be shown rather than silently overwritten.
+- Persist the validated model and reasoning effort for the exact paired identity, workspace-consent scope and selected session, and apply it to each subsequent Telegram prompt through the real `ChatRequest`; `CopilotCLIChatSessionInitializer.resolveModel()` and `CopilotCLISession.updateModel()` remain authoritative at dispatch.
+- Restore that preference after disable/reconnect or extension reload only when identity, consent scope and session validation still match. Deselecting or changing sessions removes it; a stale catalogue entry fails visibly and is cleared rather than falling back silently.
 - Expose only non-elevating mode operations. Product V1 may enter plan/interactive through supported request semantics; it must not offer remote `autoApprove`, `autopilot`, or `autopilot_fleet`.
 - Keep native models on the upstream path. Adapt configured VS Code LM models into the existing Copilot SDK agent harness through an additive provider registry and a private, authenticated loopback Responses adapter; provider credentials remain inside VS Code.
 
@@ -767,6 +767,7 @@ extensions/copilot/script/telegram-remote/test-phase6.ps1                       
 
 - Unsupported/stale model and reasoning choices fail visibly before dispatch.
 - A remote model preference arrives on the native `ChatRequest` and the SDK-selected model matches afterward.
+- Recreating the Telegram connection preserves the selected model for the same authorized session without weakening identity, consent or session-scope checks.
 - Local/BYOK compatibility is reported only for backends that pass the full prompt/tool/permission/steering/abort matrix.
 
 ### Implementation record
@@ -775,9 +776,11 @@ extensions/copilot/script/telegram-remote/test-phase6.ps1                       
 - `TelegramLanguageModelBridge` merges the native CLI catalogue with the exact visible VS Code LM objects, assigns stable provider-qualified command IDs, and removes native/recursive duplicates. `TelegramRequestPreferences` validates against that merged catalogue when selected and immediately before dispatch. Unsupported or stale state is removed and reported without sending a prompt.
 - Native models still use `copilotcli/<model-id>` in the ordinary `ChatRequest`. Configured models use a private selection property; the initializer obtains an additive SDK registry from the bridge, creates/resumes without an invalid initial custom ID, registers the provider/models idempotently, and only then lets `CopilotCLISession.updateModel()` select the provider-qualified model.
 - The bridge exposes a nonce-authenticated OpenAI Responses endpoint on ephemeral `127.0.0.1` only and translates messages, tools, reasoning metadata, state markers, usage and output back to the exact `LanguageModelChat`. Raw BYOK tokens/base URLs remain inside the VS Code provider and are never placed in Telegram state or logs.
-- Status reads the actual selected model through the active wrapper or the new read-only session-service helper. Inactive reads transiently open/read/close the SDK session without creating a wrapper. A consumed Telegram choice is not persisted, so a later native model change is displayed as authoritative.
+- `TelegramSessionState` persists the validated model source, identifier and optional reasoning effort alongside the selected session. Restoration is exact-identity, consent-scope and session-bound; version 2 selections remain readable and are upgraded to version 3 on write. Status shows this explicit Telegram selection, while sessions without one still use the active-wrapper or transient read/close path.
 - Current mode is shown only for a live bound session. Every Telegram prompt has a trusted registry-created mode and defaults to `interactive`; the only selectable override is `plan`. Type-level and runtime guards reject `autopilot` and any other permission-elevating mode, including forged origins.
 - No local/BYOK backend is marked compatible merely because it appears and can generate text through the bridge; the full provider matrix remains required.
+- Activity projection retains normalized reasoning fingerprints for the active request, so equivalent `assistant.intent`, `assistant.reasoning`, embedded `reasoningText`, and assistant-preface representations do not create repeated **Thinking…** bubbles after tool, permission, or turn boundaries. All agent-scoped `assistant.*` events are excluded from the root timeline; explicit subagent lifecycle and correlated tool rounds remain visible.
+- Telegram now prepares a native dispatch correlation, creates the activity timeline and Stop control, and only then starts the native command. This prevents fast local Allow All/autopilot paths from losing tool events before the request exists. Terminal delivery drains pending tool/reasoning edits before the final answer; failed reasoning-only edits never create a late duplicate replacement.
 
 ### Files
 
@@ -791,7 +794,9 @@ extensions/copilot/src/extension/telegramRemote/common/remoteControlTypes.ts    
 extensions/copilot/src/extension/telegramRemote/common/telegramLanguageModelBridgeTypes.ts      (new)
 extensions/copilot/src/extension/telegramRemote/node/remoteControlRegistry.ts                    (modify)
 extensions/copilot/src/extension/telegramRemote/node/telegramRequestPreferences.ts               (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramSessionState.ts                     (modify)
 extensions/copilot/src/extension/telegramRemote/node/telegramCommandRouter.ts                    (modify)
+extensions/copilot/src/extension/telegramRemote/node/telegramActivityTimeline.ts                 (modify)
 extensions/copilot/src/extension/telegramRemote/vscode-node/remotePromptDispatcher.ts            (modify)
 extensions/copilot/src/extension/telegramRemote/vscode-node/telegramLanguageModelBridge.ts        (new)
 extensions/copilot/src/extension/telegramRemote/vscode-node/telegramLanguageModelResponses.ts     (new)
@@ -803,9 +808,11 @@ extensions/copilot/script/telegram-remote/test-phase7.ps1                       
 | Check | Result |
 | --- | --- |
 | Phase 7 PowerShell runner | Passed via `script/telegram-remote/test-phase7.ps1`: extension typecheck, 29 Telegram files / 189 tests, and 19 focused native model/mode tests |
+| Activity deduplication amendment | Passed: 29 Telegram files / 193 tests, extension typecheck, and targeted changed-file ESLint with zero warnings; covers cross-boundary event aliases, duplicate assistant prefaces, and nested-agent stream isolation |
+| Fast-event and persistence amendment | Passed on 2026-08-25: 29 Telegram files / 200 tests, complete extension typecheck, and targeted changed-file ESLint with zero warnings; covers activity-before-dispatch ordering, fast tool completion before terminal answers, failed reasoning-edit duplicate suppression, agent-tool visibility, reload restoration and sticky model dispatch |
 | Core workbench seam | Passed after a clean workbench rebuild: 31 tests passed / 13 pending, including external model/configuration forwarding |
 | Selected-model visibility | Passed: active wrapper read without reopen; inactive SDK read followed by close; no wrapper acquisition |
-| Model/reasoning pipeline | Passed: combined/paginated catalogue validation, stale failure before dispatch, native `ChatRequest` resolution, additive configured-model registration, and SDK model/effort update |
+| Model/reasoning pipeline | Passed: combined/paginated catalogue validation, stale failure before dispatch, native `ChatRequest` resolution, additive configured-model registration, SDK model/effort update, and exact-scope persistence across connection recreation/reload |
 | Configured-model bridge | Passed: exact `LanguageModelChat` invocation through nonce-authenticated loopback Responses translation; no provider credential is copied into the SDK registry |
 | Safe modes | Passed: interactive default, plan selection, forged origin rejection, and runtime/type rejection of elevating Telegram modes |
 | TypeScript / lint / bundles | Passed: extension typecheck, targeted changed-file ESLint with zero warnings, workbench compile, and Copilot extension bundle |
@@ -815,6 +822,14 @@ extensions/copilot/script/telegram-remote/test-phase7.ps1                       
 
 ### Implement
 
+- Harden the existing internal remote-control framework as an explicitly reusable transport seam:
+  - move transport-neutral contracts, registry/orchestration, trusted request provenance, native prompt dispatch, and Mission Control integration out of the Telegram-specific namespace where practical;
+  - keep Telegram authorization, Bot API lifecycle, commands, activity aggregation, rendering, callbacks, and setup in the Telegram adapter;
+  - preserve a one-way dependency from concrete transports to the generic framework so the framework never imports Telegram implementation code;
+  - replace the currently closed Mission Control/Telegram request-origin union with registry-issued, transport-identified trusted provenance whose capabilities are validated centrally and default to non-elevating behavior;
+  - keep `autopilot`/permission-policy elevation unavailable to Telegram and future transports unless a separately reviewed built-in transport is explicitly granted that capability;
+  - keep generic session-list and attachment UI transport-neutral while allowing branded icons and labels only on transport-owned surfaces;
+  - document this as an internal bundled-fork framework, not a stable public VS Code extension API or Marketplace contribution point.
 - Redacted output channel and diagnostics commands.
 - Rate limits and bounded queues for messages, callbacks, pairing, and Bot API retries.
 - Compatibility report with commit, extension/runtime versions, proposal list, test results, OS, and patch revision.
@@ -822,10 +837,21 @@ extensions/copilot/script/telegram-remote/test-phase7.ps1                       
 - Rebase CI that runs targeted Copilot CLI tests, Telegram tests, controller/native-dispatch integration, Mission Control regression, typecheck, and packaging smoke tests.
 - Manual acceptance covering consent, pairing, prompt, steering, permission, question, plan exit, abort, Mission Control coexistence, disable, reload, and competing host.
 
+### Remote-control framework acceptance
+
+- `CopilotCLISession` depends only on the generic registry/session contract and contains no Telegram-specific control branches.
+- Mission Control and Telegram both register through the same transport contract without changing their current behavior.
+- A synthetic third transport can register, attach to a session, receive normalized/replayed events, submit a prompt through the native dispatcher, participate in permission/question/plan first-response races according to its declared capabilities, abort, detach, and dispose without changing Copilot CLI session code.
+- Trusted request origins cannot be forged structurally, and an unprivileged transport cannot request `autopilot` or otherwise increase the active permission policy.
+- Transport removal, session disposal, extension shutdown, and a failed transport publish leave no retained attachment, listener, pending response, or session reference.
+- Generic framework tests remain independent of Telegram Bot API types, polling, formatting, and credentials.
+
 ### Exit criteria
 
 - Every P0 requirement and security acceptance test passes on a clean bundled build.
 - Telegram disabled produces no Telegram network request, listener, or status item.
+- The reusable remote-control seam passes Mission Control, Telegram, and synthetic-third-transport lifecycle/capability regression tests.
+- Release notes describe the seam as an internal bundled-fork framework and do not claim a stable cross-extension API.
 - The release contains exact compatibility metadata and no secret test data.
 
 ## 13. Optional Phase 9 — own-ID companion research
@@ -861,10 +887,11 @@ extensions/copilot/package.nls.json
 ### Downstream-owned directories
 
 ```text
+extensions/copilot/src/extension/remoteControl/**
 extensions/copilot/src/extension/telegramRemote/**
 ```
 
-The root `eslint.config.js` contains the path-scoped header rule for this downstream-owned directory. Existing upstream files retain the Microsoft header.
+Phase 8 may introduce `remoteControl/**` by moving only transport-neutral downstream-owned code from `telegramRemote/**`; concrete Telegram code remains under `telegramRemote/**`. The root `eslint.config.js` must cover both downstream-owned directories with the project header. Existing upstream files retain the Microsoft header.
 
 ## 15. Configuration and commands
 

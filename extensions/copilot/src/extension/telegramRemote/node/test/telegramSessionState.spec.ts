@@ -52,6 +52,25 @@ describe('TelegramSessionState', () => {
 		expect(registry.getAttachedSessionIds('telegram')).toEqual([]);
 	});
 
+	it('persists the selected model across connection and state recreation', async () => {
+		const { context, registry, state } = createState();
+		await state.select(identity, 'session-1', sessionScopeFingerprint);
+		await state.setSelectedModelPreference(identity, 'session-1', {
+			modelId: 'openai/work-model', modelSource: 'vscode-lm', reasoningEffort: 'high',
+		});
+		state.suspend();
+
+		const restored = new TelegramSessionState('abcdefabcdefabcdefabcdef', context, registry);
+		await expect(restored.restore(identity, async () => true)).resolves.toBe('session-1');
+		expect(restored.getSelectedModelPreference(identity, 'session-1')).toEqual({
+			modelId: 'openai/work-model', modelSource: 'vscode-lm', reasoningEffort: 'high',
+		});
+		expect(context.globalState.values.get('vscode-telegram.telegram-remote.selected-sessions.v2')).toEqual(expect.objectContaining({ version: 3 }));
+
+		await restored.select(identity, 'session-2', sessionScopeFingerprint);
+		expect(restored.getSelectedModelPreference(identity, 'session-2')).toBeUndefined();
+	});
+
 	it('never restores a selection from a different consented workspace scope', async () => {
 		const { context, registry, state } = createState();
 		await state.select(identity, 'session-1', sessionScopeFingerprint);

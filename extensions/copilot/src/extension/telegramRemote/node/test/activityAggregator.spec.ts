@@ -69,6 +69,33 @@ describe('ActivityAggregator', () => {
 		expect(third.round.details?.[0]?.value).toBe('Inspect the request path.\n\nThe marker is internal routing state.');
 	});
 
+	it('suppresses identical reasoning representations across semantic boundaries', () => {
+		const aggregator = new ActivityAggregator('session-1', 'request-1');
+		const reasoning = 'The build script packages with vsce. I will run it now.';
+
+		expect(aggregator.accept(event('assistant.intent', { intent: reasoning }))).toHaveLength(1);
+		aggregator.createPermission({ requestId: 'permission-1', permissionRequest: { kind: 'shell', toolCallId: 'tool-1' } });
+		expect(aggregator.accept(event('assistant.reasoning', { reasoningId: 'reason-1', content: reasoning }))).toEqual([]);
+		expect(aggregator.accept(event('assistant.message', {
+			messageId: 'answer-1', content: 'Running the build.', reasoning,
+		}))).toHaveLength(1);
+	});
+
+	it('does not publish a duplicate assistant preface as another Thinking round', () => {
+		const aggregator = new ActivityAggregator('session-1', 'request-1');
+		const reasoning = 'The dependencies are installed, so the build can start.';
+		const first = aggregator.accept(event('assistant.reasoning', { reasoningId: 'reason-1', content: reasoning }))[0];
+
+		expect(aggregator.accept(event('assistant.message', { messageId: 'preface-1', content: reasoning }))).toHaveLength(1);
+		const toolMutations = aggregator.accept(event('tool.execution_start', {
+			toolCallId: 'command-1', toolName: 'powershell', arguments: { command: '.\\scripts\\build-vsix.ps1' },
+		}));
+
+		expect(toolMutations).toHaveLength(1);
+		expect(toolMutations[0].round).toMatchObject({ type: 'command' });
+		expect(toolMutations[0].round.id).not.toBe(first.round.id);
+	});
+
 	it('keeps turn lifecycle noise out and finalizes the answer with request metadata', () => {
 		const aggregator = new ActivityAggregator('session-1', 'request-1');
 

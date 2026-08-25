@@ -526,8 +526,7 @@ function isTerminalEvent(event: RemoteAgentEvent): boolean {
 }
 
 function isAgentScopedStream(event: RemoteAgentEvent): boolean {
-	return !!event.agentId && (event.kind === 'assistant.message' || event.kind === 'assistant.message_delta'
-		|| event.kind === 'assistant.reasoning' || event.kind === 'assistant.reasoning_delta');
+	return !!event.agentId && event.kind.startsWith('assistant.');
 }
 
 function sameIdentity(left: TelegramPairedIdentity, right: TelegramPairedIdentity): boolean {

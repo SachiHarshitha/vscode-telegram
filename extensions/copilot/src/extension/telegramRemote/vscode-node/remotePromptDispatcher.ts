@@ -22,6 +22,11 @@ export interface IRemotePromptDispatchResult {
 	readonly completion: Promise<void>;
 }
 
+export interface IPreparedRemotePromptDispatch {
+	readonly correlationId: string;
+	start(): IRemotePromptDispatchResult;
+}
+
 export interface IRemotePromptRequestOptions {
 	readonly modelId?: string;
 	readonly modelSource?: TelegramModelSource;
@@ -30,6 +35,7 @@ export interface IRemotePromptRequestOptions {
 
 export interface IRemotePromptDispatcher {
 	readonly _serviceBrand: undefined;
+	prepare(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: IRemotePromptRequestOptions): IPreparedRemotePromptDispatch;
 	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: IRemotePromptRequestOptions): IRemotePromptDispatchResult;
 }
 
@@ -44,6 +50,28 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 
 	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: IRemotePromptRequestOptions): IRemotePromptDispatchResult {
 		const correlationId = createPendingCopilotCLIRequestCorrelationId();
+		return this.prepareDispatch(sessionId, prompt, origin, options, correlationId).start();
+	}
+
+	prepare(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: IRemotePromptRequestOptions): IPreparedRemotePromptDispatch {
+		return this.prepareDispatch(sessionId, prompt, origin, options, createPendingCopilotCLIRequestCorrelationId());
+	}
+
+	private prepareDispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options: IRemotePromptRequestOptions | undefined, correlationId: string): IPreparedRemotePromptDispatch {
+		let started = false;
+		return {
+			correlationId,
+			start: () => {
+				if (started) {
+					throw new Error('Remote prompt dispatch has already started.');
+				}
+				started = true;
+				return this.startDispatch(sessionId, prompt, origin, options, correlationId);
+			},
+		};
+	}
+
+	private startDispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options: IRemotePromptRequestOptions | undefined, correlationId: string): IRemotePromptDispatchResult {
 		const marker = createPendingCopilotCLIRequestMarker(correlationId);
 		const source: `command-${string}` | undefined = origin.kind === 'missionControl'
 			? `command-${origin.commandId}`

@@ -256,6 +256,7 @@ describe('TelegramCommandRouter', () => {
 
 		await test.host.deliver(telegramMessageUpdate(42, 'Please inspect the failing test'));
 		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Please inspect the failing test', expect.objectContaining({ kind: 'telegram', updateId: '42' }));
+		expect(test.activity.beginRequest.mock.invocationCallOrder[0]).toBeLessThan(test.dispatcher.dispatch.mock.invocationCallOrder[0]);
 		expect(lastSentText(test.host)).toContain('Prompt accepted');
 		expect(lastSendOptions(test.host).replyMarkup?.inline_keyboard[0][0].text).toBe('Stop');
 		expect(test.sessionService.getSession).not.toHaveBeenCalled();
@@ -295,7 +296,10 @@ describe('TelegramCommandRouter', () => {
 		await test.host.deliver(telegramMessageUpdate(1, 'First prompt'));
 		const oldStop = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
 		const oldMessageId = test.host.sendMessage.mock.results[0].value ? 1 : 1;
-		test.dispatcher.dispatch.mockReturnValueOnce({ accepted: true, correlationId: 'request-2', completion: new Promise<void>(() => { }) });
+		test.dispatcher.prepare.mockReturnValueOnce({
+			correlationId: 'request-2',
+			start: () => ({ accepted: true, correlationId: 'request-2', completion: new Promise<void>(() => { }) }),
+		});
 		await test.host.deliver(telegramMessageUpdate(2, 'Steer with this'));
 		const currentStop = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
 		const currentMessageId = test.host.sendMessage.mock.calls.length;
@@ -307,13 +311,16 @@ describe('TelegramCommandRouter', () => {
 		expect(test.activity.completeRequest).toHaveBeenLastCalledWith(identity, firstSession.id, 'request-2', 'cancelled');
 	});
 
-	it('does not retry an accepted native prompt when activity-card creation fails', async () => {
+	it('does not start the native prompt when activity-card creation fails', async () => {
 		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
 		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
 		test.activity.beginRequest.mockRejectedValueOnce(new Error('offline with secret content'));
+		const invalidateRequestCallbacks = vi.spyOn(test.host, 'invalidateRequestCallbacks');
 
 		await expect(test.host.deliver(telegramMessageUpdate(7, 'One dispatch only'))).resolves.toBeUndefined();
-		expect(test.dispatcher.dispatch).toHaveBeenCalledOnce();
+		expect(test.dispatcher.prepare).toHaveBeenCalledOnce();
+		expect(test.dispatcher.dispatch).not.toHaveBeenCalled();
+		expect(invalidateRequestCallbacks).toHaveBeenCalledWith(firstSession.id, 'request-1');
 		expect(test.logService.error).toHaveBeenCalledWith('[TelegramRemote] Authorized update routing failed; details were suppressed.');
 		expect(JSON.stringify(test.logService.error.mock.calls)).not.toContain('secret content');
 	});
@@ -435,7 +442,14 @@ function createRouter(
 	const sessionService = new TestSessionService();
 	sessionService.getAllSessions.mockResolvedValue(sessions);
 	sessionService.getSessionItem.mockImplementation(async sessionId => sessions.find(session => session.id === sessionId));
-	const dispatcher = { dispatch: vi.fn(() => ({ accepted: true as const, correlationId: 'request-1', completion })) } satisfies TelegramPromptDispatcher;
+	const dispatch = vi.fn<TelegramPromptDispatcher['dispatch']>(() => ({ accepted: true as const, correlationId: 'request-1', completion }));
+	const dispatcher = {
+		dispatch,
+		prepare: vi.fn<TelegramPromptDispatcher['prepare']>((sessionId, prompt, origin, options) => ({
+			correlationId: 'request-1',
+			start: () => options ? dispatch(sessionId, prompt, origin, options) : dispatch(sessionId, prompt, origin),
+		})),
+	} satisfies TelegramPromptDispatcher;
 	let createdSessionCounter = 0;
 	const sessionCreator = {
 		createSession: vi.fn((workingDirectory, prompt) => {

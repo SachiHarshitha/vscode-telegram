@@ -10,6 +10,7 @@ import type { ICopilotCLISessionService } from '../../chatSessions/copilotcli/no
 import type { IRemoteControlRegistry, RemoteNonElevatingMode } from '../common/remoteControlTypes';
 import type { ITelegramLanguageModelBridge, TelegramModelSource, TelegramSelectableModelInfo } from '../common/telegramLanguageModelBridgeTypes';
 import type { TelegramPairedIdentity } from './telegramAuthorization';
+import type { TelegramPersistedModelPreference } from './telegramSessionState';
 
 export type TelegramPreferenceValidationError =
 	| 'catalog-unavailable'
@@ -56,7 +57,13 @@ export interface TelegramRequestPreferenceController {
 	clear(identity: TelegramPairedIdentity): void;
 }
 
-/** Owns identity/session-bound, one-request Telegram model and safe-mode preferences. */
+export interface TelegramModelPreferenceStore {
+	getSelectedModelPreference(identity: TelegramPairedIdentity, sessionId: string): TelegramPersistedModelPreference | undefined;
+	setSelectedModelPreference(identity: TelegramPairedIdentity, sessionId: string, preference: TelegramPersistedModelPreference): Promise<void>;
+	clearSelectedModelPreference(identity: TelegramPairedIdentity, sessionId: string): Promise<boolean>;
+}
+
+/** Owns an identity/session-bound persistent model and a one-request safe-mode preference. */
 export class TelegramRequestPreferences implements TelegramRequestPreferenceController {
 	private readonly preferences = new Map<string, StoredTelegramPromptPreference>();
 
@@ -64,6 +71,7 @@ export class TelegramRequestPreferences implements TelegramRequestPreferenceCont
 		private readonly models: ITelegramLanguageModelBridge,
 		private readonly sessionService: ICopilotCLISessionService,
 		private readonly registry: IRemoteControlRegistry,
+		private readonly preferenceStore: TelegramModelPreferenceStore,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@ILogService private readonly logService: ILogService,
 	) { }
@@ -92,6 +100,11 @@ export class TelegramRequestPreferences implements TelegramRequestPreferenceCont
 			reasoningEffort: validation.value.reasoningEffort,
 			mode: current?.mode,
 		};
+		await this.preferenceStore.setSelectedModelPreference(identity, sessionId, {
+			modelId: validation.value.modelId,
+			modelSource: validation.value.modelSource,
+			reasoningEffort: validation.value.reasoningEffort,
+		});
 		this.preferences.set(identity.pairingId, next);
 		return { kind: 'valid', value: toPromptPreference(next) };
 	}
@@ -124,6 +137,7 @@ export class TelegramRequestPreferences implements TelegramRequestPreferenceCont
 			const validation = await this.validateModel(stored.modelId, stored.reasoningEffort);
 			if (validation.kind === 'invalid') {
 				this.preferences.delete(identity.pairingId);
+				await this.preferenceStore.clearSelectedModelPreference(identity, sessionId);
 				return validation;
 			}
 			this.preferences.delete(identity.pairingId);
@@ -142,27 +156,35 @@ export class TelegramRequestPreferences implements TelegramRequestPreferenceCont
 	}
 
 	async getStatus(identity: TelegramPairedIdentity, sessionId: string): Promise<TelegramSessionModelStatus> {
+		const stored = this.getStored(identity, sessionId);
 		let selectedModelId: string | undefined;
-		try {
-			selectedModelId = await this.sessionService.getSelectedModelId(sessionId, CancellationToken.None);
-		} catch {
-			this.logService.warn('[TelegramRemote] model-status=unavailable reason=session-read-failed');
+		if (stored?.modelId) {
+			selectedModelId = stored.modelId;
+		} else {
+			try {
+				selectedModelId = await this.sessionService.getSelectedModelId(sessionId, CancellationToken.None);
+			} catch {
+				this.logService.warn('[TelegramRemote] model-status=unavailable reason=session-read-failed');
+			}
 		}
 		let selectedModelLabel = selectedModelId;
 		if (selectedModelId) {
 			try {
 				const model = (await this.models.getModels()).find(candidate => candidate.id === selectedModelId || candidate.runtimeModelId === selectedModelId);
-				selectedModelLabel = model ? formatModel(model) : selectedModelId;
+				selectedModelLabel = model ? `${formatModel(model)}${stored?.reasoningEffort ? ` · ${stored.reasoningEffort}` : ''}` : selectedModelId;
 			} catch {
 				this.logService.warn('[TelegramRemote] model-status=catalog-unavailable');
 			}
 		}
-		const pending = this.getStored(identity, sessionId);
+		const transient = this.preferences.get(identity.pairingId);
+		const pending = transient && transient.userId === identity.userId && transient.chatId === identity.chatId && transient.sessionId === sessionId && transient.mode
+			? { mode: transient.mode } satisfies TelegramPromptPreference
+			: undefined;
 		return {
 			selectedModelId,
 			selectedModelLabel,
 			currentMode: this.registry.getSession(sessionId)?.getCurrentMode(),
-			pending: pending ? toPromptPreference(pending) : undefined,
+			pending,
 		};
 	}
 
@@ -171,11 +193,24 @@ export class TelegramRequestPreferences implements TelegramRequestPreferenceCont
 	}
 
 	private getStored(identity: TelegramPairedIdentity, sessionId: string): StoredTelegramPromptPreference | undefined {
-		const stored = this.preferences.get(identity.pairingId);
-		if (!stored || stored.userId !== identity.userId || stored.chatId !== identity.chatId || stored.sessionId !== sessionId) {
+		const transient = this.preferences.get(identity.pairingId);
+		const matchingTransient = transient?.userId === identity.userId && transient.chatId === identity.chatId && transient.sessionId === sessionId
+			? transient
+			: undefined;
+		const persistentModel = this.preferenceStore.getSelectedModelPreference(identity, sessionId);
+		if (!matchingTransient && !persistentModel) {
 			return undefined;
 		}
-		return stored;
+		return {
+			pairingId: identity.pairingId,
+			userId: identity.userId,
+			chatId: identity.chatId,
+			sessionId,
+			modelId: persistentModel?.modelId ?? matchingTransient?.modelId,
+			modelSource: persistentModel?.modelSource ?? matchingTransient?.modelSource,
+			reasoningEffort: persistentModel?.reasoningEffort ?? matchingTransient?.reasoningEffort,
+			mode: matchingTransient?.mode,
+		};
 	}
 
 	private async validateModel(requestedModelId: string, requestedReasoningEffort: string | undefined): Promise<TelegramPreferenceResult<{ readonly modelId: string; readonly modelSource: TelegramModelSource; readonly reasoningEffort?: string }>> {

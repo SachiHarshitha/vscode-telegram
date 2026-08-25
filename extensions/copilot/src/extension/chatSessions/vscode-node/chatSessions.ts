@@ -266,7 +266,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			requestUserInput: (sessionId, request, token) => activityTimeline.requestUserInput(sessionId, request, token),
 			requestExitPlanMode: (sessionId, request, token) => telegramPlanBridge.requestExitPlanMode(sessionId, request, token),
 		}));
-		const requestPreferences = new TelegramRequestPreferences(models, sessionService, registry, configurationService, logService);
+		const requestPreferences = new TelegramRequestPreferences(models, sessionService, registry, telegramSessionState, configurationService, logService);
 		this._register(instantiationService.createInstance(
 			TelegramCommandRouter,
 			telegramContribution,

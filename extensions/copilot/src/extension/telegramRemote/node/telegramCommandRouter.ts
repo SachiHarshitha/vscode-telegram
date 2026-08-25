@@ -47,7 +47,13 @@ export interface TelegramPromptDispatchResult {
 	readonly completion: Promise<void>;
 }
 
+export interface TelegramPreparedPromptDispatch {
+	readonly correlationId: string;
+	start(): TelegramPromptDispatchResult;
+}
+
 export interface TelegramPromptDispatcher {
+	prepare(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: { readonly modelId?: string; readonly modelSource?: TelegramModelSource; readonly reasoningEffort?: string }): TelegramPreparedPromptDispatch;
 	dispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options?: { readonly modelId?: string; readonly modelSource?: TelegramModelSource; readonly reasoningEffort?: string }): TelegramPromptDispatchResult;
 }
 
@@ -55,9 +61,14 @@ export interface TelegramSessionCreator {
 	createSession(workspaceRoot: NonNullable<ICopilotCLISessionItem['workingDirectory']>, prompt: string): ICopilotCLISessionItem;
 }
 
+interface TelegramRequestActivityStart {
+	readonly generation: number;
+	readonly messageId: number;
+}
+
 export interface TelegramRequestActivity {
 	readonly onDidReachTerminal: Event<TelegramRequestTerminalEvent>;
-	beginRequest(identity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, replyMarkup: TelegramInlineKeyboardMarkup): Promise<{ readonly generation: number; readonly messageId: number } | undefined>;
+	beginRequest(identity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, replyMarkup: TelegramInlineKeyboardMarkup): Promise<TelegramRequestActivityStart | undefined>;
 	completeRequest(identity: TelegramPairedIdentity, sessionId: string, requestId: string, outcome: 'completed' | 'failed' | 'cancelled' | 'superseded'): Promise<void>;
 	isStopControl(sessionId: string, requestId: string, generation: number, messageId: number): boolean;
 	closeRemoteConnection(): string | undefined;
@@ -709,24 +720,41 @@ export class TelegramCommandRouter extends Disposable {
 			await this.activity.completeRequest(identity, previous.sessionId, previous.requestId, 'superseded');
 		}
 		const origin = this.registry.createTelegramOrigin(String(update.update_id), preference.value.mode);
-		const result = preference.value.modelId
-			? this.promptDispatcher.dispatch(selected.item.id, prompt, origin, { modelId: preference.value.modelId, modelSource: preference.value.modelSource, reasoningEffort: preference.value.reasoningEffort })
-			: this.promptDispatcher.dispatch(selected.item.id, prompt, origin);
+		const prepared = preference.value.modelId
+			? this.promptDispatcher.prepare(selected.item.id, prompt, origin, { modelId: preference.value.modelId, modelSource: preference.value.modelSource, reasoningEffort: preference.value.reasoningEffort })
+			: this.promptDispatcher.prepare(selected.item.id, prompt, origin);
 		const stop = this.host.registerCallback({
 			identity,
 			sessionId: selected.item.id,
-			requestId: result.correlationId,
+			requestId: prepared.correlationId,
 			action: 'session.stop',
 		});
-		const activity = await this.activity.beginRequest(identity, selected.item, result.correlationId, {
-			inline_keyboard: [[{ text: l10n.t('Stop'), callback_data: stop.callbackData }]],
-		});
+		let activity: TelegramRequestActivityStart | undefined;
+		try {
+			activity = await this.activity.beginRequest(identity, selected.item, prepared.correlationId, {
+				inline_keyboard: [[{ text: l10n.t('Stop'), callback_data: stop.callbackData }]],
+			});
+		} catch (error) {
+			this.host.invalidateRequestCallbacks(selected.item.id, prepared.correlationId);
+			throw error;
+		}
 		const active: ActiveDispatch = {
 			sessionId: selected.item.id,
-			requestId: result.correlationId,
+			requestId: prepared.correlationId,
 			activityGeneration: activity?.generation,
 		};
 		this.activeDispatches.set(identity.pairingId, active);
+		let result: TelegramPromptDispatchResult;
+		try {
+			result = prepared.start();
+		} catch (error) {
+			await this.finishDispatch(identity, active, 'failed');
+			throw error;
+		}
+		if (result.correlationId !== prepared.correlationId) {
+			await this.finishDispatch(identity, active, 'failed');
+			throw new Error('Prepared Telegram prompt correlation changed during dispatch.');
+		}
 		void result.completion.catch(() => this.finishDispatch(identity, active, 'failed'));
 	}
 
