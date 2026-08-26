@@ -8,6 +8,8 @@ import { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { TelegramBotApiError } from '../../common/telegramTypes';
 import { TelegramBotClient } from '../telegramBotClient';
+import { registerTelegramBotCommands, telegramBotCommands } from '../telegramBotCommands';
+import { configureTelegramChatMenu } from '../telegramChatMenu';
 import { TestTelegramFetcher } from './testTelegramFetcher';
 
 const botToken = '123456:test-token-value';
@@ -140,6 +142,49 @@ describe('TelegramBotClient', () => {
 				{ method: 'answerCallbackQuery', body: { callback_query_id: 'callback-1', text: 'Done' } },
 			],
 		});
+	});
+
+	it('registers the exact native command menu globally before polling', async () => {
+		responses.push(ok(true), ok(true));
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+
+		await registerTelegramBotCommands(client);
+		await configureTelegramChatMenu(client);
+
+		expect(requests).toEqual([
+			{ method: 'setMyCommands', body: { commands: [
+				{ command: 'new', description: 'Start a new Copilot session' },
+				{ command: 'sessions', description: 'View or switch sessions' },
+				{ command: 'model', description: 'Select the AI model' },
+				{ command: 'status', description: 'Show connection and agent status' },
+				{ command: 'files', description: 'Browse workspace files' },
+				{ command: 'stop', description: 'Stop the active request' },
+				{ command: 'controls', description: 'Show quick controls' },
+				{ command: 'settings', description: 'Open bot settings' },
+				{ command: 'help', description: 'Show available commands' },
+			] } },
+			{ method: 'setChatMenuButton', body: { menu_button: { type: 'commands' } } },
+		]);
+		expect(telegramBotCommands).toHaveLength(9);
+	});
+
+	it('sends persistent reply keyboards and explicit keyboard removal', async () => {
+		responses.push(ok(telegramMessage('controls')), ok(telegramMessage('hidden')));
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+		const keyboard = {
+			keyboard: [[{ text: 'Status' }]],
+			resize_keyboard: true,
+			is_persistent: true,
+			one_time_keyboard: false,
+		} as const;
+
+		await client.sendMessage(99, 'controls', { replyKeyboardMarkup: keyboard });
+		await client.sendMessage(99, 'hidden', { replyKeyboardMarkup: { remove_keyboard: true } });
+
+		expect(requests).toEqual([
+			{ method: 'sendMessage', body: { chat_id: 99, text: 'controls', reply_markup: keyboard } },
+			{ method: 'sendMessage', body: { chat_id: 99, text: 'hidden', reply_markup: { remove_keyboard: true } } },
+		]);
 	});
 
 	it('accepts the empty response returned when a long poll times out', async () => {

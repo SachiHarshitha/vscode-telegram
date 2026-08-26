@@ -133,6 +133,21 @@ Cover:
 - concurrent Disable blocks dispatch immediately and a late startup completion cannot revive the cancelled generation,
 - automatic cross-process singleton lease acquisition still rejects a second host, while explicit Reconnect transfers ownership and causes the displaced poller to abort before replacement polling.
 
+### Native Telegram command UI
+
+Cover:
+
+- startup calls `setMyCommands` with the exact nine commands, then configures the global `commands` menu button without `chat_id`, before the first poll,
+- `/controls` sends the exact persistent idle keyboard and `/controls_off` sends `remove_keyboard: true`,
+- opt-in survives reconstruction only for the exact pairing ID, numeric user ID and chat ID,
+- idle → running → idle/disconnected sends keyboard markup once per visible state transition,
+- every reply-keyboard label normalizes into the same action handler used by its slash command,
+- native live-draft Stop, `/stop`, and the legacy `■ Stop` payload reach the same registry-owned abort seam,
+- session/model/file callbacks remain opaque and identity/session/request-bound; every routed callback is answered,
+- inline menus edit the tracked message, unchanged renders skip the API call, and a Bot API already-unchanged response is success,
+- workspace file callbacks cannot escape the selected authorized root, traverse paths, follow displayed symlink entries, expose binary content or exceed the preview bound,
+- replacing/revoking the exact paired identity prevents commands, controls, callbacks and free text from reaching application actions.
+
 ### Optional V2 standalone `argv.json` updater
 
 Use temporary files covering:

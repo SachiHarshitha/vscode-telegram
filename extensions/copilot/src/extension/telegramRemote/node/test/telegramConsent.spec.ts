@@ -26,8 +26,8 @@ describe('TelegramConsent', () => {
 
 	it('fails closed for stale, malformed, and token-mismatched records', async () => {
 		const context = new TestTelegramExtensionContext('C:\\telegram-test');
-		context.globalState.values.set('vscode-telegram.telegram-remote.consent.v1', {
-			version: 0,
+		context.globalState.values.set('vscode-telegram.telegram-remote.consent.v2', {
+			version: 2,
 			state: 'active',
 			tokenFingerprint,
 			scopeFingerprint: tokenFingerprint,
@@ -38,6 +38,17 @@ describe('TelegramConsent', () => {
 		expect(consent.hasCurrentConsent(tokenFingerprint, tokenFingerprint)).toBe(false);
 		await consent.begin(tokenFingerprint, tokenFingerprint);
 		await expect(consent.commit('abcdefabcdefabcdefabcdef')).rejects.toThrow('consent state write failed');
+	});
+
+	it('removes current and legacy consent records on explicit revocation', async () => {
+		const context = new TestTelegramExtensionContext('C:\\telegram-test');
+		context.globalState.values.set('vscode-telegram.telegram-remote.consent.v2', { version: 2 });
+		const consent = new TelegramConsent(context);
+		await consent.begin(tokenFingerprint, tokenFingerprint);
+
+		await consent.revoke();
+
+		expect([...context.globalState.values.keys()].filter(key => key.includes('telegram-remote.consent'))).toEqual([]);
 	});
 
 	it('normalizes workspace order without exposing the raw workspace in stored state', async () => {

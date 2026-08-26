@@ -10,7 +10,9 @@ import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport, type IRemoteExitPlanModeRequest, type IRemoteExitPlanModeResponse, type IRemotePermissionRequest, type IRemoteUserInputRequest, type IRemoteUserInputResponse, type RemotePermissionResult } from '../../remoteControl/common/remoteControlTypes';
-import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
+import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageDraftOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
+import { registerTelegramBotCommands } from './telegramBotCommands';
+import { configureTelegramChatMenu } from './telegramChatMenu';
 import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHandler } from './telegramService';
 
 /** Telegram Bot API transport; the contribution owns Phase 3 authorization and lifecycle policy. */
@@ -48,7 +50,10 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 	}
 
 	start(botToken: string, handleUpdate: (update: TelegramUpdate) => Promise<void>, handleValidated?: TelegramValidatedHandler, options?: TelegramPollingOptions): Promise<TelegramUser> {
-		return this.service.start(botToken, handleUpdate, handleValidated, options);
+		return this.service.start(botToken, handleUpdate, handleValidated, options, async (client, _bot, signal) => {
+			await registerTelegramBotCommands(client, signal);
+			await configureTelegramChatMenu(client, signal);
+		});
 	}
 
 	sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
@@ -59,8 +64,8 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 		return this.service.sendRichMessage(chatId, richMessage, options);
 	}
 
-	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
-		return this.service.sendRichMessageDraft(chatId, draftId, richMessage);
+	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageDraftOptions): Promise<true> {
+		return this.service.sendRichMessageDraft(chatId, draftId, richMessage, options);
 	}
 
 	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {

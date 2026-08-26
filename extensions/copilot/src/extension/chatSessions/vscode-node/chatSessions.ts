@@ -54,11 +54,13 @@ import { TelegramCommandRouter } from '../../telegramRemote/node/telegramCommand
 import { TelegramActivityTimeline } from '../../telegramRemote/node/telegramActivityTimeline';
 import { TelegramPlanBridge } from '../../telegramRemote/node/telegramPlanBridge';
 import { TelegramRequestPreferences } from '../../telegramRemote/node/telegramRequestPreferences';
+import { TelegramControlUiState } from '../../telegramRemote/node/telegramControlUiState';
 import { TelegramSessionState } from '../../telegramRemote/node/telegramSessionState';
 import { getTelegramRemoteEnvironment } from '../../telegramRemote/vscode-node/telegramRemoteEnvironment';
 import { CurrentWorkspaceTelegramSessionScopePolicy } from '../../telegramRemote/vscode-node/telegramSessionScope';
 import { getTelegramRemoteCapabilities, TelegramSetupWizard } from '../../telegramRemote/vscode-node/telegramSetupWizard';
 import { TelegramStatusBar } from '../../telegramRemote/vscode-node/telegramStatusBar';
+import { TelegramWorkspaceFileBrowserImpl } from '../../telegramRemote/vscode-node/telegramWorkspaceFileBrowser';
 import { CopilotCLIFolderMruService } from '../copilotcli/vscode-node/copilotCLIFolderMru';
 import { ICopilotCLISessionTracker } from '../copilotcli/vscode-node/copilotCLISessionTracker';
 import { CustomSessionTitleService } from '../copilotcli/vscode-node/customSessionTitleServiceImpl';
@@ -254,6 +256,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			() => configurationService.getConfig(ConfigKey.Advanced.CLITelegramActivityDetail),
 			undefined,
 		));
+		this._register(telegramContribution.registerPersistentMessageHandler(() => activityTimeline.refreshActiveDraft()));
 		const telegramPlanBridge = this._register(instantiationService.createInstance(
 			TelegramPlanBridge,
 			telegramContribution,
@@ -269,6 +272,8 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			requestExitPlanMode: (sessionId, request, token) => telegramPlanBridge.requestExitPlanMode(sessionId, request, token),
 		}));
 		const requestPreferences = new TelegramRequestPreferences(models, sessionService, registry, telegramSessionState, configurationService, logService);
+		const controlUiState = instantiationService.createInstance(TelegramControlUiState);
+		const fileBrowser = instantiationService.createInstance(TelegramWorkspaceFileBrowserImpl);
 		this._register(instantiationService.createInstance(
 			TelegramCommandRouter,
 			telegramContribution,
@@ -283,10 +288,12 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			sessionScopePolicy,
 			activityTimeline,
 			requestPreferences,
+			controlUiState,
+			fileBrowser,
 		));
 		const telegramSetupWizard = this._register(instantiationService.createInstance(TelegramSetupWizard, telegramContribution, telegramDiagnostics));
 		this._register(instantiationService.createInstance(TelegramStatusBar, telegramContribution, telegramSetupWizard));
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=8; remote-control-framework=generic; transport-capabilities=registry-validated; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-routing=authorized-only; telegram-activity=rich-timeline; telegram-plan-response=safe-actions-only; telegram-models=combined-vscode-lm-bridge; telegram-modes=non-elevating; telegram-diagnostics=redacted; telegram-rate-limits=bounded; telegram-network=consent-gated`);
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=8; remote-control-framework=generic; transport-capabilities=registry-validated; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-native-menu=ready; telegram-controls=opt-in; telegram-files=read-only; telegram-routing=authorized-only; telegram-activity=live-draft; telegram-native-stop=ready; telegram-plan-response=safe-actions-only; telegram-models=combined-vscode-lm-bridge; telegram-modes=non-elevating; telegram-diagnostics=redacted; telegram-rate-limits=bounded; telegram-network=consent-gated`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

@@ -66,19 +66,25 @@ The **Target** column records current implementation status, not only the eventu
 | Feature | Priority | Target | Notes |
 | --- | --- | --- | --- |
 | Home/status card | P0 | Implemented | Telegram-safe HTML card with an emoji title, bold field labels, section spacing, and escaped dynamic session/model/workspace values |
+| Native command menu | P0 | Implemented | Startup registers the exact nine-command list and configures Telegram's global `commands` menu button without a per-chat override |
+| Opt-in quick controls | P0 | Implemented | `/controls` enables a per-paired-user/chat persistent keyboard whose button text is the literal slash-command payload required by Telegram; `/controls_off` explicitly restores normal text-input mode |
+| State-aware control keyboard | P0 | Implemented | Central idle/running/disconnected factory; selected-session status changes from the native CLI service update Telegram for both local- and Telegram-started turns, and keyboard markup is resent only when the visible state changes |
 | Inline session picker | P0 | Implemented | Structured emoji-titled card with bold workstation/workspace labels and opaque callback buttons |
 | Inline model picker | P1 | Implemented | Combined, paginated catalogue with opaque callbacks and nested supported reasoning-effort choices |
+| Inline workspace file browser | P1 | Implemented | Read-only, bounded text previews below the selected authorized workspace; opaque callbacks and in-place menu edits |
 | Inline mode picker | P1 | Implemented | Interactive/plan only; preference applies to the next Telegram prompt |
-| Stop button | P0 | Required | Guard against stale callback/session mismatch |
+| Stop controls | P0 | Implemented, awaiting real-bot validation | Bot API 10.3 renders native Stop on every active draft and routes `stopped_message_generation` through the registry-owned abort path; `/stop` and the legacy `■ Stop` payload remain fallbacks, including for a selected locally started task |
 | Permission buttons | P0 | Implemented | Approve once / deny; opaque callback correlation and first-valid-response-wins |
 | User question buttons | P0 | Implemented | Choice buttons + reply-to-question freeform route |
 | Plan review controls | P1 | Implemented | Implement interactively / approve only / reject; reply-to-plan feedback; no remote autopilot action |
-| Granular activity timeline | P0 | Implemented | One semantic `ActivityRound` per meaningful bubble; correlation is installed before native dispatch so fast local approvals/autopilot cannot outrun projection, and pending tool updates drain before the terminal answer |
+| Live activity draft | P0 | Implemented, awaiting real-bot validation | One ephemeral `sendRichMessageDraft` per active run uses a stable draft ID, semantic `<tg-thinking>` states, a 10-second heartbeat, and Bot API 10.3 native Stop; generic start/idle/reasoning states are not persisted |
+| Granular activity timeline | P0 | Implemented | Meaningful completed tools/interactions may remain persistent; any such message immediately restores the active live draft, while the terminal assistant answer intentionally replaces it |
 | Focused Rich activity bubble | P0 | Implemented | Tool/interaction rounds with useful detail use `InputRichBlockDetails`; short lifecycle/progress updates stay compact and final assistant answers render directly as formatted rich HTML |
-| Running-round in-place update | P0 | Implemented | Command/tool completion edits its original Rich Message; a reply-linked replacement is sent if editing fails, while failed reasoning-only edits suppress replacement duplicates |
+| Running-round in-place update | P0 | Implemented | Running phases update the live draft instead of creating messages; completed command/tool activity may be persisted, and final assistant text is sent once after the draft heartbeat stops |
 | Reply-to-bubble steering | P0 | Implemented | Message correlation resolves the activity, then uses the normal native prompt/steering dispatcher |
 | Rich draft streaming | P1 | Adapter implemented, intentionally unused in V1 timeline | Drafts are 30-second ephemeral previews with no persistent reply target; persistent send/edit is used for steerable rounds |
-| Slash command shortcuts | P1 | Implemented for current phases | `/new`, `/sessions`, `/deselect`, `/stop`, `/status`, `/start`, `/models`, `/model`, and `/mode` |
+| Slash command shortcuts | P1 | Implemented | Native menu exposes `/new`, `/sessions`, `/model`, `/status`, `/files`, `/stop`, `/controls`, `/settings`, and `/help`; compatibility aliases include `/start`, `/models`, `/mode`, `/deselect`, and `/controls_off` |
+| Idempotent inline interactions | P0 | Implemented | Every routed callback is answered; unchanged status renders skip Bot API edits and changed menus edit the tracked message instead of recreating it |
 | Images/files from Telegram | P1 | Planned | Controlled download + SDK attachment path |
 | Notifications on completion | P1 | Planned | Completion/failure/approval-needed |
 | Telegram Mini App | P2 | Optional | Rich dashboard only if bot UI becomes limiting |

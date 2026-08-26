@@ -13,8 +13,9 @@ import type { ActivityRound, ActivityRoundMutation } from '../common/activityRou
 import { projectRemoteAgentEvent, type RemoteAgentEvent } from '../../remoteControl/common/remoteAgentEvent';
 import type { IRemoteControlSessionEvent, IRemotePermissionRequest, IRemoteUserInputRequest, IRemoteUserInputResponse, RemotePermissionResult } from '../../remoteControl/common/remoteControlTypes';
 import type { TelegramAuthorizedSessionScope, TelegramSessionScopePolicy } from '../common/telegramSessionScope';
-import { TelegramBotApiError, type TelegramAnswerCallbackQueryOptions, type TelegramEditRichMessageOptions, type TelegramInlineKeyboardMarkup, type TelegramInputRichMessage, type TelegramMessage, type TelegramSendRichMessageOptions, type TelegramUpdate } from '../common/telegramTypes';
+import { TelegramBotApiError, type TelegramAnswerCallbackQueryOptions, type TelegramEditRichMessageOptions, type TelegramInlineKeyboardMarkup, type TelegramInputRichMessage, type TelegramMessage, type TelegramSendRichMessageDraftOptions, type TelegramSendRichMessageOptions, type TelegramUpdate } from '../common/telegramTypes';
 import { ActivityAggregator } from './activityAggregator';
+import { TelegramActivityDraftController, type TelegramActivityDraftScheduler } from './telegramActivityDraftController';
 import type { TelegramPairedIdentity } from './telegramAuthorization';
 import type { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration } from './telegramCallbackRegistry';
 import type { TelegramActivityReplyResolution, TelegramRequestActivity, TelegramRequestTerminalEvent } from './telegramCommandRouter';
@@ -35,6 +36,7 @@ export interface TelegramActivityTimelineHost {
 	consumeCallback(update: TelegramUpdate, constraints?: TelegramCallbackConstraints): TelegramCallbackContext | undefined;
 	invalidateRequestCallbacks(sessionId: string, requestId: string): void;
 	sendRichMessage(chatId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage>;
+	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageDraftOptions): Promise<true>;
 	editRichMessage(chatId: number, messageId: number, richMessage: TelegramInputRichMessage, options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true>;
 	editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage | true>;
 	answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void>;
@@ -42,10 +44,7 @@ export interface TelegramActivityTimelineHost {
 	clearDeliveryClient(): void;
 }
 
-export interface TelegramActivityTimelineScheduler {
-	now(): number;
-	schedule(callback: () => Promise<void>, delayMs: number): IDisposable;
-}
+export interface TelegramActivityTimelineScheduler extends TelegramActivityDraftScheduler { }
 
 interface TelegramActivityEnvironment {
 	readonly workstationLabel: string;
@@ -74,11 +73,13 @@ interface TimelineState {
 	readonly scopeFingerprint: string;
 	readonly aggregator: ActivityAggregator;
 	readonly rounds: Map<string, RoundDelivery>;
+	readonly messageThreadId?: number;
 	requestId?: string;
-	startRoundId?: string;
+	draft?: TelegramActivityDraftController;
 	requestStarted: boolean;
 	complete: boolean;
 	connectionClosed: boolean;
+	stopRequested: boolean;
 	terminalOutcome?: 'completed' | 'failed' | 'cancelled';
 	terminalNotified: boolean;
 }
@@ -130,7 +131,7 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		this.scheduler = scheduler ?? new DefaultTimelineScheduler();
 		this._register(host.onDidChangePairedIdentity(identity => {
 			if (!identity) {
-				this.dropActiveState(true);
+				this.dropActiveState();
 			}
 		}));
 	}
@@ -147,20 +148,17 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		});
 	}
 
-	async beginRequest(identity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, replyMarkup: TelegramInlineKeyboardMarkup): Promise<{ readonly generation: number; readonly messageId: number } | undefined> {
+	async beginRequest(identity: TelegramPairedIdentity, session: ICopilotCLISessionItem, requestId: string, _replyMarkup: TelegramInlineKeyboardMarkup, messageThreadId?: number): Promise<{ readonly generation: number; readonly messageId: number } | undefined> {
 		const authorized = await this.getAuthorizedSession(session.id, identity, session);
 		if (!authorized) {
 			return undefined;
 		}
-		await this.removeStopControl(this.activeState);
 		this.reset();
-		const state = this.createState(authorized, requestId);
+		const state = this.createState(authorized, requestId, messageThreadId);
 		this.activeState = state;
-		const mutation = state.aggregator.beginRequest();
-		state.startRoundId = mutation.round.id;
-		await this.publishMutation(state, mutation, replyMarkup, true);
-		const messageId = state.rounds.get(mutation.round.id)?.messageId;
-		return messageId === undefined ? undefined : { generation: state.generation, messageId };
+		state.aggregator.beginRequest();
+		await this.ensureDraft(state, l10n.t('Working…'));
+		return { generation: state.generation, messageId: state.draft!.draft.draftId };
 	}
 
 	async completeRequest(identity: TelegramPairedIdentity, sessionId: string, requestId: string, outcome: 'completed' | 'failed' | 'cancelled' | 'superseded'): Promise<void> {
@@ -172,33 +170,28 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		state.complete = true;
 		this.cancelScheduledFlushes(state);
 		state.terminalOutcome = outcome === 'superseded' ? undefined : outcome;
-		await this.removeStopControl(state);
+		state.draft?.stop();
 		const mutation = state.aggregator.completeRequest(outcome);
-		if (mutation) {
+		if (mutation && outcome !== 'cancelled' && outcome !== 'superseded') {
 			await this.publishMutation(state, mutation, undefined, true);
 		}
 		this.notifyTerminal(state);
 	}
 
-	isStopControl(sessionId: string, requestId: string, generation: number, messageId: number): boolean {
-		const state = this.activeState;
-		if (!state || state.sessionId !== sessionId || state.requestId !== requestId || state.generation !== generation || !state.startRoundId) {
-			return false;
-		}
-		const start = state.rounds.get(state.startRoundId);
-		return start?.messageId === messageId && containsControls(start.replyMarkup);
+	isStopControl(_sessionId: string, _requestId: string, _generation: number, _messageId: number): boolean {
+		return false;
 	}
 
 	closeRemoteConnection(): string | undefined {
 		const state = this.activeState;
 		if (!state?.requestId || state.complete) {
-			this.dropActiveState(true);
+			this.dropActiveState();
 			this.host.clearDeliveryClient();
 			return undefined;
 		}
 		state.connectionClosed = true;
+		state.draft?.stop();
 		this.host.preserveDeliveryClient();
-		void this.removeStopControl(state);
 		return state.sessionId;
 	}
 
@@ -215,8 +208,11 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		let state = this.activeState;
 		if (!state || state.sessionId !== sessionId || state.scopeFingerprint !== authorized.scope.fingerprint || !sameIdentity(state.identity, authorized.identity)) {
 			this.reset();
-			state = this.createState(authorized, undefined);
+			state = this.createState(authorized, undefined, undefined);
 			this.activeState = state;
+		}
+		if (isRequestActivityEvent(event) && !isTerminalEvent(event)) {
+			await this.ensureDraft(state, l10n.t('Working…'));
 		}
 		if (!state.requestStarted) {
 			if (isRequestActivityEvent(event)) {
@@ -224,23 +220,27 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			} else if (event.kind === 'session.idle' || event.kind === 'session.task_complete' || event.kind === 'abort') {
 				// A selected SDK session can still emit the previous turn's idle/terminal
 				// edge while the native remote prompt is being opened. It must not retire
-				// the new request's Stop control before that request actually starts.
+				// the new request's live draft before that request actually starts.
 				return;
 			} else if (isTerminalEvent(event)) {
 				state.requestStarted = true;
 			}
 		}
-		if (isTerminalEvent(event)) {
+		const terminal = isTerminalEvent(event);
+		if (terminal) {
 			await this.flushPendingActivityBeforeTerminal(state);
-		}
-		for (const mutation of state.aggregator.accept(event)) {
-			await this.publishMutation(state, mutation, undefined, isUrgent(event, mutation.round));
-		}
-		if (isTerminalEvent(event) && !state.complete) {
+			state.draft?.stop();
 			state.complete = true;
 			this.cancelScheduledFlushes(state);
 			state.terminalOutcome = terminalOutcome(event);
-			await this.removeStopControl(state);
+		}
+		for (const mutation of state.aggregator.accept(event)) {
+			if (terminal && state.stopRequested && state.terminalOutcome === 'cancelled') {
+				continue;
+			}
+			await this.publishMutation(state, mutation, undefined, isUrgent(event, mutation.round));
+		}
+		if (terminal) {
 			this.notifyTerminal(state);
 		}
 	}
@@ -364,6 +364,31 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		return true;
 	}
 
+	async handleStoppedMessageGeneration(update: TelegramUpdate, identity: TelegramPairedIdentity): Promise<boolean> {
+		const stopped = update.stopped_message_generation;
+		const state = this.activeState;
+		if (!stopped || !state?.draft || state.complete || !sameIdentity(state.identity, identity) || !state.draft.matches(stopped)) {
+			return false;
+		}
+		state.stopRequested = true;
+		state.draft.stop();
+		this.logService.info('[TelegramRemote] live-draft=stop-request matched=true');
+		return true;
+	}
+
+	requestStop(identity: TelegramPairedIdentity, sessionId: string): Promise<void> {
+		const state = this.activeState;
+		if (state && state.sessionId === sessionId && !state.complete && sameIdentity(state.identity, identity)) {
+			state.stopRequested = true;
+			state.draft?.stop();
+		}
+		return Promise.resolve();
+	}
+
+	refreshActiveDraft(): Promise<void> {
+		return this.activeState?.draft?.refreshImmediately() ?? Promise.resolve();
+	}
+
 	async resolveReply(update: TelegramUpdate, identity: TelegramPairedIdentity): Promise<TelegramActivityReplyResolution> {
 		if (this.planInteractionHandler) {
 			const planReply = await this.planInteractionHandler.resolvePlanReply(update, identity);
@@ -404,13 +429,14 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		let state = this.activeState;
 		if (!state || state.sessionId !== sessionId || state.complete || !sameIdentity(state.identity, authorized.identity)) {
 			this.reset();
-			state = this.createState(authorized, undefined);
+			state = this.createState(authorized, undefined, undefined);
 			this.activeState = state;
 		}
+		await this.ensureDraft(state, l10n.t('Waiting for Copilot…'));
 		return state;
 	}
 
-	private createState(authorized: AuthorizedActivitySession, requestId: string | undefined): TimelineState {
+	private createState(authorized: AuthorizedActivitySession, requestId: string | undefined, messageThreadId: number | undefined): TimelineState {
 		return {
 			generation: ++this.generation,
 			identity: authorized.identity,
@@ -418,10 +444,12 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			scopeFingerprint: authorized.scope.fingerprint,
 			aggregator: new ActivityAggregator(authorized.item.id, requestId, () => this.scheduler.now()),
 			rounds: new Map(),
+			messageThreadId,
 			requestId,
 			requestStarted: requestId === undefined,
 			complete: false,
 			connectionClosed: false,
+			stopRequested: false,
 			terminalNotified: false,
 		};
 	}
@@ -439,10 +467,12 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			delivery.replyMarkup = replyMarkup ?? delivery.replyMarkup;
 			delivery.dirty = true;
 		}
-		// Assistant text is provisional until a tool boundary or terminal event tells
-		// us whether it was a tool preface or the final answer. Holding it here avoids
-		// a short-lived, content-free "Agent response" bubble.
-		if (mutation.isNew && mutation.round.type === 'answer' && mutation.round.status === 'running') {
+		if (!state.complete) {
+			await this.ensureDraft(state, draftStatus(mutation.round));
+			await state.draft?.update(draftStatus(mutation.round));
+		}
+		if (!shouldPersistRound(mutation.round)) {
+			delivery.dirty = false;
 			return;
 		}
 		if (mutation.isNew || urgent) {
@@ -496,7 +526,7 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		const signature = JSON.stringify({ richMessage, replyMarkup: delivery.replyMarkup });
 		try {
 			if (delivery.messageId === undefined) {
-				const message = await this.host.sendRichMessage(state.identity.chatId, richMessage, { disableNotification: delivery.round.status === 'running', replyMarkup: delivery.replyMarkup });
+				const message = await this.host.sendRichMessage(state.identity.chatId, richMessage, { messageThreadId: state.messageThreadId, disableNotification: delivery.round.status === 'running', replyMarkup: delivery.replyMarkup });
 				delivery.messageId = message.message_id;
 				this.rememberCorrelation(state, delivery);
 			} else if (delivery.lastSignature !== signature) {
@@ -516,6 +546,7 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 						return;
 					}
 					const replacement = await this.host.sendRichMessage(state.identity.chatId, richMessage, {
+						messageThreadId: state.messageThreadId,
 						replyMarkup: delivery.replyMarkup,
 						replyParameters: { message_id: delivery.messageId, allow_sending_without_reply: true },
 					});
@@ -577,23 +608,21 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		await this.publishMutation(state, mutation, emptyInlineKeyboard, true);
 	}
 
-	private async removeStopControl(state: TimelineState | undefined): Promise<void> {
-		if (!state?.startRoundId) {
+	private async ensureDraft(state: TimelineState, status: string): Promise<void> {
+		if (state.complete || state.connectionClosed) {
 			return;
 		}
-		const delivery = state.rounds.get(state.startRoundId);
-		if (!delivery || !containsControls(delivery.replyMarkup)) {
-			return;
+		if (!state.draft) {
+			state.draft = new TelegramActivityDraftController(
+				this.host,
+				this.scheduler,
+				state.identity.chatId,
+				state.messageThreadId,
+				state.requestId ?? `session:${state.sessionId}:${state.generation}`,
+				this.logService,
+			);
 		}
-		delivery.replyMarkup = emptyInlineKeyboard;
-		if (delivery.messageId === undefined) {
-			return;
-		}
-		try {
-			await this.host.editMessageReplyMarkup(state.identity.chatId, delivery.messageId, emptyInlineKeyboard);
-		} catch {
-			this.logService.warn('[TelegramRemote] Failed to remove a stale Telegram Stop control.');
-		}
+		await state.draft.start(status);
 	}
 
 	private async safeAnswer(callbackQueryId: string, options: TelegramAnswerCallbackQueryOptions): Promise<void> {
@@ -633,17 +662,14 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		}
 	}
 
-	private dropActiveState(removeStop: boolean): void {
-		const state = this.activeState;
+	private dropActiveState(): void {
 		this.reset();
-		if (removeStop) {
-			void this.removeStopControl(state);
-		}
 		this.host.clearDeliveryClient();
 	}
 
 	private reset(): void {
 		this.generation++;
+		this.activeState?.draft?.dispose();
 		for (const delivery of this.activeState?.rounds.values() ?? []) {
 			delivery.flushTimer?.dispose();
 		}
@@ -669,7 +695,7 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 	}
 
 	public override dispose(): void {
-		this.dropActiveState(true);
+		this.dropActiveState();
 		super.dispose();
 	}
 }
@@ -693,12 +719,43 @@ function interactionKey(sessionId: string, requestId: string): string {
 	return `${sessionId}:${requestId}`;
 }
 
-function containsControls(markup: TelegramInlineKeyboardMarkup | undefined): boolean {
-	return !!markup?.inline_keyboard.some(row => row.length > 0);
-}
-
 function sameIdentity(left: TelegramPairedIdentity, right: TelegramPairedIdentity): boolean {
 	return left.pairingId === right.pairingId && left.userId === right.userId && left.chatId === right.chatId;
+}
+
+function shouldPersistRound(round: ActivityRound): boolean {
+	if (round.type === 'answer') {
+		return round.status === 'completed';
+	}
+	if (round.type === 'permission' || round.type === 'question') {
+		return true;
+	}
+	if (round.type === 'read' || round.type === 'search' || round.type === 'edit' || round.type === 'command' || round.type === 'subagent') {
+		return round.status !== 'running';
+	}
+	return round.status === 'failed' && round.type === 'other';
+}
+
+function draftStatus(round: ActivityRound): string {
+	if (round.status === 'waiting') {
+		return l10n.t('Waiting for Copilot…');
+	}
+	if (round.status === 'completed' || round.status === 'failed') {
+		return l10n.t('Waiting for Copilot…');
+	}
+	switch (round.type) {
+		case 'read': return l10n.t('Reading workspace…');
+		case 'search': return l10n.t('Searching files…');
+		case 'command': return l10n.t('Running terminal command…');
+		case 'edit': return l10n.t('Applying changes…');
+		case 'answer': return l10n.t('Generating response…');
+		case 'permission':
+		case 'question': return l10n.t('Waiting for Copilot…');
+		case 'other': return l10n.t('Running tool…');
+		case 'reasoning':
+		case 'progress':
+		case 'subagent': return l10n.t('Working…');
+	}
 }
 
 function isTerminalEvent(event: RemoteAgentEvent): boolean {

@@ -27,6 +27,7 @@ export interface TelegramChat {
 
 export interface TelegramMessage {
 	readonly message_id: number;
+	readonly message_thread_id?: number;
 	readonly date: number;
 	readonly chat: TelegramChat;
 	readonly from?: TelegramUser;
@@ -42,10 +43,17 @@ export interface TelegramCallbackQuery {
 	readonly data?: string;
 }
 
+export interface TelegramMessageGenerationStopped {
+	readonly chat: TelegramChat;
+	readonly message_thread_id?: number;
+	readonly draft_id: number;
+}
+
 export interface TelegramUpdate {
 	readonly update_id: number;
 	readonly message?: TelegramMessage;
 	readonly callback_query?: TelegramCallbackQuery;
+	readonly stopped_message_generation?: TelegramMessageGenerationStopped;
 }
 
 export interface TelegramInlineKeyboardButton {
@@ -56,6 +64,31 @@ export interface TelegramInlineKeyboardButton {
 
 export interface TelegramInlineKeyboardMarkup {
 	readonly inline_keyboard: readonly (readonly TelegramInlineKeyboardButton[])[];
+}
+
+export interface TelegramKeyboardButton {
+	readonly text: string;
+}
+
+export interface TelegramReplyKeyboardMarkup {
+	readonly keyboard: readonly (readonly TelegramKeyboardButton[])[];
+	readonly resize_keyboard?: boolean;
+	readonly is_persistent?: boolean;
+	readonly one_time_keyboard?: boolean;
+	readonly input_field_placeholder?: string;
+}
+
+export interface TelegramReplyKeyboardRemove {
+	readonly remove_keyboard: true;
+}
+
+export interface TelegramBotCommand {
+	readonly command: string;
+	readonly description: string;
+}
+
+export interface TelegramMenuButtonCommands {
+	readonly type: 'commands';
 }
 
 export type TelegramRichText = string | readonly TelegramRichText[] | TelegramRichTextStyle;
@@ -99,12 +132,13 @@ export interface TelegramGetUpdatesOptions {
 	readonly offset?: number;
 	readonly limit?: number;
 	readonly timeoutSeconds?: number;
-	readonly allowedUpdates?: readonly ('message' | 'callback_query')[];
+	readonly allowedUpdates?: readonly ('message' | 'callback_query' | 'stopped_message_generation')[];
 	readonly signal?: IAbortSignal;
 }
 
 export interface TelegramSendMessageOptions {
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+	readonly replyKeyboardMarkup?: TelegramReplyKeyboardMarkup | TelegramReplyKeyboardRemove;
 	readonly disableNotification?: boolean;
 	readonly parseMode?: 'MarkdownV2' | 'HTML';
 	readonly replyParameters?: TelegramReplyParameters;
@@ -116,9 +150,16 @@ export interface TelegramEditMessageTextOptions {
 }
 
 export interface TelegramSendRichMessageOptions {
+	readonly messageThreadId?: number;
 	readonly replyMarkup?: TelegramInlineKeyboardMarkup;
 	readonly disableNotification?: boolean;
 	readonly replyParameters?: TelegramReplyParameters;
+}
+
+export interface TelegramSendRichMessageDraftOptions {
+	readonly messageThreadId?: number;
+	readonly canStop?: boolean;
+	readonly keepOnStop?: boolean;
 }
 
 export interface TelegramEditRichMessageOptions {
@@ -133,10 +174,12 @@ export interface TelegramAnswerCallbackQueryOptions {
 
 export interface ITelegramBotClient {
 	getMe(signal?: IAbortSignal): Promise<TelegramUser>;
+	setMyCommands(commands: readonly TelegramBotCommand[], signal?: IAbortSignal): Promise<true>;
+	setChatMenuButton(menuButton: TelegramMenuButtonCommands, signal?: IAbortSignal): Promise<true>;
 	getUpdates(options?: TelegramGetUpdatesOptions): Promise<readonly TelegramUpdate[]>;
 	sendMessage(chatId: TelegramChatId, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage>;
 	sendRichMessage(chatId: TelegramChatId, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage>;
-	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true>;
+	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageDraftOptions): Promise<true>;
 	editMessageText(chatId: TelegramChatId, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true>;
 	editRichMessage(chatId: TelegramChatId, messageId: number, richMessage: TelegramInputRichMessage, options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true>;
 	editMessageReplyMarkup(chatId: TelegramChatId, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage | true>;
@@ -196,6 +239,7 @@ export function parseTelegramMessage(value: unknown, includeReply = true): Teleg
 	const reply = includeReply && record.reply_to_message !== undefined ? parseTelegramMessage(record.reply_to_message, false) : undefined;
 	return {
 		message_id: asSafeInteger(record.message_id, 'Telegram message id'),
+		message_thread_id: asOptionalSafeInteger(record.message_thread_id, 'Telegram message thread id'),
 		date: asSafeInteger(record.date, 'Telegram message date'),
 		chat: parseTelegramChat(record.chat),
 		from: record.from === undefined ? undefined : parseTelegramUser(record.from),
@@ -208,13 +252,15 @@ export function parseTelegramUpdate(value: unknown): TelegramUpdate {
 	const record = asRecord(value, 'Telegram update');
 	const message = record.message === undefined ? undefined : parseTelegramMessage(record.message);
 	const callbackQuery = record.callback_query === undefined ? undefined : parseTelegramCallbackQuery(record.callback_query);
-	if (message && callbackQuery) {
+	const stoppedMessageGeneration = record.stopped_message_generation === undefined ? undefined : parseTelegramMessageGenerationStopped(record.stopped_message_generation);
+	if (Number(!!message) + Number(!!callbackQuery) + Number(!!stoppedMessageGeneration) > 1) {
 		throw new TelegramBotApiError('invalid-response', 'Telegram update contains multiple payload types.');
 	}
 	return {
 		update_id: asSafeInteger(record.update_id, 'Telegram update id'),
 		message,
 		callback_query: callbackQuery,
+		stopped_message_generation: stoppedMessageGeneration,
 	};
 }
 
@@ -249,6 +295,19 @@ function parseTelegramCallbackQuery(value: unknown): TelegramCallbackQuery {
 	};
 }
 
+function parseTelegramMessageGenerationStopped(value: unknown): TelegramMessageGenerationStopped {
+	const record = asRecord(value, 'Telegram stopped message generation');
+	const draftId = asSafeInteger(record.draft_id, 'Telegram stopped message generation draft id');
+	if (draftId === 0) {
+		throw new TelegramBotApiError('invalid-response', 'Telegram stopped message generation draft id is invalid.');
+	}
+	return {
+		chat: parseTelegramChat(record.chat),
+		message_thread_id: asOptionalSafeInteger(record.message_thread_id, 'Telegram stopped message generation thread id'),
+		draft_id: draftId,
+	};
+}
+
 function asRecord(value: unknown, label: string): Record<string, unknown> {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
 		throw new TelegramBotApiError('invalid-response', `${label} has an invalid shape.`);
@@ -279,4 +338,8 @@ function asSafeInteger(value: unknown, label: string): number {
 		throw new TelegramBotApiError('invalid-response', `${label} is invalid.`);
 	}
 	return value;
+}
+
+function asOptionalSafeInteger(value: unknown, label: string): number | undefined {
+	return value === undefined ? undefined : asSafeInteger(value, label);
 }

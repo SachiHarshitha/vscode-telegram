@@ -21,6 +21,7 @@ import {
 	TelegramPollingFailureKind,
 	TelegramPollingStatus,
 	TelegramSendMessageOptions,
+	TelegramSendRichMessageDraftOptions,
 	TelegramSendRichMessageOptions,
 	TelegramUpdate,
 	TelegramUser,
@@ -74,6 +75,7 @@ export interface ITelegramPollingRuntime {
 
 export type TelegramUpdateHandler = (update: TelegramUpdate) => Promise<void>;
 export type TelegramValidatedHandler = (bot: TelegramUser) => Promise<void>;
+export type TelegramClientInitializedHandler = (client: ITelegramBotClient, bot: TelegramUser, signal: IAbortSignal) => Promise<void>;
 
 export interface TelegramPollingOptions {
 	readonly timeoutSeconds?: number;
@@ -116,7 +118,7 @@ export class TelegramService extends Disposable {
 		return this.status;
 	}
 
-	async start(botToken: string, handleUpdate: TelegramUpdateHandler, handleValidated?: TelegramValidatedHandler, options?: TelegramPollingOptions): Promise<TelegramUser> {
+	async start(botToken: string, handleUpdate: TelegramUpdateHandler, handleValidated?: TelegramValidatedHandler, options?: TelegramPollingOptions, handleClientInitialized?: TelegramClientInitializedHandler): Promise<TelegramUser> {
 		await this.stop();
 		this.clearDeliveryClient();
 		const generation = ++this.generation;
@@ -142,6 +144,11 @@ export class TelegramService extends Disposable {
 			const client = this.runtime.createClient(botToken);
 			const bot = await client.getMe(controller.signal);
 			if (generation !== this.generation) {
+				await lease.release();
+				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
+			}
+			await handleClientInitialized?.(client, bot, controller.signal);
+			if (generation !== this.generation || controller.signal.aborted) {
 				await lease.release();
 				throw new TelegramBotApiError('aborted', 'Telegram polling startup was cancelled.');
 			}
@@ -212,12 +219,12 @@ export class TelegramService extends Disposable {
 		return this.enqueueOutbound(client, () => client.sendRichMessage(chatId, richMessage, options));
 	}
 
-	async sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
+	async sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageDraftOptions): Promise<true> {
 		const client = this.activeRun?.client ?? this.deliveryClient;
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram Remote is not connected.');
 		}
-		return this.enqueueOutbound(client, () => client.sendRichMessageDraft(chatId, draftId, richMessage));
+		return this.enqueueOutbound(client, () => client.sendRichMessageDraft(chatId, draftId, richMessage, options));
 	}
 
 	async editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
@@ -304,7 +311,7 @@ export class TelegramService extends Disposable {
 					offset: run.nextOffset,
 					limit: 100,
 					timeoutSeconds: run.longPollTimeoutSeconds,
-					allowedUpdates: ['message', 'callback_query'],
+					allowedUpdates: ['message', 'callback_query', 'stopped_message_generation'],
 					signal: run.controller.signal,
 				});
 				failures = 0;
@@ -417,7 +424,7 @@ export class TelegramService extends Disposable {
 			offset: -1,
 			limit: 1,
 			timeoutSeconds: 0,
-			allowedUpdates: ['message', 'callback_query'],
+			allowedUpdates: ['message', 'callback_query', 'stopped_message_generation'],
 			signal,
 		});
 		const latestUpdateId = pending.reduce<number | undefined>((latest, update) => latest === undefined ? update.update_id : Math.max(latest, update.update_id), undefined);

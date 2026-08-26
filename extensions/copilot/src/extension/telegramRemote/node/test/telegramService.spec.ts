@@ -14,6 +14,7 @@ import { Event } from '../../../../util/vs/base/common/event';
 import {
 	ITelegramBotClient,
 	TelegramAnswerCallbackQueryOptions,
+	TelegramBotCommand,
 	TelegramBotApiError,
 	TelegramChatId,
 	TelegramEditMessageTextOptions,
@@ -21,6 +22,7 @@ import {
 	TelegramGetUpdatesOptions,
 	TelegramInputRichMessage,
 	TelegramMessage,
+	TelegramMenuButtonCommands,
 	TelegramSendMessageOptions,
 	TelegramSendRichMessageOptions,
 	TelegramUpdate,
@@ -40,6 +42,8 @@ class TestFetcher extends mock<IFetcherService>() {
 
 class TestClient implements ITelegramBotClient {
 	readonly getMe = vi.fn(async () => bot);
+	readonly setMyCommands = vi.fn(async (_commands: readonly TelegramBotCommand[], _signal?: IAbortSignal): Promise<true> => true);
+	readonly setChatMenuButton = vi.fn(async (_menuButton: TelegramMenuButtonCommands, _signal?: IAbortSignal): Promise<true> => true);
 	readonly getUpdates = vi.fn((_options?: TelegramGetUpdatesOptions): Promise<readonly TelegramUpdate[]> => Promise.resolve([]));
 
 	sendMessage(_chatId: TelegramChatId, _text: string, _options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
@@ -354,13 +358,18 @@ describe('TelegramService', () => {
 		const validated = vi.fn(async () => {
 			expect(client.getUpdates).not.toHaveBeenCalled();
 		});
+		const initialized = vi.fn(async () => {
+			expect(client.getUpdates).not.toHaveBeenCalled();
+		});
 
-		await service.start(botToken, async () => { }, validated);
+		await service.start(botToken, async () => { }, validated, undefined, initialized);
 		await service.sendMessage(202, 'paired');
 		await service.editMessageText(202, 1, 'activity', { parseMode: 'HTML' });
 		await service.editMessageReplyMarkup(202, 1);
 		await service.answerCallbackQuery('callback-1', { text: 'Done' });
 		expect(validated).toHaveBeenCalledWith(bot);
+		expect(initialized).toHaveBeenCalledWith(client, bot, expect.objectContaining({ aborted: false }));
+		expect(initialized.mock.invocationCallOrder[0]).toBeLessThan(validated.mock.invocationCallOrder[0]);
 		expect(sendMessage).toHaveBeenCalledWith(202, 'paired', undefined);
 		expect(editMessageText).toHaveBeenCalledWith(202, 1, 'activity', { parseMode: 'HTML' });
 		expect(editMessageReplyMarkup).toHaveBeenCalledWith(202, 1, undefined);
@@ -374,6 +383,15 @@ describe('TelegramService', () => {
 		await expect(failingService.start(botToken, async () => { }, async () => { throw new Error('secure storage unavailable'); })).rejects.toThrow('secure storage unavailable');
 		expect(failingClient.getUpdates).not.toHaveBeenCalled();
 		expect(failingRuntime.lease.release).toHaveBeenCalledOnce();
+
+		const initializationClient = new TestClient();
+		const initializationRuntime = new TestRuntime(initializationClient);
+		const initializationService = new TelegramService(storageRoot, initializationRuntime, new TestFetcher(), logService);
+		await expect(initializationService.start(botToken, async () => { }, undefined, undefined, async () => {
+			throw new Error('command menu registration failed');
+		})).rejects.toThrow('command menu registration failed');
+		expect(initializationClient.getUpdates).not.toHaveBeenCalled();
+		expect(initializationRuntime.lease.release).toHaveBeenCalledOnce();
 	});
 
 	it('retains outbound delivery after stop only for an explicitly draining local turn', async () => {

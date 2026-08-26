@@ -10,7 +10,7 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { IRemoteControlRegistry } from '../../remoteControl/common/remoteControlTypes';
-import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
+import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageDraftOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
 import { TelegramAuthorization, TelegramPairedIdentity } from '../node/telegramAuthorization';
 import { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration, TelegramCallbackRegistry } from '../node/telegramCallbackRegistry';
 import { TelegramConsent } from '../node/telegramConsent';
@@ -61,6 +61,7 @@ export class TelegramRemoteContribution extends Disposable {
 	private resumeOperation: { readonly scopeFingerprint: string; readonly promise: Promise<TelegramUser | undefined> } | undefined;
 	private tokenFingerprint: string | undefined;
 	private authorizedUpdateHandler: TelegramAuthorizedUpdateHandler | undefined;
+	private persistentMessageHandler: (() => Promise<void>) | undefined;
 
 	constructor(
 		private readonly diagnostics: ITelegramRemoteDiagnostics,
@@ -227,6 +228,18 @@ export class TelegramRemoteContribution extends Disposable {
 		});
 	}
 
+	registerPersistentMessageHandler(handler: () => Promise<void>): IDisposable {
+		if (this.persistentMessageHandler) {
+			throw new Error('A Telegram persistent-message handler is already registered.');
+		}
+		this.persistentMessageHandler = handler;
+		return toDisposable(() => {
+			if (this.persistentMessageHandler === handler) {
+				this.persistentMessageHandler = undefined;
+			}
+		});
+	}
+
 	registerCallback(input: TelegramCallbackInput): TelegramCallbackRegistration {
 		const identity = this.authorization.pairedIdentity;
 		if (this.authorizationStateValue !== 'authorized' || !identity || identity.pairingId !== input.identity.pairingId
@@ -246,16 +259,20 @@ export class TelegramRemoteContribution extends Disposable {
 		return identity ? this.callbacks.consume(callbackData, identity, constraints) : undefined;
 	}
 
-	sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
-		return this.transport.sendMessage(chatId, text, options);
+	async sendMessage(chatId: number, text: string, options?: TelegramSendMessageOptions): Promise<TelegramMessage> {
+		const message = await this.transport.sendMessage(chatId, text, options);
+		await this.persistentMessageHandler?.();
+		return message;
 	}
 
-	sendRichMessage(chatId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
-		return this.transport.sendRichMessage(chatId, richMessage, options);
+	async sendRichMessage(chatId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
+		const message = await this.transport.sendRichMessage(chatId, richMessage, options);
+		await this.persistentMessageHandler?.();
+		return message;
 	}
 
-	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
-		return this.transport.sendRichMessageDraft(chatId, draftId, richMessage);
+	sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageDraftOptions): Promise<true> {
+		return this.transport.sendRichMessageDraft(chatId, draftId, richMessage, options);
 	}
 
 	editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
@@ -453,7 +470,7 @@ export class TelegramRemoteContribution extends Disposable {
 		if (!identity) {
 			return;
 		}
-		const updateKind = update.callback_query ? 'callback' : 'message';
+		const updateKind = update.callback_query || update.stopped_message_generation ? 'callback' : 'message';
 		if (!this.updateRateLimiter.accept(identity, updateKind)) {
 			this.logService.warn(`[TelegramRemote] update=rate-limited kind=${updateKind}`);
 			this.diagnostics.record('update-rate-limited', { kind: updateKind });

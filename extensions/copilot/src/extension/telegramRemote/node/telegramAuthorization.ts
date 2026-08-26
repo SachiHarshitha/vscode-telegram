@@ -128,9 +128,16 @@ export class TelegramAuthorization extends Disposable {
 	}
 
 	authorizeUpdate(update: TelegramUpdate, tokenFingerprint: string): TelegramPairedIdentity | undefined {
-		const incomingIdentity = getTelegramPrivateChatIdentity(update);
 		const storedIdentity = this.storedIdentity;
-		if (!incomingIdentity || !storedIdentity || storedIdentity.tokenFingerprint !== tokenFingerprint) {
+		if (!storedIdentity || storedIdentity.tokenFingerprint !== tokenFingerprint) {
+			return undefined;
+		}
+		const stopped = update.stopped_message_generation;
+		if (stopped) {
+			return stopped.chat.type === 'private' && stopped.chat.id === storedIdentity.chatId ? toPublicIdentity(storedIdentity) : undefined;
+		}
+		const incomingIdentity = getTelegramPrivateChatIdentity(update);
+		if (!incomingIdentity) {
 			return undefined;
 		}
 		return incomingIdentity.userId === storedIdentity.userId && incomingIdentity.chatId === storedIdentity.chatId

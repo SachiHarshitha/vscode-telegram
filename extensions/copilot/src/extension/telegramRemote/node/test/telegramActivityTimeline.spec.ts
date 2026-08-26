@@ -332,6 +332,7 @@ class TestActivityHost implements TelegramActivityTimelineHost {
 		date: 1,
 		chat: { id: chatId, type: 'private' },
 	}));
+	readonly sendRichMessageDraft = vi.fn(async (): Promise<true> => true);
 	readonly editRichMessage = vi.fn(async (_chatId: number, _messageId: number, _richMessage: TelegramInputRichMessage, _options?: TelegramEditRichMessageOptions): Promise<true> => true);
 	readonly editMessageReplyMarkup = vi.fn(async (): Promise<true> => true);
 	readonly answerCallbackQuery = vi.fn(async (_callbackQueryId: string, _options?: TelegramAnswerCallbackQueryOptions): Promise<void> => { });

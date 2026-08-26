@@ -82,7 +82,7 @@
   ],
   "telegramRemote": {
     "implementationPhase": 8,
-    "patchRevision": 15,
+    "patchRevision": 18,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
@@ -121,6 +121,15 @@
     "boundedOutboundQueueAndRetriesRegistered": true,
     "releaseMetadataGeneratorRegistered": true,
     "upstreamRebaseWorkflowRegistered": true,
+    "nativeBotCommandMenuRegistered": true,
+    "persistentQuickControlsRegistered": true,
+    "slashReplyKeyboardCommandsRegistered": true,
+    "nativeSessionStatusProjectionRegistered": true,
+    "liveActivityDraftsRegistered": true,
+    "nativeDraftStopRegistered": true,
+    "workspaceFileBrowserRegistered": true,
+    "workspaceFileDisclosureConsentVersion": 3,
+    "idempotentInlineMenusRegistered": true,
     "byokCompatibilityClaimed": false
   },
   "baselineValidation": {

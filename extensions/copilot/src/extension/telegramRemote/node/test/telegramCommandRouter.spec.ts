@@ -8,14 +8,17 @@ import type { ILogService } from '../../../../platform/log/common/logService';
 import { mock } from '../../../../util/common/test/simpleMock';
 import { Emitter, Event } from '../../../../util/vs/base/common/event';
 import { URI } from '../../../../util/vs/base/common/uri';
+import { ChatSessionStatus } from '../../../../vscodeTypes';
 import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../../chatSessions/copilotcli/node/copilotcliSessionService';
 import type { IRemoteControlTransport } from '../../common/remoteControlTypes';
+import type { TelegramWorkspaceFileBrowser } from '../../common/telegramFileBrowser';
 import type { TelegramSessionScopePolicy } from '../../common/telegramSessionScope';
 import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramInlineKeyboardMarkup, TelegramMessage, TelegramSendMessageOptions, TelegramUpdate } from '../../common/telegramTypes';
 import { RemoteControlRegistry } from '../remoteControlRegistry';
 import type { TelegramPairedIdentity } from '../telegramAuthorization';
 import { TelegramCallbackRegistry, type TelegramCallbackConstraints, type TelegramCallbackInput } from '../telegramCallbackRegistry';
 import { TelegramCommandRouter, type TelegramActivityReplyResolution, type TelegramCommandHost, type TelegramPromptDispatcher, type TelegramRequestActivity, type TelegramRequestTerminalEvent, type TelegramSessionCreator } from '../telegramCommandRouter';
+import { TelegramControlUiState } from '../telegramControlUiState';
 import type { TelegramRequestPreferenceController } from '../telegramRequestPreferences';
 import { TelegramSessionState } from '../telegramSessionState';
 import { TestTelegramExtensionContext, telegramCallbackUpdate, telegramMessageUpdate } from './testTelegramSecurityState';
@@ -46,8 +49,8 @@ describe('TelegramCommandRouter', () => {
 		await test.host.deliver(callbackUpdate(2, callbackData, 1));
 		expect(test.state.getSelectedSessionId(identity)).toBe(firstSession.id);
 		expect(test.registry.getAttachedSessionIds('telegram')).toEqual([firstSession.id]);
-		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
-		expect(test.host.editMessageReplyMarkup).toHaveBeenCalledWith(identity.chatId, 1, { inline_keyboard: [] });
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(1);
+		expect(test.host.editMessageText).toHaveBeenCalledTimes(1);
 		expect(lastSentText(test.host)).toContain('<b>Authorized workspace</b>: C:\\workspace');
 	});
 
@@ -59,14 +62,15 @@ describe('TelegramCommandRouter', () => {
 		expect(JSON.stringify(test.host.sendMessage.mock.calls)).not.toContain(firstSession.label);
 	});
 
-	it('sends command responses as separate messages instead of overwriting chat history', async () => {
+	it('skips duplicate status rendering when text and controls are unchanged', async () => {
 		const test = createRouter([firstSession], new Set([firstSession.id]));
 
 		await test.host.deliver(telegramMessageUpdate(1, '/status'));
 		await test.host.deliver(telegramMessageUpdate(2, '/status'));
 
-		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(1);
 		expect(test.host.editMessageText).not.toHaveBeenCalled();
+		expect(test.logService.info).toHaveBeenCalledWith('[TelegramRemote] status-edit=skipped reason=unchanged');
 	});
 
 	it('shows the actual selected model and live mode in status when known', async () => {
@@ -79,10 +83,51 @@ describe('TelegramCommandRouter', () => {
 		expect(lastSentText(test.host)).toContain('<b>📡 Telegram Remote</b>');
 		expect(lastSentText(test.host)).toContain('<b>Model</b>: GPT Fast');
 		expect(lastSentText(test.host)).toContain('<b>Mode</b>: plan');
+		expect(lastSentText(test.host)).toContain('<b>State</b>: ⚪ Idle');
 		expect(lastSentText(test.host)).toContain('\n\n<b>Permissions</b>:');
 		expect(lastSentText(test.host)).toContain('<b>Commands</b>: /new, /sessions');
 		expect(lastSendOptions(test.host).parseMode).toBe('HTML');
 		expect(lastSendOptions(test.host).replyMarkup?.inline_keyboard[0].map(button => button.text)).toEqual(['Model', 'Mode']);
+	});
+
+	it('projects locally-started selected-session activity into the Telegram status card', async () => {
+		const completed = { ...firstSession, status: ChatSessionStatus.Completed };
+		const test = createRouter([completed], new Set([completed.id]));
+		await test.state.select(identity, completed.id, sessionScopeFingerprint);
+		await test.host.deliver(telegramMessageUpdate(1, '/status'));
+		expect(lastSentText(test.host)).toContain('<b>State</b>: ⚪ Idle');
+
+		const running = { ...completed, status: ChatSessionStatus.InProgress };
+		test.sessionService.getSessionItem.mockResolvedValue(running);
+		test.sessionService.changeSessionEmitter.fire(running);
+		await vi.waitFor(() => expect(lastSentText(test.host)).toContain('<b>State</b>: 🟢 Running'));
+
+		const waiting = { ...completed, status: ChatSessionStatus.NeedsInput };
+		test.sessionService.getSessionItem.mockResolvedValue(waiting);
+		test.sessionService.changeSessionEmitter.fire(waiting);
+		await vi.waitFor(() => expect(lastSentText(test.host)).toContain('<b>State</b>: 🟠 Waiting for input'));
+
+		const finished = { ...completed, status: ChatSessionStatus.Completed };
+		test.sessionService.getSessionItem.mockResolvedValue(finished);
+		test.sessionService.changeSessionEmitter.fire(finished);
+		await vi.waitFor(() => expect(lastSentText(test.host)).toContain('<b>State</b>: ⚪ Idle'));
+	});
+
+	it('switches opted-in controls when the selected session starts locally', async () => {
+		const completed = { ...firstSession, status: ChatSessionStatus.Completed };
+		const test = createRouter([completed], new Set([completed.id]));
+		await test.state.select(identity, completed.id, sessionScopeFingerprint);
+		await test.host.deliver(telegramMessageUpdate(1, '/controls'));
+
+		const running = { ...completed, status: ChatSessionStatus.InProgress };
+		test.sessionService.getSessionItem.mockResolvedValue(running);
+		test.sessionService.changeSessionEmitter.fire(running);
+		await vi.waitFor(() => expect(firstReplyKeyboardRow(test.host)).toEqual([{ text: '/stop' }, { text: '/steer' }, { text: '/status' }]));
+
+		const finished = { ...completed, status: ChatSessionStatus.Completed };
+		test.sessionService.getSessionItem.mockResolvedValue(finished);
+		test.sessionService.changeSessionEmitter.fire(finished);
+		await vi.waitFor(() => expect(firstReplyKeyboardRow(test.host)).toEqual([{ text: '/new' }, { text: '/sessions' }, { text: '/model' }]));
 	});
 
 	it('escapes dynamic status-card values before enabling Telegram HTML', async () => {
@@ -325,6 +370,155 @@ describe('TelegramCommandRouter', () => {
 		expect(JSON.stringify(test.logService.error.mock.calls)).not.toContain('secret content');
 	});
 
+	it('routes reply-keyboard labels through the same handlers as slash commands', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+
+		await test.host.deliver(telegramMessageUpdate(1, '/sessions'));
+		await test.host.deliver(telegramMessageUpdate(2, 'Sessions'));
+
+		expect(test.sessionService.getAllSessions).toHaveBeenCalledTimes(2);
+	});
+
+	it('persists opt-in quick controls and removes them explicitly', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+
+		await test.host.deliver(telegramMessageUpdate(1, '/controls'));
+		expect(lastSendOptions(test.host).replyKeyboardMarkup).toEqual({
+			keyboard: [
+				[{ text: '/new' }, { text: '/sessions' }, { text: '/model' }],
+				[{ text: '/status' }, { text: '/files' }, { text: '/help' }],
+			],
+			resize_keyboard: true,
+			is_persistent: true,
+			one_time_keyboard: false,
+			input_field_placeholder: 'Ask Copilot...',
+		});
+		expect(test.controlUiState.isEnabled(identity)).toBe(true);
+		expect(new TelegramControlUiState(test.context).isEnabled(identity)).toBe(true);
+		expect(test.controlUiState.isEnabled({ ...identity, chatId: 303 })).toBe(false);
+
+		await test.host.deliver(telegramMessageUpdate(2, '/controls_off'));
+		expect(lastSendOptions(test.host).replyKeyboardMarkup).toEqual({ remove_keyboard: true });
+		expect(test.controlUiState.isEnabled(identity)).toBe(false);
+	});
+
+	it('restores an opted-in keyboard after router reconstruction', async () => {
+		const context = new TestTelegramExtensionContext('C:\\telegram-router-reload-test');
+		const first = createRouter([firstSession], new Set([firstSession.id]), Promise.resolve(), [URI.file('C:\\workspace')], context);
+		await first.host.deliver(telegramMessageUpdate(1, '/controls'));
+		first.router.dispose();
+
+		const restored = createRouter([firstSession], new Set([firstSession.id]), Promise.resolve(), [URI.file('C:\\workspace')], context);
+
+		await vi.waitFor(() => expect(lastSendOptions(restored.host).replyKeyboardMarkup).toMatchObject({ is_persistent: true }));
+		const restoredKeyboard = lastSendOptions(restored.host).replyKeyboardMarkup;
+		expect(restoredKeyboard && 'keyboard' in restoredKeyboard ? restoredKeyboard.keyboard[0] : undefined).toEqual([{ text: '/new' }, { text: '/sessions' }, { text: '/model' }]);
+	});
+
+	it('changes an enabled control keyboard only at request lifecycle transitions', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		await test.host.deliver(telegramMessageUpdate(1, '/controls'));
+
+		await test.host.deliver(telegramMessageUpdate(2, 'First task'));
+		await test.host.deliver(telegramMessageUpdate(3, 'Steer task'));
+		const keyboardStates = () => test.host.sendMessage.mock.calls
+			.map(call => call[2]?.replyKeyboardMarkup)
+			.filter(markup => !!markup && 'keyboard' in markup);
+		expect(keyboardStates()).toHaveLength(2);
+		expect(keyboardStates().at(-1)?.keyboard[0]).toEqual([{ text: '/stop' }, { text: '/steer' }, { text: '/status' }]);
+
+		test.activity.reachTerminal({ identity, sessionId: firstSession.id, requestId: 'request-1', outcome: 'completed' });
+		await vi.waitFor(() => expect(keyboardStates()).toHaveLength(3));
+		expect(keyboardStates().at(-1)?.keyboard[0]).toEqual([{ text: '/new' }, { text: '/sessions' }, { text: '/model' }]);
+	});
+
+	it('leaves an enabled disconnected keyboard when remote routing stops', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		await test.host.deliver(telegramMessageUpdate(1, '/controls'));
+
+		test.host.isAcceptingUpdates = false;
+		test.host.blockedEmitter.fire();
+
+		await vi.waitFor(() => expect(lastSendOptions(test.host).replyKeyboardMarkup).toMatchObject({
+			keyboard: [[{ text: '/reconnect' }, { text: '/status' }], [{ text: '/settings' }]],
+		}));
+	});
+
+	it('routes slash and reply-keyboard Stop through the same registry abort', async () => {
+		for (const stopAction of ['/stop', '■ Stop']) {
+			const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+			await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+			const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
+			await test.host.deliver(telegramMessageUpdate(1, 'Run task'));
+
+			await test.host.deliver(telegramMessageUpdate(2, stopAction));
+
+			expect(abort).toHaveBeenCalledWith(firstSession.id, 'telegram');
+		}
+	});
+
+	it('allows an explicit Stop command to abort a selected task started in VS Code', async () => {
+		const running = { ...firstSession, status: ChatSessionStatus.InProgress };
+		const test = createRouter([running], new Set([running.id]));
+		await test.state.select(identity, running.id, sessionScopeFingerprint);
+		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
+
+		await test.host.deliver(telegramMessageUpdate(1, '/stop'));
+
+		expect(abort).toHaveBeenCalledWith(running.id, 'telegram');
+		expect(test.activity.completeRequest).not.toHaveBeenCalled();
+	});
+
+	it('browses workspace files with opaque callbacks and edits the existing menu', async () => {
+		const fileSession = { ...firstSession, workingDirectory: URI.file('C:\\workspace') };
+		const test = createRouter([fileSession], new Set([fileSession.id]));
+		await test.state.select(identity, fileSession.id, sessionScopeFingerprint);
+		test.fileBrowser.listDirectory.mockResolvedValue({
+			relativePath: '',
+			entries: [{ id: 'src/index.ts', label: 'index.ts', kind: 'file' }],
+		});
+		test.fileBrowser.readFile.mockResolvedValue({ relativePath: 'src/index.ts', text: 'const value = 1 < 2;', truncated: false });
+
+		await test.host.deliver(telegramMessageUpdate(1, '/files'));
+		const fileButton = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0];
+		expect(fileButton.callback_data).toMatch(/^tr1:/);
+		expect(fileButton.callback_data).not.toContain('index.ts');
+
+		await test.host.deliver(callbackUpdate(2, fileButton.callback_data!, 1));
+		expect(test.host.answerCallbackQuery).toHaveBeenCalledWith('callback-2', expect.objectContaining({ text: 'Opening file…' }));
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(1);
+		expect(test.host.editMessageText).toHaveBeenCalledWith(identity.chatId, 1, expect.stringContaining('const value = 1 &lt; 2;'), expect.objectContaining({ parseMode: 'HTML' }));
+	});
+
+	it('rejects a routed update when the exact paired identity has changed', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		test.host.pairedIdentity = { ...identity, pairingId: 'replacement' };
+
+		await test.host.deliver(telegramMessageUpdate(1, '/status'));
+
+		expect(test.host.sendMessage).not.toHaveBeenCalled();
+		expect(test.logService.warn).toHaveBeenCalledWith('[TelegramRemote] Authorized router rejected a stale identity.');
+	});
+
+	it('revalidates the numeric update principal inside the action router', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+
+		await test.host.deliver(telegramMessageUpdate(1, 'Status', 999, identity.chatId));
+
+		expect(test.host.sendMessage).not.toHaveBeenCalled();
+		expect(test.sessionService.getAllSessions).not.toHaveBeenCalled();
+	});
+
+	it('answers a callback even when a downstream callback handler fails', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+		test.activity.handleCallback.mockRejectedValueOnce(new Error('downstream failure'));
+
+		await test.host.deliver(callbackUpdate(1, 'tr1:unknown', 1));
+
+		expect(test.host.answerCallbackQuery).toHaveBeenCalledWith('callback-1', {});
+	});
+
 	it('restores only a selection whose stored working-directory fingerprint is still current', async () => {
 		const authorizedIds = new Set([firstSession.id]);
 		const test = createRouter([firstSession], authorizedIds);
@@ -387,9 +581,10 @@ class TestCommandHost implements TelegramCommandHost {
 }
 
 class TestSessionService extends mock<ICopilotCLISessionService>() {
+	readonly changeSessionEmitter = new Emitter<ICopilotCLISessionItem>();
 	override readonly onDidDeleteSession = Event.None;
 	override readonly onDidChangeSessions = Event.None;
-	override readonly onDidChangeSession = Event.None;
+	override readonly onDidChangeSession = this.changeSessionEmitter.event;
 	override readonly onDidCreateSession = Event.None;
 	override readonly getAllSessions = vi.fn<() => Promise<readonly ICopilotCLISessionItem[]>>();
 	override readonly getSessionItem = vi.fn<(sessionId: string) => Promise<ICopilotCLISessionItem | undefined>>();
@@ -433,8 +628,8 @@ function createRouter(
 	authorizedIds: Set<string>,
 	completion = Promise.resolve(),
 	workspaceRoots = [URI.file('C:\\workspace')],
+	context = new TestTelegramExtensionContext('C:\\telegram-router-test'),
 ) {
-	const context = new TestTelegramExtensionContext('C:\\telegram-router-test');
 	const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
 	registry.registerTransport({
 		id: 'telegram',
@@ -485,11 +680,16 @@ function createRouter(
 		getStatus: vi.fn<TelegramRequestPreferenceController['getStatus']>(async () => ({})),
 		clear: vi.fn<TelegramRequestPreferenceController['clear']>(),
 	} satisfies TelegramRequestPreferenceController;
+	const controlUiState = new TelegramControlUiState(context);
+	const fileBrowser = {
+		listDirectory: vi.fn<TelegramWorkspaceFileBrowser['listDirectory']>(async (_workspaceRoot, relativePath) => ({ relativePath, entries: [] })),
+		readFile: vi.fn<TelegramWorkspaceFileBrowser['readFile']>(async (_workspaceRoot, relativePath) => ({ relativePath, text: '', truncated: false })),
+	} satisfies TelegramWorkspaceFileBrowser;
 	const logService = new class extends mock<ILogService>() { override warn = vi.fn(); override error = vi.fn(); override info = vi.fn(); };
 	const router = new TelegramCommandRouter(host, state, sessionService, registry, dispatcher, sessionCreator, {
 		workstationLabel: 'workstation-1', workspaceLabel: 'C:\\workspace', workspaceRoots, remotePermissionResponses: false,
-	}, scopePolicy, activity, requestPreferences, logService);
-	return { router, host, state, registry, sessionService, dispatcher, sessionCreator, activity, requestPreferences, logService, workspaceRoots };
+	}, scopePolicy, activity, requestPreferences, controlUiState, fileBrowser, logService);
+	return { router, host, state, registry, sessionService, dispatcher, sessionCreator, activity, requestPreferences, controlUiState, fileBrowser, logService, workspaceRoots, context };
 }
 
 function callbackUpdate(updateId: number, callbackData: string, messageId: number): TelegramUpdate {
@@ -503,6 +703,18 @@ function callbackUpdate(updateId: number, callbackData: string, messageId: numbe
 	};
 }
 
-function lastSentText(host: TestCommandHost): string { return host.sendMessage.mock.calls.at(-1)?.[1] ?? ''; }
-function lastSendOptions(host: TestCommandHost): TelegramSendMessageOptions { return host.sendMessage.mock.calls.at(-1)?.[2] ?? {}; }
+function lastSentText(host: TestCommandHost): string {
+	const sendOrder = host.sendMessage.mock.invocationCallOrder.at(-1) ?? 0;
+	const editOrder = host.editMessageText.mock.invocationCallOrder.at(-1) ?? 0;
+	return editOrder > sendOrder ? host.editMessageText.mock.calls.at(-1)?.[2] ?? '' : host.sendMessage.mock.calls.at(-1)?.[1] ?? '';
+}
+function lastSendOptions(host: TestCommandHost): TelegramSendMessageOptions {
+	const sendOrder = host.sendMessage.mock.invocationCallOrder.at(-1) ?? 0;
+	const editOrder = host.editMessageText.mock.invocationCallOrder.at(-1) ?? 0;
+	return editOrder > sendOrder ? host.editMessageText.mock.calls.at(-1)?.[3] ?? {} : host.sendMessage.mock.calls.at(-1)?.[2] ?? {};
+}
+function firstReplyKeyboardRow(host: TestCommandHost) {
+	const markup = lastSendOptions(host).replyKeyboardMarkup;
+	return markup && 'keyboard' in markup ? markup.keyboard[0] : undefined;
+}
 function emptyInlineKeyboardForTest(): TelegramInlineKeyboardMarkup { return { inline_keyboard: [] }; }

@@ -86,6 +86,14 @@ The user SHALL be able to:
 
 Live session access SHALL respect the `IReference<ICopilotCLISession>` acquire/dispose contract.
 
+### FR-3a Native Telegram command UI
+
+Bot startup SHALL register the product command list with Telegram and configure the global native commands menu button. The optional reply keyboard SHALL remain disabled by default, persist its opt-in only for the exact paired numeric user/chat, and expose centrally generated idle, running and disconnected layouts. Removing controls SHALL send Telegram's explicit keyboard-removal markup.
+
+Slash commands and reply-keyboard labels SHALL normalize into one application action dispatcher. Authorization SHALL be revalidated for every command, button, callback and free-text prompt; keyboard visibility and callback contents SHALL never be treated as authorization. Stop controls SHALL delegate to the transport-neutral registry abort seam.
+
+Session, model and workspace-file choices SHALL use opaque, bounded, expiring callback state and inline keyboards. Every routed callback query SHALL be answered, and tracked inline menus SHALL edit their existing message or accept an already-unchanged edit as success. Workspace file browsing SHALL be read-only, scoped below the selected authorized session workspace, reject traversal/symlink entry navigation and binary content, and bound preview size. This native Bot API interface SHALL NOT introduce a Telegram Mini App.
+
 ### FR-4 Live activity
 
 The extension SHALL project useful SDK session events through an explicit session-lifetime registry hook, including as available:

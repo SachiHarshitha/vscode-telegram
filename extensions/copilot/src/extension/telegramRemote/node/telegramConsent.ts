@@ -6,8 +6,9 @@
 import { createHash } from 'node:crypto';
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 
-export const TELEGRAM_CONSENT_VERSION = 2;
-const consentStateKey = 'vscode-telegram.telegram-remote.consent.v2';
+export const TELEGRAM_CONSENT_VERSION = 3;
+const consentStateKey = 'vscode-telegram.telegram-remote.consent.v3';
+const legacyConsentStateKeys = ['vscode-telegram.telegram-remote.consent.v2', 'vscode-telegram.telegram-remote.consent.v1'] as const;
 
 interface StoredTelegramConsent {
 	readonly version: typeof TELEGRAM_CONSENT_VERSION;
@@ -71,6 +72,9 @@ export class TelegramConsent {
 		this.storedConsent = undefined;
 		try {
 			await this.extensionContext.globalState.update(consentStateKey, undefined);
+			for (const legacyKey of legacyConsentStateKeys) {
+				await this.extensionContext.globalState.update(legacyKey, undefined);
+			}
 		} catch {
 			throw new TelegramConsentStateError('delete');
 		}

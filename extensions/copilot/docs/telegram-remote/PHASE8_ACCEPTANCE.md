@@ -18,13 +18,20 @@ The first command includes extension typecheck, generic/Telegram tests, focused 
 ## 2. Clean-profile bundled launch
 
 - [ ] Launch the built fork with a new empty profile and extension directory.
-- [ ] Confirm the controller marker contains `phase=8`, `patch=15`, `remote-control-framework=generic`, `telegram-diagnostics=redacted`, and `telegram-rate-limits=bounded`.
+- [ ] Confirm the controller marker contains `phase=8`, `patch=18`, `remote-control-framework=generic`, `telegram-native-menu=ready`, `telegram-activity=live-draft`, `telegram-native-stop=ready`, `telegram-diagnostics=redacted`, and `telegram-rate-limits=bounded`.
 - [ ] With Telegram never configured, confirm there is no Telegram request, poller lease, listener, or status item.
 - [ ] Confirm **Telegram Remote: Copy Diagnostics** contains versions/states but no credentials, prompts, answers, callback payloads, or workspace paths.
 
 ## 3. Telegram lifecycle and control
 
 - [ ] Complete confidentiality consent, token validation, private-chat pairing, and exact-workspace authorization.
+- [ ] Confirm Telegram's native Menu shows the exact nine registered commands and no setup message is pinned in the conversation.
+- [ ] Confirm `/controls` shows literal slash-command buttons, every button triggers its command, and `/controls_off` removes it; active-run Stop is presented by the native live draft rather than a replacement keyboard message.
+- [ ] Send a prompt and confirm one animated `<tg-thinking>` live draft reuses the same draft ID, remains visible beyond 30 seconds through its heartbeat, and is replaced by the final answer without persistent Prompt accepted, Copilot started, reasoning, or idle messages.
+- [ ] Press the live draft's native Stop control and confirm `stopped_message_generation` cancels only the mapped selected run and produces at most one short stopped confirmation; verify `/stop` remains usable as fallback.
+- [ ] Start a turn locally in the selected VS Code session; confirm Telegram creates the same semantic live-draft UI without persistent Running/Idle messages and without selecting an out-of-scope session.
+- [ ] Confirm `/stop`, the legacy `■ Stop` payload, and native draft Stop reach the same registry abort seam; explicitly stop one selected locally started task, and confirm stale/foreign controls cannot affect another request.
+- [ ] Browse an authorized workspace through `/files`; confirm folders/files use opaque inline callbacks, previews are bounded/read-only, and navigation edits the existing menu message.
 - [ ] Select/create a session and send a prompt; confirm one activity sequence and one final answer.
 - [ ] Steer an active turn by replying to its Telegram activity.
 - [ ] Resolve an approve-once/deny permission request and confirm a stale/replayed callback cannot win.

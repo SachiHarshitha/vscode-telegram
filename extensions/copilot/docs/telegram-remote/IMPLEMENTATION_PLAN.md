@@ -11,7 +11,7 @@ This plan was revalidated against the repository at:
 | Copilot runtime package | `@github/copilot` `^1.0.73` |
 | VS Code engine | `^1.135.0` |
 | Node engine | `>=22.14.0` |
-| Implementation status | Phases 0 through 7 implemented; consent-gated setup, native visibility, `/new`, native prompt/steering, granular Rich Message activity, per-bubble steering, permission/question/plan-exit responses, and combined native/configured model and reasoning controls are active |
+| Implementation status | Phases 0 through 8 implemented; release-candidate human acceptance remains pending. Consent-gated setup, native Telegram command/menu UI, opt-in persistent quick controls, read-only workspace file browsing, native prompt/steering, granular Rich Message activity, permission/question/plan-exit responses, and combined native/configured model controls are active |
 
 The product release called “V1” in these documents is not the deprecated non-controller Copilot implementation. Product V1 targets the controller-based session API implemented by `CopilotCLIChatSessionContentProvider` in `copilotCLIChatSessions.ts`.
 
@@ -780,7 +780,7 @@ extensions/copilot/script/telegram-remote/test-phase6.ps1                       
 - Current mode is shown only for a live bound session. Every Telegram prompt has a trusted registry-created mode and defaults to `interactive`; the only selectable override is `plan`. Type-level and runtime guards reject `autopilot` and any other permission-elevating mode, including forged origins.
 - No local/BYOK backend is marked compatible merely because it appears and can generate text through the bridge; the full provider matrix remains required.
 - Activity projection retains normalized reasoning fingerprints for the active request, so equivalent `assistant.intent`, `assistant.reasoning`, embedded `reasoningText`, and assistant-preface representations do not create repeated **Thinking…** bubbles after tool, permission, or turn boundaries. All agent-scoped `assistant.*` events are excluded from the root timeline; explicit subagent lifecycle and correlated tool rounds remain visible.
-- Telegram now prepares a native dispatch correlation, creates the activity timeline and Stop control, and only then starts the native command. This prevents fast local Allow All/autopilot paths from losing tool events before the request exists. Terminal delivery drains pending tool/reasoning edits before the final answer; failed reasoning-only edits never create a late duplicate replacement.
+- Telegram now prepares a native dispatch correlation and creates the live activity draft before starting the native command. This prevents fast local Allow All/autopilot paths from losing tool events before the request exists. Terminal delivery drains meaningful pending tool updates, stops the draft heartbeat, and then sends the final answer; reasoning content remains non-persistent.
 
 ### Files
 
@@ -849,6 +849,11 @@ extensions/copilot/script/telegram-remote/test-phase7.ps1                       
 - `generate-release-report.ps1` records the exact source/upstream commits, extension/runtime versions, proposal set, patch revision, operating system, test status, dependency/license inventory, bundled licenses, artifact SHA-256 checksums, and a bundled-fork/no-public-API disclaimer. A secret-shaped metadata scan fails generation.
 - `telegram-remote-rebase.yml` performs a scheduled or manual ephemeral rebase onto `microsoft/vscode/main`, installs pinned dependencies, runs the Phase 8 gate and packaging smoke build, generates release metadata, and uploads it without pushing or publishing.
 - `PHASE8_ACCEPTANCE.md` is the human release-candidate runbook. Automated completion is not treated as real-bot or clean-profile approval.
+- Native Telegram UI hardening registers the exact nine-command Bot API menu with `setMyCommands`, configures the global commands menu button without a chat override, and keeps reply-keyboard controls opt-in and persisted for the exact paired numeric user/chat. Because Telegram reply buttons submit their displayed text, every current keyboard button now uses its literal slash command; legacy pretty-label payloads remain accepted for already-rendered keyboards.
+- Idle and disconnected quick-control keyboards remain opt-in, but active lifecycle state no longer creates keyboard/status messages. Native selected-session events feed the live draft/activity projection, `/status` remains the explicit idle-state surface, and `/controls_off` removes the keyboard. Native draft Stop, `/stop`, and the legacy `■ Stop` payload reach the registry-owned abort seam, including an explicitly stopped selected local task.
+- Session, model, and workspace-file selection use opaque, identity/session/request-bound callbacks. File reads are restricted to ordinary entries below the selected authorized workspace, bounded to text previews, and implemented through an abstract Telegram file-browser contract with a `vscode-node` adapter. Callback queries are answered idempotently and tracked inline menus edit their existing message.
+- Because file previews add source-content transit beyond the previous path-only disclosure, consent is versioned to v3. Existing token-bound pairing is preserved, but the workspace must be locally reauthorized against the updated disclosure before routing resumes.
+- Patch 18 replaces persistent generic activity/start/idle bubbles and the inline Stop callback with a Bot API 10.3 live Rich Message draft. Each active run owns one stable non-zero draft ID, semantic `<tg-thinking>` status, a throttled 10-second heartbeat, and `can_stop=true`/`keep_on_stop=false`; `stopped_message_generation` is authorized by the exact paired private chat and mapped back to the selected run before registry abort. Persistent tool/interaction messages refresh the draft immediately, while completion stops it before the final answer is sent.
 
 ### Files
 
@@ -886,9 +891,11 @@ eslint.config.js                                                                
 
 | Check | Result |
 | --- | --- |
-| Generic + Telegram aggregate | Passed: 31 files / 212 tests |
+| Generic + Telegram aggregate | Passed after native command UI amendment: 33 files / 230 tests |
 | Generic boundary | Passed: no `telegramRemote` import and no Telegram Bot API type in the generic/session layer |
 | TypeScript / lint | Passed: extension typecheck and targeted ESLint with zero warnings |
+| Native Telegram command UI amendment | Passed: latest Telegram aggregate 29 files / 202 tests, extension typecheck, and targeted ESLint; exact native menu payloads, global menu-button payload, opt-in/persisted keyboard states/reload restoration, slash/button action parity, registry-owned Stop, opaque file callbacks, safe file bounds, callback answers, consent v3, and idempotent menu editing |
+| Slash-control/session-state amendment | Passed: 2 focused files / 36 tests, extension typecheck, and targeted ESLint; literal slash reply-keyboard payloads, legacy-label compatibility, serialized local/native session-state projection, running/waiting/idle status rendering, keyboard transitions, and explicit Stop for a selected locally started task |
 | Synthetic transport/security | Passed: lifecycle/capability coverage, forged provenance/elevation rejection, and pending-response cleanup |
 | Rate limits/retries | Passed: pairing attempt limits, per-identity message/callback limits, 128-entry outbound bound, serialized delivery, transient retry cap, and lifecycle invalidation |
 | Diagnostics/release metadata | Passed with deterministic mocks and local dirty-worktree preview; generated metadata is redacted and checksummed |

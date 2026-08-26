@@ -7,14 +7,17 @@ import { IFetcherService, Response } from '../../../platform/networking/common/f
 import {
 	ITelegramBotClient,
 	TelegramAnswerCallbackQueryOptions,
+	TelegramBotCommand,
 	TelegramBotApiError,
 	TelegramChatId,
 	TelegramEditMessageTextOptions,
 	TelegramEditRichMessageOptions,
 	TelegramGetUpdatesOptions,
 	TelegramMessage,
+	TelegramMenuButtonCommands,
 	TelegramInputRichBlock,
 	TelegramInputRichMessage,
+	TelegramSendRichMessageDraftOptions,
 	TelegramSendRichMessageOptions,
 	TelegramSendMessageOptions,
 	TelegramUpdate,
@@ -55,6 +58,18 @@ export class TelegramBotClient implements ITelegramBotClient {
 		return this.call('getMe', {}, value => parseTelegramUser(value, true), signal);
 	}
 
+	async setMyCommands(commands: readonly TelegramBotCommand[], signal?: TelegramGetUpdatesOptions['signal']): Promise<true> {
+		validateBotCommands(commands);
+		return this.call('setMyCommands', { commands }, parseTrueResult('setMyCommands'), signal);
+	}
+
+	async setChatMenuButton(menuButton: TelegramMenuButtonCommands, signal?: TelegramGetUpdatesOptions['signal']): Promise<true> {
+		if (menuButton?.type !== 'commands') {
+			throw new TelegramBotApiError('api', 'Telegram chat menu button is invalid.');
+		}
+		return this.call('setChatMenuButton', { menu_button: menuButton }, parseTrueResult('setChatMenuButton'), signal);
+	}
+
 	async getUpdates(options: TelegramGetUpdatesOptions = {}): Promise<readonly TelegramUpdate[]> {
 		const timeoutSeconds = options.timeoutSeconds ?? defaultLongPollTimeoutSeconds;
 		if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 0 || timeoutSeconds > 50) {
@@ -83,10 +98,13 @@ export class TelegramBotClient implements ITelegramBotClient {
 	async sendMessage(chatId: TelegramChatId, text: string, options: TelegramSendMessageOptions = {}): Promise<TelegramMessage> {
 		validateChatId(chatId);
 		validateMessageText(text);
+		if (options.replyMarkup && options.replyKeyboardMarkup) {
+			throw new TelegramBotApiError('api', 'Telegram messages cannot contain multiple reply markup values.');
+		}
 		return this.call('sendMessage', {
 			chat_id: chatId,
 			text,
-			reply_markup: options.replyMarkup,
+			reply_markup: options.replyKeyboardMarkup ?? options.replyMarkup,
 			disable_notification: options.disableNotification,
 			parse_mode: options.parseMode,
 			reply_parameters: options.replyParameters,
@@ -95,9 +113,11 @@ export class TelegramBotClient implements ITelegramBotClient {
 
 	async sendRichMessage(chatId: TelegramChatId, richMessage: TelegramInputRichMessage, options: TelegramSendRichMessageOptions = {}): Promise<TelegramMessage> {
 		validateChatId(chatId);
+		validateMessageThreadId(options.messageThreadId);
 		validateRichMessage(richMessage, false);
 		return this.call('sendRichMessage', {
 			chat_id: chatId,
+			message_thread_id: options.messageThreadId,
 			rich_message: richMessage,
 			reply_markup: options.replyMarkup,
 			disable_notification: options.disableNotification,
@@ -105,7 +125,7 @@ export class TelegramBotClient implements ITelegramBotClient {
 		}, parseTelegramMessage);
 	}
 
-	async sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
+	async sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage, options: TelegramSendRichMessageDraftOptions = {}): Promise<true> {
 		validateChatId(chatId);
 		if (chatId <= 0) {
 			throw new TelegramBotApiError('api', 'Telegram rich message drafts require a private chat id.');
@@ -113,8 +133,16 @@ export class TelegramBotClient implements ITelegramBotClient {
 		if (!Number.isSafeInteger(draftId) || draftId === 0) {
 			throw new TelegramBotApiError('api', 'Telegram rich message draft id must be a non-zero safe integer.');
 		}
+		validateMessageThreadId(options.messageThreadId);
 		validateRichMessage(richMessage, true);
-		return this.call('sendRichMessageDraft', { chat_id: chatId, draft_id: draftId, rich_message: richMessage }, value => {
+		return this.call('sendRichMessageDraft', {
+			chat_id: chatId,
+			message_thread_id: options.messageThreadId,
+			draft_id: draftId,
+			rich_message: richMessage,
+			can_stop: options.canStop,
+			keep_on_stop: options.keepOnStop,
+		}, value => {
 			if (value !== true) {
 				throw new TelegramBotApiError('invalid-response', 'Telegram sendRichMessageDraft returned an invalid result.');
 			}
@@ -260,6 +288,29 @@ function withoutUndefinedValues(value: Readonly<Record<string, unknown>>): Recor
 	return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
 }
 
+function parseTrueResult(method: string): (value: unknown) => true {
+	return value => {
+		if (value !== true) {
+			throw new TelegramBotApiError('invalid-response', `Telegram ${method} returned an invalid result.`);
+		}
+		return true;
+	};
+}
+
+function validateBotCommands(commands: readonly TelegramBotCommand[]): void {
+	if (!Array.isArray(commands) || commands.length === 0 || commands.length > 100) {
+		throw new TelegramBotApiError('api', 'Telegram requires between 1 and 100 bot commands.');
+	}
+	const identifiers = new Set<string>();
+	for (const command of commands) {
+		if (!command || !/^[a-z0-9_]{1,32}$/.test(command.command) || !command.description || command.description.length > 256
+			|| identifiers.has(command.command)) {
+			throw new TelegramBotApiError('api', 'Telegram bot command definitions are invalid.');
+		}
+		identifiers.add(command.command);
+	}
+}
+
 function validateChatId(chatId: TelegramChatId): void {
 	if ((typeof chatId === 'number' && Number.isSafeInteger(chatId)) || (typeof chatId === 'string' && chatId.length > 0)) {
 		return;
@@ -270,6 +321,12 @@ function validateChatId(chatId: TelegramChatId): void {
 function validateMessageId(messageId: number): void {
 	if (!Number.isSafeInteger(messageId) || messageId <= 0) {
 		throw new TelegramBotApiError('api', 'Telegram message id is invalid.');
+	}
+}
+
+function validateMessageThreadId(messageThreadId: number | undefined): void {
+	if (messageThreadId !== undefined && (!Number.isSafeInteger(messageThreadId) || messageThreadId <= 0)) {
+		throw new TelegramBotApiError('api', 'Telegram message thread id is invalid.');
 	}
 }
 

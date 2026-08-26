@@ -55,7 +55,10 @@ The goal is to make upgrade risk explicit.
 | Native advanced model provider integration | richer LM/chat provider proposals | Proposed VS Code API | Yes only when enabled | Inherited from upstream fork |
 | Native remote prompt rendered in same chat | pending request context + upstream internal workbench command | Internal | Required in current fork | Both controller implementations use this route; guard with compatibility tests |
 | Telegram long polling | `getUpdates` | Telegram Bot API | Yes | Default transport |
+| Native command launcher | `setMyCommands` + global `setChatMenuButton` | Telegram Bot API | Yes | Exact nine-command list; command visibility is never authorization |
+| Opt-in quick controls | `ReplyKeyboardMarkup` + `ReplyKeyboardRemove` | Telegram Bot API | Yes | Persistent request for idle/running/disconnected states; `/controls_off` removes it |
 | Telegram buttons | `InlineKeyboardMarkup` / `CallbackQuery` | Telegram Bot API | Yes | Sessions, Stop, permissions, questions and plan review use opaque one-shot callback data |
+| Read-only workspace browsing | Local `IFileSystemService` behind `TelegramWorkspaceFileBrowser` | Stable VS Code filesystem seam + Telegram inline keyboards | Yes | Authorized selected workspace only; bounded text previews; not Telegram file upload/download |
 | Rich activity send | `sendRichMessage` + `InputRichMessage` | Telegram Bot API 10.1/10.2 | Yes | One persistent message per semantic ActivityRound |
 | Expandable activity | `InputRichBlockDetails` with paragraph/pre/list blocks | Telegram Bot API 10.2 | Yes | Collapsed summary plus details belonging only to that round |
 | Live status edit | `editMessageText` with `rich_message` / reply markup edit | Telegram Bot API | Yes | Updates the original running-round message; replacement fallback on edit failure |
@@ -225,6 +228,8 @@ Never use DOM/screen/chat text scraping as an API.
 The Phase 5.3 contract was checked against the official Telegram Bot API 10.2 documentation on 2026-08-24. The narrow dependency-free HTTP adapter now supports:
 
 - `getUpdates` long polling,
+- `setMyCommands`,
+- global `setChatMenuButton` command-menu configuration,
 - `sendMessage`,
 - `sendRichMessage`,
 - `sendRichMessageDraft`,
@@ -232,6 +237,7 @@ The Phase 5.3 contract was checked against the official Telegram Bot API 10.2 do
 - `editMessageReplyMarkup`,
 - callback queries,
 - inline keyboards,
+- persistent reply keyboards and explicit keyboard removal,
 - bot identity validation (`getMe`),
 - optional file APIs later.
 

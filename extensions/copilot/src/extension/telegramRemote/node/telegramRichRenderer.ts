@@ -95,7 +95,7 @@ function renderDetail(detail: ActivityRoundDetail): readonly TelegramInputRichBl
 
 function icon(round: ActivityRound): string {
 	if (round.status === 'failed') {
-		return '✗';
+		return round.type === 'other' ? '⚠' : '✗';
 	}
 	if (round.status === 'completed' && round.type === 'other') {
 		return '✓';
