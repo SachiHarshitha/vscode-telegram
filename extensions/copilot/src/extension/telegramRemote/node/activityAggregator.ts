@@ -5,8 +5,8 @@
 
 import * as l10n from '@vscode/l10n';
 import type { ActivityRound, ActivityRoundDetail, ActivityRoundMutation, ActivityRoundStatus, ActivityRoundType } from '../common/activityRound';
-import type { RemoteAgentEvent } from '../common/remoteAgentEvent';
-import type { IRemotePermissionRequest, IRemoteUserInputRequest } from '../common/remoteControlTypes';
+import type { RemoteAgentEvent } from '../../remoteControl/common/remoteAgentEvent';
+import type { IRemotePermissionRequest, IRemoteUserInputRequest } from '../../remoteControl/common/remoteControlTypes';
 
 const maximumDetails = 32;
 const maximumDetailLength = 4_000;

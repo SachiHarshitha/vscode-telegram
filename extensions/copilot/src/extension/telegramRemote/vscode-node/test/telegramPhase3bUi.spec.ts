@@ -172,6 +172,7 @@ describe('Telegram Phase 3b UI', () => {
 			unpair: commands.get(TelegramRemoteCommand.RevokePairing),
 			disable: commands.get(TelegramRemoteCommand.Disable),
 			forget: commands.get(TelegramRemoteCommand.ForgetConfiguration),
+			copyDiagnostics: commands.get(TelegramRemoteCommand.CopyDiagnostics),
 		}).toEqual({
 			enable: '!config.github.copilot.chat.cli.telegram.enabled',
 			authorizeWorkspace: 'github.copilot.cli.telegram.needsConsent',
@@ -179,6 +180,7 @@ describe('Telegram Phase 3b UI', () => {
 			unpair: 'config.github.copilot.chat.cli.telegram.enabled && github.copilot.cli.telegram.paired',
 			disable: 'config.github.copilot.chat.cli.telegram.enabled',
 			forget: 'github.copilot.cli.telegram.configured',
+			copyDiagnostics: 'config.github.copilot.chat.cli.telegram.enabled || github.copilot.cli.telegram.configured',
 		});
 	});
 });

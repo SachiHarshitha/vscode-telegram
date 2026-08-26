@@ -3,48 +3,22 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { SessionOptions } from '@github/copilot/sdk';
-import { createServiceIdentifier } from '../../../util/common/services';
-import type { IDisposable } from '../../../util/vs/base/common/lifecycle';
+import {
+	IRemoteLanguageModelBridge,
+	REMOTE_CONTROL_MODEL_SELECTION_PROPERTY,
+	type RemoteAdditionalModelRegistry,
+	type RemoteLanguageModelSelection,
+	type RemoteModelSource,
+	type RemoteSelectableModelInfo,
+} from '../../remoteControl/common/remoteLanguageModelBridgeTypes';
 
-export const TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY = 'telegramRemoteModelId';
-
-export type TelegramModelSource = 'copilotcli' | 'vscode-lm';
-
-/** Model descriptor shown by Telegram. `id` is stable for command/callback use. */
-export interface TelegramSelectableModelInfo {
-	readonly id: string;
-	/** Provider-qualified id selected inside the Copilot SDK session. */
-	readonly runtimeModelId?: string;
-	readonly name: string;
-	readonly provider: string;
-	readonly source: TelegramModelSource;
-	readonly maxContextWindowTokens: number;
-	readonly supportsVision?: boolean;
-	readonly supportsReasoningEffort?: boolean;
-	readonly defaultReasoningEffort?: string;
-	readonly supportedReasoningEfforts?: readonly string[];
-}
-
-export type TelegramAdditionalModelRegistry = {
-	readonly providers: NonNullable<SessionOptions['providers']>;
-	readonly models: NonNullable<SessionOptions['models']>;
-};
-
-/** Resolved SDK selection plus the additive provider registry needed to execute it. */
-export interface TelegramLanguageModelSelection {
-	readonly model: string;
-	readonly registry: TelegramAdditionalModelRegistry;
-}
-
-export interface ITelegramLanguageModelBridge extends IDisposable {
-	readonly _serviceBrand: undefined;
-	getModels(): Promise<readonly TelegramSelectableModelInfo[]>;
-	resolveModel(value: string): Promise<TelegramSelectableModelInfo | undefined>;
-	resolveSelection(modelId: string): Promise<TelegramLanguageModelSelection | undefined>;
-}
-
-export const ITelegramLanguageModelBridge = createServiceIdentifier<ITelegramLanguageModelBridge>('ITelegramLanguageModelBridge');
+export const TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY = REMOTE_CONTROL_MODEL_SELECTION_PROPERTY;
+export type TelegramModelSource = RemoteModelSource;
+export type TelegramSelectableModelInfo = RemoteSelectableModelInfo;
+export type TelegramAdditionalModelRegistry = RemoteAdditionalModelRegistry;
+export type TelegramLanguageModelSelection = RemoteLanguageModelSelection;
+export type ITelegramLanguageModelBridge = IRemoteLanguageModelBridge;
+export const ITelegramLanguageModelBridge = IRemoteLanguageModelBridge;
 
 export interface ITelegramLmTextPart {
 	readonly type: 'text';

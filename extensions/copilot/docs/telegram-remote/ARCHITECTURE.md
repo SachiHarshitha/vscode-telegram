@@ -73,17 +73,29 @@ flowchart TB
 
 ## 3. Proposed module layout
 
-All downstream-authored remote-control and Telegram code remains isolated in the fork-owned module. Upstream Copilot CLI files contain only the narrow integration hooks required by that module:
+Downstream-authored code is split between a transport-neutral internal framework and the concrete Telegram adapter. Upstream Copilot CLI files contain only narrow integration hooks to the generic framework:
 
 ```text
-extensions/copilot/src/extension/telegramRemote/
+extensions/copilot/src/extension/remoteControl/
     common/
         remoteControlTypes.ts
         remoteAgentEvent.ts
-        activityRound.ts
-        telegramTypes.ts
+        remoteLanguageModelBridgeTypes.ts
     node/
         remoteControlRegistry.ts
+        test/
+    vscode-node/
+        remotePromptDispatcher.ts
+        missionControlTransport.ts
+        missionControlQr.ts
+        test/
+
+extensions/copilot/src/extension/telegramRemote/
+    common/
+        activityRound.ts
+        telegramTypes.ts
+        telegramLanguageModelBridgeTypes.ts
+    node/
         telegramTransport.ts
         telegramService.ts
         telegramBotClient.ts
@@ -94,14 +106,15 @@ extensions/copilot/src/extension/telegramRemote/
         telegramActivityTimeline.ts
         telegramRichRenderer.ts
         telegramSessionState.ts
+        telegramUpdateRateLimiter.ts
         test/
     vscode-node/
-        remotePromptDispatcher.ts
-        missionControlTransport.ts
-        missionControlQr.ts
         telegramRemoteContribution.ts
+        telegramRemoteDiagnostics.ts
         test/
 ```
+
+The small legacy re-export files under `telegramRemote/common` and `telegramRemote/node` are compatibility shims for downstream imports; new generic consumers import `remoteControl/**` directly. The dependency is one-way: Telegram and Mission Control depend on the generic framework, while `remoteControl/**` contains no Telegram Bot API, authorization, polling, formatting, or credential type. This is an internal bundled-fork boundary, not a stable public VS Code extension API.
 
 The older `telegramEventRenderer.ts` / `telegramActivityCoalescer.ts` remain only as a tested compatibility implementation and are no longer selected by the composition root. New activity work targets the Rich Message timeline above.
 
@@ -351,7 +364,9 @@ flowchart LR
 
 The generalization is the first implementation milestone, not a later cleanup. Existing `_mcState`, `_waitForMcPermissionResponse()` and `_waitForMcUserInputResponse()` logic is hard-coded to one remote transport. Move that behavior behind the registry before adding Telegram branches. Preserve Mission Control's API client, buffering and poll cadence inside `MissionControlTransport`; the goal is a narrow transport seam, not a rewrite of the GitHub protocol.
 
-The first registry test uses Mission Control plus an in-memory second transport. Telegram work starts only after Mission Control behavior remains semantically unchanged and each SDK event is published exactly once.
+Registry acceptance includes Mission Control, Telegram, and a synthetic third transport. The synthetic adapter proves registration, replay/live event publication, trusted prompt provenance, permission/question/plan response participation, abort, detach, transport removal, and disposal without a Telegram dependency or Copilot CLI branch.
+
+Each transport registration declares capabilities. Missing capabilities deny operations by default. The registry issues request-origin objects and retains their identity in private provenance state; a structurally similar object is untrusted. `autopilot` is accepted only for a bundled transport registration that explicitly declares elevated modes, while Telegram declares only interactive/plan prompt submission and non-policy-changing response operations.
 
 ## 10. Permissions and interactive requests
 
@@ -406,6 +421,10 @@ sequenceDiagram
 The workstation initiates all network connections. No inbound service is required.
 
 Only one active `getUpdates` consumer may exist for a bot token. The contribution owns a singleton poller/lease and releases it on disable/deactivation. Automatic startup rejects a healthy competing owner. An explicit user **Reconnect** may transfer the lease: it atomically replaces ownership, the former owner detects the nonce change and aborts, and the new owner waits through the heartbeat handoff before polling. This provides recovery from a reload/orphaned window without silently letting two pollers compete.
+
+Inbound updates are admitted through bounded, per-paired-identity message and callback windows after authorization; pairing uses its own bounded attempt window before authorization. Outbound Bot API operations share a serialized queue capped at 128 pending requests. Network, server, and Telegram 429 failures receive at most three attempts with bounded backoff; authentication/client errors are not retried. Lifecycle generations invalidate queued delivery from an old token or stopped connection.
+
+`TelegramRemoteDiagnostics` owns a dedicated output channel. It records content-free lifecycle fields and applies a second credential-shaped redaction pass before output. **Copy Diagnostics** emits version, proposal, platform, authorization, consent-scope fingerprint, and polling state only—never bot tokens, callback data, prompts, answers, workspace paths, or event content.
 
 ## 12. Telegram UI state
 

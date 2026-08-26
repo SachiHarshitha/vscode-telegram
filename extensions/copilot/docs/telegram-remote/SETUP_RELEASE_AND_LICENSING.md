@@ -284,6 +284,15 @@ ThirdPartyNotices or dependency license inventory
 UPSTREAM_VERSION metadata
 ```
 
+Phase 8 generates the machine-readable subset with:
+
+```powershell
+cd extensions/copilot
+.\script\telegram-remote\generate-release-report.ps1 -TestStatus passed -ArtifactPath <artifact-path>
+```
+
+The script requires a clean worktree for release output, records the exact source and available upstream merge-base commits, writes the extension/runtime/proposal/platform/patch compatibility report, inventories lockfile dependency licenses, copies the applicable VS Code and extension licenses, and creates SHA-256 checksums. It rejects secret-shaped data in generated metadata. `-AllowDirty` is only for local engineering previews.
+
 Suggested downstream version metadata:
 
 ```text
@@ -389,7 +398,7 @@ The source review performed for this design did not establish whether a self-bui
 
 ## 14. Release CI
 
-A release workflow should eventually:
+`.github/workflows/telegram-remote-rebase.yml` now performs the compatibility workflow in an ephemeral Windows checkout:
 
 ```text
 checkout downstream branch
@@ -404,7 +413,14 @@ calculate SHA256
 attach artifact + compatibility metadata
 ```
 
-Do not auto-publish a rebased build if upstream compatibility tests fail.
+The workflow is scheduled and manually dispatchable. It does not push the rebased branch or publish a product; any rebase/build/test failure stops metadata production. The Phase 8 runner is:
+
+```powershell
+cd extensions/copilot
+.\script\telegram-remote\test-phase8.ps1
+```
+
+For a complete release-candidate run, close live development Extension Hosts first because they can lock generated extension runtime files. Human clean-profile, real-bot, Mission Control coexistence, and competing-host acceptance remains mandatory in [PHASE8_ACCEPTANCE.md](./PHASE8_ACCEPTANCE.md).
 
 ## 15. Public release checklist
 

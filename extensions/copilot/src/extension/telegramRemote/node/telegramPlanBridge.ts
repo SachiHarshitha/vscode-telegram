@@ -9,7 +9,7 @@ import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
 import type { ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
-import type { IRemoteExitPlanModeRequest, IRemoteExitPlanModeResponse, RemoteExitPlanModeAction } from '../common/remoteControlTypes';
+import type { IRemoteExitPlanModeRequest, IRemoteExitPlanModeResponse, RemoteExitPlanModeAction } from '../../remoteControl/common/remoteControlTypes';
 import type { TelegramSessionScopePolicy } from '../common/telegramSessionScope';
 import type { TelegramAnswerCallbackQueryOptions, TelegramEditRichMessageOptions, TelegramInlineKeyboardMarkup, TelegramInputRichMessage, TelegramMessage, TelegramSendRichMessageOptions, TelegramUpdate } from '../common/telegramTypes';
 import type { TelegramPairedIdentity } from './telegramAuthorization';

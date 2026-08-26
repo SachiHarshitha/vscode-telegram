@@ -2966,9 +2966,10 @@ export default defineConfig(
 			],
 		}
 	},
-	// Downstream-owned Telegram Remote sources use the fork copyright holder.
+	// Downstream-owned remote-control framework and Telegram sources use the fork copyright holder.
 	{
 		files: [
+			'extensions/copilot/src/extension/remoteControl/**/*.{ts,tsx}',
 			'extensions/copilot/src/extension/telegramRemote/**/*.{ts,tsx}',
 		],
 		rules: {

@@ -9,15 +9,17 @@ import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
-import { IRemoteControlRegistry } from '../common/remoteControlTypes';
+import { IRemoteControlRegistry } from '../../remoteControl/common/remoteControlTypes';
 import { TelegramAnswerCallbackQueryOptions, TelegramBotApiError, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser, validateTelegramBotToken } from '../common/telegramTypes';
 import { TelegramAuthorization, TelegramPairedIdentity } from '../node/telegramAuthorization';
 import { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCallbackInput, TelegramCallbackRegistration, TelegramCallbackRegistry } from '../node/telegramCallbackRegistry';
 import { TelegramConsent } from '../node/telegramConsent';
 import { TelegramPairingChallenge, TelegramPairingResult, TelegramPairingService } from '../node/telegramPairingService';
+import { TelegramUpdateRateLimiter } from '../node/telegramUpdateRateLimiter';
 import { getTelegramBotTokenFingerprint } from '../node/telegramPollerLease';
 import type { TelegramPollingOptions } from '../node/telegramService';
 import { TelegramTransport } from '../node/telegramTransport';
+import type { ITelegramRemoteDiagnostics } from './telegramRemoteDiagnostics';
 
 export interface TelegramPairingStartResult {
 	readonly bot: TelegramUser;
@@ -50,6 +52,7 @@ export class TelegramRemoteContribution extends Disposable {
 	readonly consent: TelegramConsent;
 	readonly pairing = new TelegramPairingService();
 	readonly callbacks = new TelegramCallbackRegistry();
+	private readonly updateRateLimiter = new TelegramUpdateRateLimiter();
 
 	private lifecycleGeneration = 0;
 	private authorizationStateValue: TelegramRemoteAuthorizationState = 'disabled';
@@ -60,6 +63,7 @@ export class TelegramRemoteContribution extends Disposable {
 	private authorizedUpdateHandler: TelegramAuthorizedUpdateHandler | undefined;
 
 	constructor(
+		private readonly diagnostics: ITelegramRemoteDiagnostics,
 		@IVSCodeExtensionContext extensionContext: IVSCodeExtensionContext,
 		@IRemoteControlRegistry private readonly registry: IRemoteControlRegistry,
 		@IFetcherService fetcherService: IFetcherService,
@@ -70,6 +74,10 @@ export class TelegramRemoteContribution extends Disposable {
 		this.consent = new TelegramConsent(extensionContext);
 		this.transport = this._register(new TelegramTransport(extensionContext.globalStorageUri.fsPath, registry, fetcherService, logService));
 		this._register(this.transport.onDidChangeStatus(status => {
+			this.diagnostics.record('polling-state', {
+				state: status.state,
+				reason: status.state === 'failed' || status.state === 'retrying' ? status.reason : undefined,
+			});
 			if (status.state === 'failed' && (this.authorizationStateValue === 'authorized' || this.authorizationStateValue === 'pairing-only')) {
 				this.blockIncomingUpdates('disabled', `connection-failed-${status.reason}`);
 				this.registry.suspendTransport(this.transport.id);
@@ -445,6 +453,12 @@ export class TelegramRemoteContribution extends Disposable {
 		if (!identity) {
 			return;
 		}
+		const updateKind = update.callback_query ? 'callback' : 'message';
+		if (!this.updateRateLimiter.accept(identity, updateKind)) {
+			this.logService.warn(`[TelegramRemote] update=rate-limited kind=${updateKind}`);
+			this.diagnostics.record('update-rate-limited', { kind: updateKind });
+			return;
+		}
 		await this.authorizedUpdateHandler?.({ update, identity });
 	}
 
@@ -498,11 +512,13 @@ export class TelegramRemoteContribution extends Disposable {
 	}
 
 	private blockIncomingUpdates(state: Exclude<TelegramRemoteAuthorizationState, 'authorized' | 'pairing-only'>, reason: string): void {
+		this.diagnostics.record('incoming-blocked', { state, reason });
 		this.lifecycleGeneration++;
 		this.transitionAuthorizationState(state, reason);
 		this.tokenFingerprint = undefined;
 		this.pairing.cancel();
 		this.callbacks.invalidateAll();
+		this.updateRateLimiter.clear();
 		this.blockedEmitter.fire();
 	}
 
@@ -512,6 +528,7 @@ export class TelegramRemoteContribution extends Disposable {
 		}
 		this.authorizationStateValue = state;
 		this.logService.info(`[TelegramRemote] state=${state} reason=${reason}`);
+		this.diagnostics.record('authorization-state', { state, reason });
 		this.authorizationStateEmitter.fire(state);
 	}
 

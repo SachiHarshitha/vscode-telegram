@@ -49,7 +49,7 @@ import { type CopilotCLIModelInfo, type ICopilotCLIModels, type ICopilotCLISDK }
 import { CopilotCLIPromptResolver } from '../../copilotcli/node/copilotcliPromptResolver';
 import { CopilotCLISession, CopilotCLISessionInput, ICopilotCLISession } from '../../copilotcli/node/copilotcliSession';
 import { CopilotCLISessionService, CopilotCLISessionWorkspaceTracker, ICopilotCLISessionService } from '../../copilotcli/node/copilotcliSessionService';
-import { RemoteControlRegistry } from '../../../telegramRemote/node/remoteControlRegistry';
+import { RemoteControlRegistry } from '../../../remoteControl/node/remoteControlRegistry';
 import { ICopilotCLIMCPHandler } from '../../copilotcli/node/mcpHandler';
 import { MockCliSdkSession, MockCliSdkSessionManager, MockSkillLocations, NullCopilotCLIAgents, NullICopilotCLIImageSupport } from '../../copilotcli/node/test/testHelpers';
 import { IQuestion, IQuestionAnswer, IUserQuestionHandler } from '../../copilotcli/node/userInputHelpers';

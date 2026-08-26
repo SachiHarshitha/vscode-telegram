@@ -20,9 +20,9 @@ The **Target** column records current implementation status, not only the eventu
 | Telegram account pairing | P0 | Telegram | Required | Short-lived pairing code + numeric Telegram user ID |
 | Paired-user allowlist | P0 | Telegram | Required | Fail closed for all other users |
 | Connection health/status | P0 | Telegram | Required | Connected, retrying, unauthorized, disabled |
-| Transport-neutral remote-control registry | P0 | Glue | Implemented | Preserves Mission Control and hosts Telegram attachment/event/control seams |
+| Transport-neutral remote-control registry | P0 | Glue | Implemented | Extracted under `remoteControl/**`; preserves Mission Control and hosts capability-validated Telegram/synthetic attachment, event and control seams |
 | Mission Control compatibility | P0 | Upstream + Glue | Required | Command/control semantics unchanged; duplicate event export removed |
-| Typed remote request origin | P0 | Glue | Required | Permission/mode never inferred from transport-supplied source strings |
+| Typed remote request origin | P0 | Glue | Implemented | Registry-issued identity-trusted provenance; capabilities default off and elevating modes require an explicit grant |
 | Exactly-once remote event publication | P0 | Glue | Implemented | Collapse overlapping MC listeners; deduplicate by upstream event ID |
 | Existing-session event replay | P0 | Upstream + Glue | Implemented | Replay seeds internal state only and is never presented as new current work |
 | Session list | P0 | Upstream + Glue | Implemented | Reuse `getAllSessions()`, then authorize each session working directory against the current consented window roots |
@@ -33,7 +33,7 @@ The **Target** column records current implementation status, not only the eventu
 | Send prompt | P0 | Upstream + Glue | Implemented | Fire-and-forget native command; create the editable activity card immediately; no direct SDK send |
 | Mid-turn steering | P0 | Upstream + Glue | Implemented | Same native request path; upstream busy handling uses SDK `mode: immediate` |
 | Queue follow-up prompt | P1 | Upstream + Glue | Planned | SDK enqueue/default behavior |
-| Abort active work | P0 | Upstream + Glue | Required | Registry safe-control binding; not exposed on `ICopilotCLISession` today |
+| Abort active work | P0 | Upstream + Glue | Implemented | Registry capability and active-attachment checks invoke the bound session's narrow abort seam |
 | Live assistant output | P0 | Upstream + Telegram | Implemented | SDK-visible deltas/full messages become semantic Rich Message rounds with bounded edits |
 | Agent intent/status | P0 | Upstream + Telegram | Implemented when exposed | Consecutive SDK-visible intent/reasoning summaries update one expandable **Thinking…** round; request-scoped semantic deduplication collapses repeated event representations across boundaries, and nested-agent assistant streams stay out of the root timeline; no hidden chain-of-thought |
 | Tool start/progress/complete | P0 | Upstream + Telegram | Implemented | Tool-call correlation; semantic read/search grouping; command/edit start-to-completion updates |
@@ -91,16 +91,16 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | --- | --- | --- | --- | --- |
 | Remote indicator in session list | P0 | Glue | Required | `ChatSessionItem.description` + `tooltip`; `badge`/`status`/`metadata` already used upstream |
 | Live indicator refresh | P0 | Glue | Required | Existing `refreshSession({reason:'update'})` driven by `onDidChangeAttachments` |
-| Status bar item | P0 | Telegram | Required | Connecting/connected/attached/error; warning background while attached |
-| One-click kill switch | P0 | Telegram | Required | QuickPick from the status bar item |
+| Status bar item | P0 | Telegram | Implemented | Connecting/connected/attached/error/needs-consent/off states with state-aware controls |
+| One-click kill switch | P0 | Telegram | Implemented | QuickPick Disable blocks dispatch synchronously before asynchronous cleanup |
 | Discoverable disabled state | P0 | Telegram | Implemented | Muted `Telegram: Off` item after prior configuration, subject to status visibility setting |
 | Capability/state-aware controls | P0 | Telegram | Implemented | Enable while disabled; Reconnect only for recoverable failure/stopped state; no inapplicable Unpair/Disable |
 | In-chat attach notice | P0 | Glue | Required | `stream.warning()` on the existing routed stream; no-ops when no UI stream |
 | Modal consent gate | P0 | Telegram | Required | Blocks first enable; cancel is default |
 | Setup wizard | P0 | Telegram | Required | QuickPick/InputBox; token entry masked |
 | Settings + disclosure text | P0 | Telegram | Required | `defineSetting()` + `markdownDescription` warning; token never a setting |
-| Command palette gating | P1 | Telegram | Planned | `enablement` clauses so pairing actions hide when disabled |
-| Diagnostics output channel | P1 | Telegram | Planned | Attach/detach audit trail, redacted |
+| Command palette gating | P1 | Telegram | Implemented | State-aware `enablement` clauses improve discoverability; handlers still revalidate security state |
+| Diagnostics output channel | P1 | Telegram | Implemented | Dedicated content-free redacted lifecycle channel plus copyable compatibility report |
 | Session-list remote filter | P2 | Glue | Optional | Only if many sessions are attached at once |
 | Webview dashboard | P2 | Telegram | Rejected for V1 | Commands + settings cover the surface; revisit only if it stops scaling |
 
@@ -135,9 +135,9 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | Reconnect after failure | P0 | Implemented | Retryable failures/stopped lifecycle only; authentication failures route to setup |
 | Forget configuration | P0 | Implemented | Stops access, removes token/consent/pairing, and clears configured marker |
 | Concurrent lifecycle safety | P0 | Implemented | Generation-bound setup/enable/reconnect plus synchronous disable and resume deduplication |
-| Diagnostics/log view | P1 | Planned | Connection, pairing, session bridge, event renderer |
-| Upstream version display | P1 | Planned | Show source commit and patch version |
-| Automated update/rebase CI | P1 | Planned | Detect conflicts against upstream |
+| Diagnostics/log view | P1 | Implemented | Dedicated Telegram channel for lifecycle, authorization, polling and bounded-delivery state |
+| Upstream version display | P1 | Implemented in copied/generated diagnostics | Exact commit in release report; extension/runtime/patch versions in local diagnostics |
+| Automated update/rebase CI | P1 | Implemented | Scheduled/manual ephemeral upstream rebase, targeted tests, packaging and compatibility artifact |
 
 ## Security features
 
@@ -157,8 +157,8 @@ All native indicators render transport-neutral registry state; Telegram strings 
 | Remote permission escalation prevention | P0 | Implemented; Telegram can resolve only a correlated request with approve-once/deny and cannot mutate permission policy |
 | Non-E2E confidentiality disclosure | P0 | Required before enabling bot transport |
 | Singleton poller lease | P0 | Automatic competing consumer fails visibly; explicit Reconnect performs a nonce-checked ownership handoff before the new poll starts |
-| Rate limiting | P1 | Planned |
-| Audit trail | P1 | Planned |
+| Rate limiting | P1 | Implemented; pairing attempts, authorized messages/callbacks, outbound queue and transient retries are bounded |
+| Audit trail | P1 | Implemented; content-free and credential-redacted local output channel |
 | Configurable permission policy | P1 | Planned |
 | Multiple paired users/roles | P2 | Deferred |
 

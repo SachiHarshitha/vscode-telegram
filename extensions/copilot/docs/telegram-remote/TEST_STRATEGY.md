@@ -460,10 +460,12 @@ Do not mark this real-bot checklist passed until a human performs it. Never prin
 From `extensions/copilot`:
 
 ```powershell
-.\script\telegram-remote\test-phase6.ps1
+.\script\telegram-remote\test-phase8.ps1 -SkipPackage -SkipCoreTests
 ```
 
-The Phase 6 deterministic run covers 27 Telegram Remote files / 169 tests plus 14 focused `CopilotCLISession` plan-response tests using fake tokens and in-memory hosts only. It includes lifecycle recovery, Rich Message activity, permission/question response races, Telegram plan callbacks/replies, Mission Control plan commands, forged-autopilot rejection and the one-response SDK boundary. It does not read `.env` or contact Telegram.
+The Phase 8 deterministic run covers the generic framework and complete Telegram adapter plus focused Copilot CLI/Mission Control/native-dispatch regressions using fake tokens and in-memory hosts only. It additionally enforces the one-way generic dependency boundary, synthetic third-transport lifecycle/capabilities, forged-provenance/elevation rejection, pending-response cleanup, bounded inbound/outbound work, transient retry limits, and redacted diagnostics. It does not read `.env` or contact Telegram.
+
+Omit the switches for the release-candidate gate after closing live development Extension Hosts. The complete runner then adds extension packaging and the focused core workbench test.
 
 ## 14. Release compatibility report
 
@@ -479,6 +481,14 @@ Copilot backend(s) tested
 Telegram Bot API smoke result
 Build/test result
 ```
+
+Generate the report, dependency/license inventory, bundled license copies, and SHA-256 manifest with:
+
+```powershell
+.\script\telegram-remote\generate-release-report.ps1 -TestStatus passed -ArtifactPath <artifact-path>
+```
+
+Release generation requires a clean worktree and scans generated metadata for token-shaped values. The exact manual signoff matrix is in [PHASE8_ACCEPTANCE.md](./PHASE8_ACCEPTANCE.md).
 
 ## 15. Performance targets
 

@@ -35,8 +35,8 @@ import { IChatSessionMetadataStore } from '../../common/chatSessionMetadataStore
 import { ExternalEditTracker } from '../../common/externalEditTracker';
 import { getWorkingDirectory, isIsolationEnabled, IWorkspaceInfo } from '../../common/workspaceInfo';
 import { clearTodoList, enrichToolInvocationWithSubagentMetadata, isCopilotCliEditToolCall, isCopilotCLIToolThatCouldRequirePermissions, isTodoRelatedSqlQuery, processToolExecutionComplete, processToolExecutionStart, ToolCall, updateTodoListFromSqlItems } from '../common/copilotCLITools';
-import { IRemoteControlRegistry, IRemoteUserInputResponse, type RemoteExitPlanModeAction, RemoteRequestOrigin } from '../../../telegramRemote/common/remoteControlTypes';
-import type { TelegramAdditionalModelRegistry } from '../../../telegramRemote/common/telegramLanguageModelBridgeTypes';
+import { IRemoteControlRegistry, IRemoteUserInputResponse, type RemoteExitPlanModeAction, RemoteRequestOrigin } from '../../../remoteControl/common/remoteControlTypes';
+import type { RemoteAdditionalModelRegistry } from '../../../remoteControl/common/remoteLanguageModelBridgeTypes';
 import { LocalSession, Session } from '../common/utils';
 import { getCopilotCLISessionDir } from './cliHelpers';
 import type { CopilotCliBridgeSpanProcessor } from './copilotCliBridgeSpanProcessor';
@@ -218,7 +218,7 @@ export interface ICopilotCLISession extends IDisposable {
 	getReplayEvents(): readonly SessionEvent[];
 	abort(): Promise<void>;
 	notifyRemoteAttachment(label: string, remotePermissionResponses: boolean): void;
-	ensureAdditionalModels(registry: TelegramAdditionalModelRegistry): void;
+	ensureAdditionalModels(registry: RemoteAdditionalModelRegistry): void;
 	getCurrentMode(): string | undefined;
 	selectCustomAgent(name: string | undefined): Promise<void>;
 	renameSdkSession(title: string): Promise<void>;
@@ -347,7 +347,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 			: l10n.t('This session is now remotely controllable from {0}. Permission prompts must be answered locally.', label));
 	}
 
-	ensureAdditionalModels(registry: TelegramAdditionalModelRegistry): void {
+	ensureAdditionalModels(registry: RemoteAdditionalModelRegistry): void {
 		const models = registry.models.filter(model => !this._sdkSession.isByokSelection(`${model.provider}/${model.id}`));
 		if (models.length === 0) {
 			return;

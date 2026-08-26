@@ -22,8 +22,8 @@ import { IWorkspaceInfo } from '../../../common/workspaceInfo';
 import { CopilotCLIModelInfo, ICopilotCLIAgents, ICopilotCLIModels } from '../../../copilotcli/node/copilotCli';
 import { ICopilotCLISession } from '../../../copilotcli/node/copilotcliSession';
 import { ICopilotCLISessionService } from '../../../copilotcli/node/copilotcliSessionService';
-import { RemoteControlRegistry } from '../../../../telegramRemote/node/remoteControlRegistry';
-import { TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY, type ITelegramLanguageModelBridge, type TelegramAdditionalModelRegistry, type TelegramLanguageModelSelection } from '../../../../telegramRemote/common/telegramLanguageModelBridgeTypes';
+import { RemoteControlRegistry } from '../../../../remoteControl/node/remoteControlRegistry';
+import { IRemoteLanguageModelBridge, REMOTE_CONTROL_MODEL_SELECTION_PROPERTY, type RemoteAdditionalModelRegistry, type RemoteLanguageModelSelection } from '../../../../remoteControl/common/remoteLanguageModelBridgeTypes';
 import { CopilotCLIChatSessionInitializer } from '../copilotCLIChatSessionInitializer';
 
 // ─── Test Helpers ────────────────────────────────────────────────
@@ -106,11 +106,11 @@ class TestLogService extends mock<ILogService>() {
 	override error = vi.fn();
 }
 
-class TestTelegramLanguageModelBridge extends mock<ITelegramLanguageModelBridge>() {
+class TestRemoteLanguageModelBridge extends mock<IRemoteLanguageModelBridge>() {
 	declare readonly _serviceBrand: undefined;
 	override getModels = vi.fn(async () => []);
 	override resolveModel = vi.fn(async () => undefined);
-	override resolveSelection = vi.fn(async (): Promise<TelegramLanguageModelSelection | undefined> => undefined);
+	override resolveSelection = vi.fn(async (): Promise<RemoteLanguageModelSelection | undefined> => undefined);
 	override dispose = vi.fn();
 }
 
@@ -168,7 +168,7 @@ function createInitializer(overrides?: {
 	metadataStore?: TestMetadataStore;
 	logService?: TestLogService;
 	configurationService?: TestConfigurationService;
-	telegramLanguageModelBridge?: TestTelegramLanguageModelBridge;
+	remoteLanguageModelBridge?: TestRemoteLanguageModelBridge;
 }) {
 	const sessionService = overrides?.sessionService ?? new TestSessionService();
 	const folderRepoManager = overrides?.folderRepoManager ?? new TestFolderRepositoryManager();
@@ -181,7 +181,7 @@ function createInitializer(overrides?: {
 	const metadataStore = overrides?.metadataStore ?? new TestMetadataStore();
 	const logService = overrides?.logService ?? new TestLogService();
 	const configurationService = overrides?.configurationService ?? new TestConfigurationService();
-	const telegramLanguageModelBridge = overrides?.telegramLanguageModelBridge ?? new TestTelegramLanguageModelBridge();
+	const remoteLanguageModelBridge = overrides?.remoteLanguageModelBridge ?? new TestRemoteLanguageModelBridge();
 
 	const initializer = new CopilotCLIChatSessionInitializer(
 		sessionService,
@@ -193,10 +193,10 @@ function createInitializer(overrides?: {
 		logService,
 		configurationService,
 		new RemoteControlRegistry(logService),
-		telegramLanguageModelBridge,
+		remoteLanguageModelBridge,
 	);
 
-	return { initializer, sessionService, folderRepoManager, worktreeService, workspaceFolderService, models, agents, promptsService, metadataStore, logService, configurationService, telegramLanguageModelBridge };
+	return { initializer, sessionService, folderRepoManager, worktreeService, workspaceFolderService, models, agents, promptsService, metadataStore, logService, configurationService, remoteLanguageModelBridge };
 }
 
 // ─── Tests ───────────────────────────────────────────────────────
@@ -247,30 +247,30 @@ describe('ChatSessionInitializer', () => {
 			expect(result).toEqual(expect.objectContaining({ model: 'default-model' }));
 		});
 
-		it('resolves a Telegram-selected VS Code model with its additive provider registry', async () => {
-			const telegramLanguageModelBridge = new TestTelegramLanguageModelBridge();
-			const registry: TelegramAdditionalModelRegistry = {
+		it('resolves a remotely selected VS Code model with its additive provider registry', async () => {
+			const remoteLanguageModelBridge = new TestRemoteLanguageModelBridge();
+			const registry: RemoteAdditionalModelRegistry = {
 				providers: [{ name: 'telegram-vscode-lm', type: 'openai', wireApi: 'responses', baseUrl: 'http://127.0.0.1:1234/vscode-lm', bearerToken: 'nonce' }],
 				models: [{ provider: 'telegram-vscode-lm', id: 'm-custom', wireModel: 'm-custom', name: 'Custom' }],
 			};
-			telegramLanguageModelBridge.resolveSelection.mockResolvedValue({ model: 'telegram-vscode-lm/m-custom', registry });
-			const { initializer } = createInitializer({ telegramLanguageModelBridge });
+			remoteLanguageModelBridge.resolveSelection.mockResolvedValue({ model: 'telegram-vscode-lm/m-custom', registry });
+			const { initializer } = createInitializer({ remoteLanguageModelBridge });
 			const request = makeRequest({
 				model: undefined,
-				modelConfiguration: { [TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY]: 'openai/custom' },
+				modelConfiguration: { [REMOTE_CONTROL_MODEL_SELECTION_PROPERTY]: 'openai/custom' },
 			} as unknown as Partial<vscode.ChatRequest>);
 
 			const result = await initializer.resolveModel(request, CancellationToken.None);
 
-			expect(telegramLanguageModelBridge.resolveSelection).toHaveBeenCalledWith('openai/custom');
+			expect(remoteLanguageModelBridge.resolveSelection).toHaveBeenCalledWith('openai/custom');
 			expect(result).toEqual({ model: 'telegram-vscode-lm/m-custom', additionalModels: registry });
 		});
 
-		it('does not silently fall back when a Telegram-selected VS Code model is stale', async () => {
+		it('does not silently fall back when a remotely selected VS Code model is stale', async () => {
 			const { initializer } = createInitializer();
 			const request = makeRequest({
 				model: undefined,
-				modelConfiguration: { [TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY]: 'openai/removed' },
+				modelConfiguration: { [REMOTE_CONTROL_MODEL_SELECTION_PROPERTY]: 'openai/removed' },
 			} as unknown as Partial<vscode.ChatRequest>);
 
 			await expect(initializer.resolveModel(request, CancellationToken.None)).rejects.toThrow('no longer available');
@@ -563,20 +563,20 @@ describe('ChatSessionInitializer', () => {
 		});
 
 		it('registers a VS Code model before selecting it and omits it from initial session creation', async () => {
-			const telegramLanguageModelBridge = new TestTelegramLanguageModelBridge();
-			const registry: TelegramAdditionalModelRegistry = {
+			const remoteLanguageModelBridge = new TestRemoteLanguageModelBridge();
+			const registry: RemoteAdditionalModelRegistry = {
 				providers: [{ name: 'telegram-vscode-lm', type: 'openai', wireApi: 'responses', baseUrl: 'http://127.0.0.1:1234/vscode-lm', bearerToken: 'nonce' }],
 				models: [{ provider: 'telegram-vscode-lm', id: 'm-custom', wireModel: 'm-custom', name: 'Custom' }],
 			};
-			telegramLanguageModelBridge.resolveSelection.mockResolvedValue({ model: 'telegram-vscode-lm/m-custom', registry });
+			remoteLanguageModelBridge.resolveSelection.mockResolvedValue({ model: 'telegram-vscode-lm/m-custom', registry });
 			const sessionService = new TestSessionService();
 			const sessionObject = makeSessionObject({ ensureAdditionalModels: vi.fn() });
 			sessionService.createSession.mockResolvedValue({ object: sessionObject, dispose: vi.fn() });
-			const { initializer } = createInitializer({ sessionService, telegramLanguageModelBridge });
+			const { initializer } = createInitializer({ sessionService, remoteLanguageModelBridge });
 			const disposables = new DisposableStore();
 			const request = makeRequest({
 				model: undefined,
-				modelConfiguration: { [TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY]: 'openai/custom' },
+				modelConfiguration: { [REMOTE_CONTROL_MODEL_SELECTION_PROPERTY]: 'openai/custom' },
 			} as unknown as Partial<vscode.ChatRequest>);
 
 			const result = await initializer.getOrCreateSession(request, makeChatResource(), { stream: makeStream() }, disposables, CancellationToken.None);

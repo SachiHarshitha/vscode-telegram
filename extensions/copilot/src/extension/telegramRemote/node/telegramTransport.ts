@@ -9,7 +9,7 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable, toDisposable } from '../../../util/vs/base/common/lifecycle';
-import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport, type IRemoteExitPlanModeRequest, type IRemoteExitPlanModeResponse, type IRemotePermissionRequest, type IRemoteUserInputRequest, type IRemoteUserInputResponse, type RemotePermissionResult } from '../common/remoteControlTypes';
+import { IRemoteControlRegistry, type IRemoteControlSessionEvent, type IRemoteControlTransport, type IRemoteExitPlanModeRequest, type IRemoteExitPlanModeResponse, type IRemotePermissionRequest, type IRemoteUserInputRequest, type IRemoteUserInputResponse, type RemotePermissionResult } from '../../remoteControl/common/remoteControlTypes';
 import type { TelegramAnswerCallbackQueryOptions, TelegramEditMessageTextOptions, TelegramEditRichMessageOptions, TelegramInputRichMessage, TelegramMessage, TelegramPollingStatus, TelegramSendMessageOptions, TelegramSendRichMessageOptions, TelegramUpdate, TelegramUser } from '../common/telegramTypes';
 import { TelegramService, type TelegramPollingOptions, type TelegramValidatedHandler } from './telegramService';
 
@@ -18,6 +18,14 @@ export class TelegramTransport extends Disposable implements IRemoteControlTrans
 	readonly id = 'telegram';
 	readonly label = l10n.t('Telegram');
 	readonly themeIcon = 'copilot-telegram-logo';
+	readonly capabilities = Object.freeze({
+		submitPrompt: true,
+		requestModes: ['interactive', 'plan'] as const,
+		permissionResponses: true,
+		userInputResponses: true,
+		exitPlanResponses: true,
+		abort: true,
+	});
 
 	private readonly service: TelegramService;
 	private eventPublisher: Pick<IRemoteControlTransport, 'publish' | 'requestPermission' | 'requestUserInput' | 'requestExitPlanMode'> | undefined;

@@ -5,7 +5,7 @@
 
 import type { Attachment, SendOptions } from '@github/copilot/sdk';
 import { generateUuid } from '../../../../util/vs/base/common/uuid';
-import type { RemoteRequestOrigin } from '../../../telegramRemote/common/remoteControlTypes';
+import type { RemoteRequestOrigin } from '../../../remoteControl/common/remoteControlTypes';
 
 export const COPILOT_CLI_PENDING_REQUEST_MARKER_ID = 'github.copilot.cli.pendingRemoteRequest';
 

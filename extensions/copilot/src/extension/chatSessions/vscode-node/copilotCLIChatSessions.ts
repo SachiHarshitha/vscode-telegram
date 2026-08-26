@@ -39,7 +39,7 @@ import { getWorkingDirectory, IWorkspaceInfo } from '../common/workspaceInfo';
 import { ICustomSessionTitleService } from '../copilotcli/common/customSessionTitleService';
 import { IChatDelegationSummaryService } from '../copilotcli/common/delegationSummaryService';
 import { clearPendingCopilotCLIRequestContext, COPILOT_CLI_PENDING_REQUEST_MARKER_ID, createPendingCopilotCLIRequestCorrelationId, createPendingCopilotCLIRequestMarker, getPendingCopilotCLIRequestCorrelationId, setPendingCopilotCLIRequestContext, takePendingCopilotCLIRequestContext } from '../copilotcli/common/pendingRequestContext';
-import { IRemoteControlRegistry, type IRemoteAttachmentInfo, type RemoteRequestOrigin } from '../../telegramRemote/common/remoteControlTypes';
+import { IRemoteControlRegistry, type IRemoteAttachmentInfo, type RemoteRequestOrigin } from '../../remoteControl/common/remoteControlTypes';
 import { SessionIdForCLI } from '../copilotcli/common/utils';
 import { getCopilotCLISessionDir } from '../copilotcli/node/cliHelpers';
 import { ICopilotCLIModels, ICopilotCLISDK } from '../copilotcli/node/copilotCli';

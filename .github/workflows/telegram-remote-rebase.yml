@@ -1,0 +1,51 @@
+name: Telegram Remote Upstream Rebase
+
+on:
+  workflow_dispatch:
+  # Automatic upstream-rebase runs are temporarily muted. Keep this workflow
+  # manually dispatchable until scheduled validation is enabled again.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-remote-rebase-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebase-and-validate:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Rebase temporary checkout onto upstream
+        shell: pwsh
+        run: |
+          git config user.name "telegram-remote-rebase-bot"
+          git config user.email "telegram-remote-rebase@users.noreply.github.com"
+          git remote add upstream https://github.com/microsoft/vscode.git
+          git fetch upstream main
+          git rebase upstream/main
+      - name: Install repository dependencies
+        run: npm ci
+      - name: Install Copilot extension dependencies
+        working-directory: extensions/copilot
+        run: npm ci
+      - name: Run Phase 8 compatibility gate
+        shell: pwsh
+        run: .\extensions\copilot\script\telegram-remote\test-phase8.ps1
+      - name: Generate compatibility, license, and checksum metadata
+        shell: pwsh
+        run: .\extensions\copilot\script\telegram-remote\generate-release-report.ps1 -TestStatus passed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: telegram-remote-compatibility-${{ github.run_id }}
+          path: artifacts/telegram-remote
+          if-no-files-found: error

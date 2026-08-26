@@ -7,7 +7,7 @@ import { ConfigKey, IConfigurationService } from '../../../platform/configuratio
 import { ILogService } from '../../../platform/log/common/logService';
 import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import type { ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
-import type { IRemoteControlRegistry, RemoteNonElevatingMode } from '../common/remoteControlTypes';
+import type { IRemoteControlRegistry, RemoteNonElevatingMode } from '../../remoteControl/common/remoteControlTypes';
 import type { ITelegramLanguageModelBridge, TelegramModelSource, TelegramSelectableModelInfo } from '../common/telegramLanguageModelBridgeTypes';
 import type { TelegramPairedIdentity } from './telegramAuthorization';
 import type { TelegramPersistedModelPreference } from './telegramSessionState';

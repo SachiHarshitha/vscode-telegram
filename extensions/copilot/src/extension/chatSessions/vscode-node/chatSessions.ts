@@ -38,17 +38,18 @@ import { CopilotCLIAgents, CopilotCLIModels, CopilotCLISDK, ICopilotCLIAgents, I
 import { CopilotCLIImageSupport, ICopilotCLIImageSupport } from '../copilotcli/node/copilotCLIImageSupport';
 import { CopilotCLIPromptResolver } from '../copilotcli/node/copilotcliPromptResolver';
 import { CopilotCLISessionService, ICopilotCLISessionService } from '../copilotcli/node/copilotcliSessionService';
-import { RemoteControlRegistry } from '../../telegramRemote/node/remoteControlRegistry';
+import { RemoteControlRegistry } from '../../remoteControl/node/remoteControlRegistry';
 import { CopilotCLISkills, ICopilotCLISkills } from '../copilotcli/node/copilotCLISkills';
 import { CopilotCLIMCPHandler, ICopilotCLIMCPHandler } from '../copilotcli/node/mcpHandler';
 import { IUserQuestionHandler } from '../copilotcli/node/userInputHelpers';
 import { CopilotCLIContrib, getServices } from '../copilotcli/vscode-node/contribution';
-import { MissionControlTransport } from '../../telegramRemote/vscode-node/missionControlTransport';
-import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../telegramRemote/vscode-node/remotePromptDispatcher';
-import { IRemoteControlRegistry } from '../../telegramRemote/common/remoteControlTypes';
-import { ITelegramLanguageModelBridge } from '../../telegramRemote/common/telegramLanguageModelBridgeTypes';
+import { MissionControlTransport } from '../../remoteControl/vscode-node/missionControlTransport';
+import { IRemotePromptDispatcher, RemotePromptDispatcher } from '../../remoteControl/vscode-node/remotePromptDispatcher';
+import { IRemoteLanguageModelBridge } from '../../remoteControl/common/remoteLanguageModelBridgeTypes';
+import { IRemoteControlRegistry } from '../../remoteControl/common/remoteControlTypes';
 import { TelegramLanguageModelBridge } from '../../telegramRemote/vscode-node/telegramLanguageModelBridge';
 import { TelegramRemoteContribution } from '../../telegramRemote/vscode-node/telegramRemoteContribution';
+import { TelegramRemoteDiagnostics } from '../../telegramRemote/vscode-node/telegramRemoteDiagnostics';
 import { TelegramCommandRouter } from '../../telegramRemote/node/telegramCommandRouter';
 import { TelegramActivityTimeline } from '../../telegramRemote/node/telegramActivityTimeline';
 import { TelegramPlanBridge } from '../../telegramRemote/node/telegramPlanBridge';
@@ -163,7 +164,7 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 				[IPullRequestDetectionService, new SyncDescriptor(PullRequestDetectionService)],
 				[ISessionOptionGroupBuilder, new SyncDescriptor(SessionOptionGroupBuilder)],
 				[ISessionRequestLifecycle, new SyncDescriptor(SessionRequestLifecycle)],
-				[ITelegramLanguageModelBridge, new SyncDescriptor(TelegramLanguageModelBridge, [vscode.lm])],
+				[IRemoteLanguageModelBridge, new SyncDescriptor(TelegramLanguageModelBridge, [vscode.lm])],
 				[ICopilotCLIChatSessionInitializer, new SyncDescriptor(CopilotCLIChatSessionInitializer)],
 				...getServices()
 			));
@@ -230,12 +231,13 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			return;
 		}
 
-		const telegramContribution = this._register(instantiationService.createInstance(TelegramRemoteContribution));
+		const telegramDiagnostics = this._register(instantiationService.createInstance(TelegramRemoteDiagnostics));
+		const telegramContribution = this._register(instantiationService.createInstance(TelegramRemoteContribution, telegramDiagnostics));
 		const telegramEnvironment = getTelegramRemoteEnvironment();
 		const telegramSessionState = this._register(instantiationService.createInstance(TelegramSessionState, telegramEnvironment.consentScopeFingerprint));
 		const sessionService = instantiationService.invokeFunction(accessor => accessor.get(ICopilotCLISessionService));
 		const registry = instantiationService.invokeFunction(accessor => accessor.get(IRemoteControlRegistry));
-		const models = this._register(instantiationService.invokeFunction(accessor => accessor.get(ITelegramLanguageModelBridge)));
+		const models = this._register(instantiationService.invokeFunction(accessor => accessor.get(IRemoteLanguageModelBridge)));
 		const configurationService = instantiationService.invokeFunction(accessor => accessor.get(IConfigurationService));
 		const sessionScopePolicy = new CurrentWorkspaceTelegramSessionScopePolicy(telegramEnvironment.consentScopeFingerprint);
 		const telegramCommandEnvironment = {
@@ -282,9 +284,9 @@ export class ChatSessionsContrib extends Disposable implements IExtensionContrib
 			activityTimeline,
 			requestPreferences,
 		));
-		const telegramSetupWizard = this._register(instantiationService.createInstance(TelegramSetupWizard, telegramContribution));
+		const telegramSetupWizard = this._register(instantiationService.createInstance(TelegramSetupWizard, telegramContribution, telegramDiagnostics));
 		this._register(instantiationService.createInstance(TelegramStatusBar, telegramContribution, telegramSetupWizard));
-		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=7; remote-control-registry=ready; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-routing=authorized-only; telegram-activity=rich-timeline; telegram-plan-response=safe-actions-only; telegram-models=combined-vscode-lm-bridge; telegram-modes=non-elevating; telegram-network=consent-gated`);
+		logService.info(`[TelegramRemote] ${marker}; host=controller; phase=8; remote-control-framework=generic; transport-capabilities=registry-validated; telegram-transport=ready; telegram-security=state-separated; telegram-consent=workspace-recoverable; telegram-ui=state-aware; telegram-routing=authorized-only; telegram-activity=rich-timeline; telegram-plan-response=safe-actions-only; telegram-models=combined-vscode-lm-bridge; telegram-modes=non-elevating; telegram-diagnostics=redacted; telegram-rate-limits=bounded; telegram-network=consent-gated`);
 	}
 
 	private registerCopilotCLIServicesV1(instantiationService: IInstantiationService, delegationSummary: IChatDelegationSummaryService, logService: ILogService) {

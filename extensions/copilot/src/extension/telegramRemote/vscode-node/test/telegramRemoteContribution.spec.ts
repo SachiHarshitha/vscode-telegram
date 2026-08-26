@@ -71,6 +71,23 @@ describe('TelegramRemoteContribution', () => {
 		contribution.dispose();
 	});
 
+	it('bounds authorized message bursts before they reach the command router', async () => {
+		const { contribution, logService } = createContribution(storageRoot);
+		const transport = mockTransportStartup(contribution);
+		const authorizedHandler = vi.fn(async (_accepted: TelegramAuthorizedUpdate) => { });
+		contribution.registerAuthorizedUpdateHandler(authorizedHandler);
+		const pairing = await contribution.startPairing(botToken, consentScopeFingerprint);
+		await transport.handleUpdate(telegramMessageUpdate(1, pairing.challenge.command));
+
+		for (let updateId = 2; updateId <= 22; updateId++) {
+			await transport.handleUpdate(telegramMessageUpdate(updateId, '/status'));
+		}
+
+		expect(authorizedHandler).toHaveBeenCalledTimes(20);
+		expect(logService.warn).toHaveBeenCalledWith('[TelegramRemote] update=rate-limited kind=message');
+		contribution.dispose();
+	});
+
 	it('admits only the matching pair command while pairing is pending', async () => {
 		const { contribution } = createContribution(storageRoot);
 		const transport = mockTransportStartup(contribution);
@@ -342,6 +359,7 @@ function createContribution(storageRoot: string, existingContext?: TestTelegramE
 	const registry = new RemoteControlRegistry(logService);
 	const context = existingContext ?? new TestTelegramExtensionContext(storageRoot);
 	const contribution = new TelegramRemoteContribution(
+		{ record: vi.fn(), show: vi.fn(), copyReport: vi.fn(async () => { }) },
 		context,
 		registry,
 		new class extends mock<IFetcherService>() { },

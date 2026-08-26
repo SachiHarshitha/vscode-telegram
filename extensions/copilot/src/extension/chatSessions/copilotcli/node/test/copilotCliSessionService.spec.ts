@@ -43,7 +43,7 @@ import { IChatDelegationSummaryService } from '../../common/delegationSummarySer
 import { getCopilotCLISessionDir } from '../cliHelpers';
 import { ICopilotCLISDK } from '../copilotCli';
 import { CopilotCLISession, ICopilotCLISession } from '../copilotcliSession';
-import { RemoteControlRegistry } from '../../../../telegramRemote/node/remoteControlRegistry';
+import { RemoteControlRegistry } from '../../../../remoteControl/node/remoteControlRegistry';
 import { COPILOT_CLI_CHAT_PANEL_SYSTEM_MESSAGE, CopilotCLISessionService, CopilotCLISessionWorkspaceTracker, ICopilotCLISessionItem } from '../copilotcliSessionService';
 import { CopilotCLIMCPHandler } from '../mcpHandler';
 import { MissionControlApiClient } from '../missionControlApiClient';

@@ -32,8 +32,8 @@ import { IWorkspaceInfo } from '../../../common/workspaceInfo';
 import { FakeToolsService, ToolCall } from '../../common/copilotCLITools';
 import { Session } from '../../common/utils';
 import { CopilotCLISession } from '../copilotcliSession';
-import { RemoteControlRegistry } from '../../../../telegramRemote/node/remoteControlRegistry';
-import type { IRemoteControlTransport, IRemoteExitPlanModeRequest, RemoteRequestOrigin } from '../../../../telegramRemote/common/remoteControlTypes';
+import { RemoteControlRegistry } from '../../../../remoteControl/node/remoteControlRegistry';
+import type { IRemoteControlTransport, IRemoteExitPlanModeRequest, RemoteControlMode, RemoteRequestOrigin } from '../../../../remoteControl/common/remoteControlTypes';
 import { PermissionRequest } from '../permissionHelpers';
 import { IQuestion, IQuestionAnswer, IUserQuestionHandler } from '../userInputHelpers';
 import { NullICopilotCLIImageSupport } from './testHelpers';
@@ -42,6 +42,17 @@ vi.mock('../cliHelpers', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../cliHelpers')>()),
 	getCopilotCLISessionStateDir: () => '/mock-session-state',
 }));
+
+function createOriginTransport(id: string, requestModes: readonly RemoteControlMode[], elevatedModes = false): IRemoteControlTransport {
+	return {
+		id,
+		label: id,
+		themeIcon: 'remote',
+		capabilities: { submitPrompt: true, requestModes, elevatedModes },
+		publish: () => { },
+		dispose: () => { },
+	};
+}
 
 // Minimal shapes for types coming from the Copilot SDK we interact with
 interface MockSdkEventHandler { (payload: unknown): void }
@@ -1114,13 +1125,14 @@ describe('CopilotCLISession', () => {
 
 	it('only applies a Mission Control mode from a registry-created origin', async () => {
 		const registry = disposables.add(new RemoteControlRegistry(logger));
+		disposables.add(registry.registerTransport(createOriginTransport('missionControl', ['interactive', 'plan', 'autopilot'], true)));
 		const session = await createSession({ remoteControlRegistry: registry });
 		const stream = new MockChatResponseStream();
 		session.attachStream(stream);
 		const forgedOrigin = {
-			kind: 'missionControl',
+			kind: 'remoteControl',
 			transportId: 'missionControl',
-			commandId: 'forged',
+			requestId: 'forged',
 			mode: 'plan',
 		} as RemoteRequestOrigin;
 
@@ -1135,7 +1147,7 @@ describe('CopilotCLISession', () => {
 		expect(sdkSession.lastSendOptions?.agentMode).toBe('interactive');
 		expect(sdkSession.lastSendOptions?.source).toBe('command-forged');
 
-		const trustedOrigin = registry.createMissionControlOrigin('trusted', 'plan');
+		const trustedOrigin = registry.createRequestOrigin('missionControl', 'trusted', 'plan');
 		await session.handleRequest(
 			{ id: 'trusted', toolInvocationToken: undefined as never },
 			{ prompt: 'trusted request', source: 'command-trusted', origin: trustedOrigin },
@@ -1149,13 +1161,14 @@ describe('CopilotCLISession', () => {
 
 	it('applies only registry-created non-elevating Telegram modes', async () => {
 		const registry = disposables.add(new RemoteControlRegistry(logger));
+		disposables.add(registry.registerTransport(createOriginTransport('telegram', ['interactive', 'plan'])));
 		const session = await createSession({ remoteControlRegistry: registry });
 		session.setPermissionLevel('autopilot');
 		session.attachStream(new MockChatResponseStream());
 
 		await session.handleRequest(
 			{ id: 'telegram-plan', toolInvocationToken: undefined as never },
-			{ prompt: 'create a plan', origin: registry.createTelegramOrigin('update-1', 'plan') },
+			{ prompt: 'create a plan', origin: registry.createRequestOrigin('telegram', 'update-1', 'plan') },
 			[],
 			undefined,
 			authInfo,
@@ -1165,7 +1178,7 @@ describe('CopilotCLISession', () => {
 
 		await session.handleRequest(
 			{ id: 'telegram-interactive', toolInvocationToken: undefined as never },
-			{ prompt: 'continue interactively', origin: registry.createTelegramOrigin('update-2') },
+			{ prompt: 'continue interactively', origin: registry.createRequestOrigin('telegram', 'update-2') },
 			[],
 			undefined,
 			authInfo,
@@ -1812,6 +1825,7 @@ describe('CopilotCLISession', () => {
 			const requestExitPlanMode = vi.fn(async (_sessionId: string, _request: IRemoteExitPlanModeRequest) => ({ approved: true as const, selectedAction: 'interactive' as const }));
 			const transport: IRemoteControlTransport = {
 				id: 'testRemote', label: 'Test Remote', themeIcon: 'remote',
+				capabilities: { exitPlanResponses: true },
 				publish: () => { }, requestExitPlanMode, dispose: () => { },
 			};
 			disposables.add(registry.registerTransport(transport));
@@ -1839,6 +1853,7 @@ describe('CopilotCLISession', () => {
 			const requestExitPlanMode = vi.fn(async (_sessionId: string, _request: IRemoteExitPlanModeRequest) => ({ approved: true as const, selectedAction: 'interactive' as const }));
 			const transport: IRemoteControlTransport = {
 				id: 'testRemote', label: 'Test Remote', themeIcon: 'remote',
+				capabilities: { exitPlanResponses: true },
 				publish: () => { }, requestExitPlanMode, dispose: () => { },
 			};
 			disposables.add(registry.registerTransport(transport));

@@ -35,6 +35,8 @@ const maximumBackoffMs = 30_000;
 const initialBackoffMs = 1_000;
 const maximumRecentUpdateIds = 1_000;
 const takeoverHandoffDelayMs = 6_000;
+const maximumPendingOutboundRequests = 128;
+const maximumOutboundAttempts = 3;
 
 interface TelegramPollingStateFile {
 	readonly version: 2;
@@ -91,6 +93,10 @@ export class TelegramService extends Disposable {
 	private deliveryClient: ITelegramBotClient | undefined;
 	private preserveDeliveryClientAfterStop = false;
 	private readonly discardPendingTokenFingerprints = new Set<string>();
+	private outboundRetryController: IAbortController;
+	private outboundQueue = Promise.resolve();
+	private outboundGeneration = 0;
+	private pendingOutboundRequests = 0;
 
 	constructor(
 		private readonly storageRoot: string,
@@ -100,6 +106,10 @@ export class TelegramService extends Disposable {
 	) {
 		super();
 		this.runtime = runtime ?? new DefaultTelegramPollingRuntime(fetcherService);
+		// Outbound cancellation is local queue state and does not need the fetcher's
+		// process-aware controller. Keeping it independent also makes the delivery
+		// queue usable with lightweight test and alternate-transport fetchers.
+		this.outboundRetryController = new AbortController();
 	}
 
 	get currentStatus(): TelegramPollingStatus {
@@ -191,7 +201,7 @@ export class TelegramService extends Disposable {
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
-		return client.sendMessage(chatId, text, options);
+		return this.enqueueOutbound(client, () => client.sendMessage(chatId, text, options));
 	}
 
 	async sendRichMessage(chatId: number, richMessage: TelegramInputRichMessage, options?: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
@@ -199,7 +209,7 @@ export class TelegramService extends Disposable {
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram Remote is not connected.');
 		}
-		return client.sendRichMessage(chatId, richMessage, options);
+		return this.enqueueOutbound(client, () => client.sendRichMessage(chatId, richMessage, options));
 	}
 
 	async sendRichMessageDraft(chatId: number, draftId: number, richMessage: TelegramInputRichMessage): Promise<true> {
@@ -207,7 +217,7 @@ export class TelegramService extends Disposable {
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram Remote is not connected.');
 		}
-		return client.sendRichMessageDraft(chatId, draftId, richMessage);
+		return this.enqueueOutbound(client, () => client.sendRichMessageDraft(chatId, draftId, richMessage));
 	}
 
 	async editMessageText(chatId: number, messageId: number, text: string, options?: TelegramEditMessageTextOptions): Promise<TelegramMessage | true> {
@@ -215,7 +225,7 @@ export class TelegramService extends Disposable {
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
-		return client.editMessageText(chatId, messageId, text, options);
+		return this.enqueueOutbound(client, () => client.editMessageText(chatId, messageId, text, options));
 	}
 
 	async editRichMessage(chatId: number, messageId: number, richMessage: TelegramInputRichMessage, options?: TelegramEditRichMessageOptions): Promise<TelegramMessage | true> {
@@ -223,7 +233,7 @@ export class TelegramService extends Disposable {
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram Remote is not connected.');
 		}
-		return client.editRichMessage(chatId, messageId, richMessage, options);
+		return this.enqueueOutbound(client, () => client.editRichMessage(chatId, messageId, richMessage, options));
 	}
 
 	async editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramSendMessageOptions['replyMarkup']): Promise<TelegramMessage | true> {
@@ -231,7 +241,7 @@ export class TelegramService extends Disposable {
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
-		return client.editMessageReplyMarkup(chatId, messageId, replyMarkup);
+		return this.enqueueOutbound(client, () => client.editMessageReplyMarkup(chatId, messageId, replyMarkup));
 	}
 
 	async answerCallbackQuery(callbackQueryId: string, options?: TelegramAnswerCallbackQueryOptions): Promise<void> {
@@ -239,7 +249,7 @@ export class TelegramService extends Disposable {
 		if (!client) {
 			throw new TelegramBotApiError('api', 'Telegram polling is not connected.');
 		}
-		await client.answerCallbackQuery(callbackQueryId, options);
+		await this.enqueueOutbound(client, () => client.answerCallbackQuery(callbackQueryId, options));
 	}
 
 	/** Keeps outbound delivery available while an already-started local turn reaches its terminal event. */
@@ -250,6 +260,9 @@ export class TelegramService extends Disposable {
 
 	/** Releases the outbound-only client retained to finish a locally continuing activity. */
 	clearDeliveryClient(): void {
+		this.outboundGeneration++;
+		this.outboundRetryController.abort();
+		this.outboundRetryController = new AbortController();
 		this.deliveryClient = undefined;
 		this.preserveDeliveryClientAfterStop = false;
 	}
@@ -420,7 +433,40 @@ export class TelegramService extends Disposable {
 		this.statusEmitter.fire(status);
 	}
 
+	private enqueueOutbound<T>(client: ITelegramBotClient, operation: () => Promise<T>): Promise<T> {
+		if (this.pendingOutboundRequests >= maximumPendingOutboundRequests) {
+			throw new TelegramBotApiError('rate-limit', 'Telegram Remote outbound queue is full.');
+		}
+		const generation = this.outboundGeneration;
+		const retryController = this.outboundRetryController;
+		this.pendingOutboundRequests++;
+		const result = this.outboundQueue.then(() => this.runOutbound(client, operation, generation, retryController));
+		this.outboundQueue = result.then(() => undefined, () => undefined);
+		return result.finally(() => this.pendingOutboundRequests--);
+	}
+
+	private async runOutbound<T>(client: ITelegramBotClient, operation: () => Promise<T>, generation: number, retryController: IAbortController): Promise<T> {
+		for (let attempt = 1; ; attempt++) {
+			if (generation !== this.outboundGeneration || retryController.signal.aborted
+				|| (client !== this.activeRun?.client && client !== this.deliveryClient)) {
+				throw new TelegramBotApiError('aborted', 'Telegram outbound delivery was cancelled.');
+			}
+			try {
+				return await operation();
+			} catch (error) {
+				if (attempt >= maximumOutboundAttempts || !isRetryableOutboundError(error)) {
+					throw error;
+				}
+				const retryInMs = getRetryDelay(error, attempt);
+				this.logService.warn(`[TelegramRemote] Telegram outbound request failed (${classifyOutboundFailure(error)}); retrying in ${retryInMs}ms.`);
+				await this.runtime.delay(retryInMs, retryController.signal);
+			}
+		}
+	}
+
 	public override dispose(): void {
+		this.outboundRetryController.abort();
+		this.outboundGeneration++;
 		void this.stop();
 		super.dispose();
 	}
@@ -487,6 +533,22 @@ function getRetryDelay(error: unknown, failureCount: number): number {
 		? Math.max(initialBackoffMs, error.retryAfterSeconds * 1000)
 		: initialBackoffMs * 2 ** Math.min(failureCount - 1, 5);
 	return Math.min(maximumBackoffMs, rateLimitDelay);
+}
+
+function isRetryableOutboundError(error: unknown): boolean {
+	return error instanceof TelegramBotApiError && (error.kind === 'network' || error.kind === 'rate-limit' || error.kind === 'server');
+}
+
+function classifyOutboundFailure(error: unknown): 'network' | 'rate-limit' | 'server' | 'unknown' {
+	if (error instanceof TelegramBotApiError) {
+		switch (error.kind) {
+			case 'network':
+			case 'rate-limit':
+			case 'server':
+				return error.kind;
+		}
+	}
+	return 'unknown';
 }
 
 function classifyPollingFailure(error: unknown): TelegramPollingFailureKind {

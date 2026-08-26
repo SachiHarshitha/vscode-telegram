@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as l10n from '@vscode/l10n';
-import type { RemoteAgentEvent } from '../common/remoteAgentEvent';
+import type { RemoteAgentEvent } from '../../remoteControl/common/remoteAgentEvent';
 import { escapeTelegramHtml, redactTelegramSecrets, telegramMaximumMessageLength } from './telegramMarkdown';
 
 export type TelegramActivityDetail = 'compact' | 'detailed' | 'debug';

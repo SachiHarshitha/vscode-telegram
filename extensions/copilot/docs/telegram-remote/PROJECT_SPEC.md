@@ -41,7 +41,7 @@ CopilotCLISession
               +-- future transports
 ```
 
-Telegram must not become intertwined with agent execution logic. The registry is introduced before Telegram and replaces Mission Control-only branches for events, permissions and user questions. Telegram-specific code lives in its own module.
+Telegram must not become intertwined with agent execution logic. The generic registry/framework lives under `extension/remoteControl`, replaces Mission Control-only branches for events and interactive responses, and is also exercised by a synthetic third transport. Telegram protocol/authorization/UI code remains under `extension/telegramRemote`; the generic layer never imports it. This is an internal bundled-fork seam, not a stable public extension API.
 
 Remote user messages are injected through the existing VS Code native chat command path so VS Code creates a real `ChatRequest` and `toolInvocationToken`. Telegram does not call SDK `send()` directly and does not own an independent agent session.
 
@@ -165,7 +165,7 @@ Sensitive secrets SHALL use VS Code secret storage or an equivalently protected 
 
 ### NFR-1 Minimal upstream delta
 
-Upstream Copilot source modifications SHOULD be restricted to a small number of explicit integration seams. Most new code SHALL live under a dedicated Telegram module.
+Upstream Copilot source modifications SHOULD be restricted to a small number of explicit integration seams. Generic downstream code SHALL live under `extension/remoteControl` and concrete adapter code under `extension/telegramRemote`.
 
 ### NFR-2 Upstream compatibility
 
@@ -197,6 +197,14 @@ Telegram transport, routing, permission mapping and event rendering SHALL be tes
 ### NFR-7 Deterministic lifecycle
 
 Session references, SDK listeners, pending-response waiters and the Telegram poller lease SHALL have explicit owners and deterministic disposal. Only one consumer may long-poll a bot token; a competing consumer fails visibly.
+
+### NFR-8 Bounded remote work
+
+Pairing attempts, authorized messages, callbacks, outbound Bot API work and transient retries SHALL be bounded. A stopped/replaced lifecycle generation SHALL not deliver stale queued work.
+
+### NFR-9 Redacted operability
+
+Lifecycle diagnostics and release compatibility metadata SHALL omit credentials and user content. Release artifacts SHALL record exact source compatibility, licenses and checksums and SHALL identify the remote-control framework as an internal bundled-fork boundary.
 
 ## 8. V1 scope
 

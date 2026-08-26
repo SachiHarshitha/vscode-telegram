@@ -125,6 +125,7 @@
 	"github.copilot.command.cli.telegram.forgetConfiguration": "Forget Configuration",
 	"github.copilot.command.cli.telegram.showStatus": "Show Status",
 	"github.copilot.command.cli.telegram.showLog": "Open Log",
+	"github.copilot.command.cli.telegram.copyDiagnostics": "Copy Diagnostics",
 	"github.copilot.command.cli.telegram.statusBarMenu": "Show Controls",
 	"github.copilot.command.resetCloudAgentWorkspaceConfirmations": "Reset Cloud Agent Workspace Confirmations",
 	"github.copilot.git.generateCommitMessage": "Generate Commit Message",

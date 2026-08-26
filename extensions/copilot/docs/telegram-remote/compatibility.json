@@ -81,8 +81,8 @@
     "chatSessionCustomizationProvider"
   ],
   "telegramRemote": {
-    "implementationPhase": 7,
-    "patchRevision": 14,
+    "implementationPhase": 8,
+    "patchRevision": 15,
     "buildMarker": "vscode-telegram/telegram-remote",
     "controllerOnly": true,
     "agentSessionsWorkspaceSupported": false,
@@ -114,6 +114,13 @@
     "reasoningEffortSelectionRegistered": true,
     "scopedModelPreferencePersistenceRegistered": true,
     "safeModeSelectionRegistered": true,
+    "genericRemoteControlFrameworkRegistered": true,
+    "registryValidatedTransportCapabilitiesRegistered": true,
+    "redactedDiagnosticsRegistered": true,
+    "boundedInboundRateLimitsRegistered": true,
+    "boundedOutboundQueueAndRetriesRegistered": true,
+    "releaseMetadataGeneratorRegistered": true,
+    "upstreamRebaseWorkflowRegistered": true,
     "byokCompatibilityClaimed": false
   },
   "baselineValidation": {
@@ -757,6 +764,76 @@
     "realBotModelEndToEnd": {
       "status": "not-run",
       "reason": "A configured private bot, selected Copilot session and real configured provider are required; automated tests validate the combined catalogue, authenticated bridge, request translation and SDK registration with deterministic models."
+    }
+  },
+  "phase8Validation": {
+    "capturedAt": "2026-08-26",
+    "automatedGate": {
+      "command": ".\\script\\telegram-remote\\test-phase8.ps1 -SkipPackage -SkipCoreTests",
+      "status": "passed",
+      "note": "Packaging and core workbench tests remain separate release-candidate gates so an active Extension Host cannot lock generated runtime files."
+    },
+    "remoteControlAndTelegramAggregate": {
+      "command": "npx vitest run src/extension/remoteControl src/extension/telegramRemote",
+      "status": "passed",
+      "testFilesPassed": 31,
+      "testsPassed": 212
+    },
+    "focusedNativeRegression": {
+      "command": "npx vitest run selected Copilot CLI/native integration suites -t remote|Remote|Mission Control|additional model",
+      "status": "passed",
+      "testFilesPassed": 3,
+      "testsPassed": 10,
+      "testsSkipped": 116
+    },
+    "extensionTypecheck": {
+      "command": "npx tsc --noEmit --project tsconfig.json --pretty false",
+      "status": "passed"
+    },
+    "extensionLint": {
+      "command": "targeted ESLint for the generic framework, Telegram adapter, and native integration files",
+      "status": "passed",
+      "warnings": 0
+    },
+    "architectureBoundary": {
+      "status": "passed",
+      "genericFrameworkImportsTelegram": false,
+      "genericFrameworkUsesTelegramBotApiTypes": false
+    },
+    "extensionBundle": {
+      "command": "npm run compile",
+      "status": "passed",
+      "errors": 0
+    },
+    "coreWorkbenchRegression": {
+      "command": ".\\scripts\\test.bat --run src/vs/workbench/contrib/chat/test/browser/chatSessions/chatSessionsService.test.ts",
+      "status": "passed",
+      "testsPassed": 33,
+      "testsPending": 13
+    },
+    "releaseMetadataPreview": {
+      "command": "generate-release-report.ps1 -TestStatus passed -AllowDirty",
+      "status": "passed",
+      "dependencyRecords": 1237,
+      "checksumRecords": 4,
+      "note": "Engineering preview only; release output still requires a clean worktree and the packaged artifact path."
+    },
+    "coverage": [
+      "generic registry-issued transport provenance with centrally validated capabilities and non-elevating defaults",
+      "synthetic third-transport registration, replay/live publication, native prompt provenance, permission, question, plan, abort, detach and disposal",
+      "pending first-response cancellation on transport removal, session replacement/disposal, suspension and extension shutdown",
+      "bounded per-identity message and callback admission plus existing pairing-attempt throttling",
+      "serialized bounded Bot API delivery queue with bounded transient retries and stale-generation cancellation",
+      "Telegram-only redacted output channel and content-free copyable compatibility diagnostics",
+      "exact release compatibility metadata, dependency/license inventory, artifact checksums and secret-shaped metadata scan",
+      "scheduled and manually dispatchable ephemeral upstream-rebase validation"
+    ],
+    "releaseCandidateGates": {
+      "cleanBundledArtifact": "pending clean-worktree release build and checksum generation",
+      "cleanProfileBundledLaunch": "pending manual run",
+      "realBotAcceptance": "pending manual run",
+      "missionControlCoexistence": "pending manual run",
+      "competingHostAcceptance": "pending manual run"
     }
   }
 }

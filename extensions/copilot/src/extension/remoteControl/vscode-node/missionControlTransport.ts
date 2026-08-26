@@ -122,10 +122,20 @@ const skippedEventTypes = new Set([
 	'session.tools_updated',
 ]);
 
+/** Mission Control adapter for the transport-neutral remote-control framework. */
 export class MissionControlTransport extends Disposable implements IRemoteControlTransport {
 	readonly id = 'missionControl';
 	readonly label = l10n.t('GitHub Mission Control');
 	readonly themeIcon = 'github';
+	readonly capabilities = Object.freeze({
+		submitPrompt: true,
+		requestModes: ['interactive', 'plan', 'autopilot'] as const,
+		elevatedModes: true,
+		permissionResponses: true,
+		userInputResponses: true,
+		exitPlanResponses: true,
+		abort: true,
+	});
 
 	private readonly states = new Map<string, IMissionControlState>();
 	private readonly apiClient: MissionControlApiClient;
@@ -524,7 +534,7 @@ export class MissionControlTransport extends Disposable implements IRemoteContro
 			switch (command.type) {
 				case 'abort':
 					this.cancelPendingResponses(state);
-					await this.registry.abort(state.sessionId);
+					await this.registry.abort(state.sessionId, this.id);
 					state.completedCommandIds.push(command.id);
 					break;
 				case 'permission_response':
@@ -542,7 +552,7 @@ export class MissionControlTransport extends Disposable implements IRemoteContro
 				case 'user_message':
 				default: {
 					state.pendingCommandCompletionIds.add(command.id);
-					const origin = this.registry.createMissionControlOrigin(command.id, state.mode);
+					const origin = this.registry.createRequestOrigin(this.id, command.id, state.mode);
 					const dispatched = this.promptDispatcher.dispatch(state.sessionId, command.content, origin);
 					void dispatched.completion.catch(error => {
 						state.pendingCommandCompletionIds.delete(command.id);

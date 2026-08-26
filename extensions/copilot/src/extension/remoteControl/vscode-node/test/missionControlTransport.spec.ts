@@ -111,7 +111,7 @@ describe('MissionControlTransport', () => {
 		expect(state.completedCommandIds).toContain('mode-1');
 		expect(dispatch).toHaveBeenCalledTimes(1);
 		const origin = dispatch.mock.calls[0][2];
-		expect(registry.getValidatedMissionControlMode(origin as never)).toBe('plan');
+		expect(registry.getValidatedRemoteMode(origin as never)).toBe('plan');
 	});
 
 	it('rejects stale permission responses and accepts a fully correlated response', async () => {
@@ -206,7 +206,7 @@ describe('MissionControlTransport', () => {
 
 		await (transport as unknown as { pollCommands(state: unknown): Promise<void> }).pollCommands(state);
 
-		expect(abort).toHaveBeenCalledWith(state.sessionId);
+		expect(abort).toHaveBeenCalledWith(state.sessionId, 'missionControl');
 		expect(state.completedCommandIds).toContain('abort-1');
 	});
 

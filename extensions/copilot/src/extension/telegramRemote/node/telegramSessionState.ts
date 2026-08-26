@@ -5,7 +5,7 @@
 
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
-import { IRemoteControlRegistry } from '../common/remoteControlTypes';
+import { IRemoteControlRegistry } from '../../remoteControl/common/remoteControlTypes';
 import type { TelegramModelSource } from '../common/telegramLanguageModelBridgeTypes';
 import { TelegramPairedIdentity } from './telegramAuthorization';
 

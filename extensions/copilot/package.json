@@ -2522,6 +2522,13 @@
         "icon": "$(copilot-telegram-logo)"
       },
       {
+        "command": "github.copilot.cli.telegram.copyDiagnostics",
+        "title": "%github.copilot.command.cli.telegram.copyDiagnostics%",
+        "category": "%github.copilot.command.cli.telegram.category%",
+        "icon": "$(copilot-telegram-logo)",
+        "enablement": "config.github.copilot.chat.cli.telegram.enabled || github.copilot.cli.telegram.configured"
+      },
+      {
         "command": "github.copilot.cli.telegram.statusBarMenu",
         "title": "%github.copilot.command.cli.telegram.statusBarMenu%",
         "category": "%github.copilot.command.cli.telegram.category%",

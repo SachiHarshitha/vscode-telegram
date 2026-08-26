@@ -209,6 +209,63 @@ describe('TelegramService', () => {
 		});
 	});
 
+	it('serializes outbound requests and retries only bounded transient Bot API failures', async () => {
+		const client = new TestClient();
+		client.getUpdates.mockImplementation(options => waitForAbort(options?.signal));
+		const runtime = new TestRuntime(client);
+		const message = { message_id: 1, date: 1, chat: { id: 1, type: 'private' as const } } as TelegramMessage;
+		const sendMessage = vi.spyOn(client, 'sendMessage')
+			.mockRejectedValueOnce(new TelegramBotApiError('server', 'Unavailable.', 503))
+			.mockRejectedValueOnce(new TelegramBotApiError('rate-limit', 'Limited.', 429, 429, 2))
+			.mockResolvedValueOnce(message);
+		const service = new TelegramService(storageRoot, runtime, new TestFetcher(), logService);
+		await service.start(botToken, async () => { });
+
+		await expect(service.sendMessage(1, 'hello')).resolves.toBe(message);
+		await service.stop();
+
+		expect({ calls: sendMessage.mock.calls.length, delays: runtime.delays }).toEqual({ calls: 3, delays: [1_000, 2_000] });
+	});
+
+	it('cancels a queued retry when its delivery lifecycle is invalidated', async () => {
+		const client = new TestClient();
+		client.getUpdates.mockImplementation(options => waitForAbort(options?.signal));
+		const runtime = new TestRuntime(client);
+		vi.spyOn(runtime, 'delay').mockImplementation((_milliseconds, signal) => waitForDelayAbort(signal));
+		const sendMessage = vi.spyOn(client, 'sendMessage').mockRejectedValue(new TelegramBotApiError('network', 'Transient failure.'));
+		const service = new TelegramService(storageRoot, runtime, new TestFetcher(), logService);
+		await service.start(botToken, async () => { });
+
+		const pending = service.sendMessage(1, 'stale');
+		await waitUntil(() => sendMessage.mock.calls.length === 1);
+		service.clearDeliveryClient();
+
+		await expect(pending).rejects.toMatchObject({ kind: 'aborted' });
+		expect(sendMessage).toHaveBeenCalledOnce();
+		await service.stop();
+	});
+
+	it('rejects excess outbound work instead of growing an unbounded queue', async () => {
+		const client = new TestClient();
+		client.getUpdates.mockImplementation(options => waitForAbort(options?.signal));
+		const runtime = new TestRuntime(client);
+		const message = { message_id: 1, date: 1, chat: { id: 1, type: 'private' as const } } as TelegramMessage;
+		let release: ((value: TelegramMessage) => void) | undefined;
+		const blocked = new Promise<TelegramMessage>(resolve => { release = resolve; });
+		const sendMessage = vi.spyOn(client, 'sendMessage').mockImplementation(() => blocked);
+		const service = new TelegramService(storageRoot, runtime, new TestFetcher(), logService);
+		await service.start(botToken, async () => { });
+
+		const accepted = Array.from({ length: 128 }, (_, index) => service.sendMessage(1, `message-${index}`));
+		await waitUntil(() => sendMessage.mock.calls.length === 1);
+		await expect(service.sendMessage(1, 'overflow')).rejects.toMatchObject({ kind: 'rate-limit' });
+		release!(message);
+		await Promise.all(accepted);
+		await service.stop();
+
+		expect(sendMessage).toHaveBeenCalledTimes(128);
+	});
+
 	it('does not advance a failed handler update until it is accepted', async () => {
 		const client = new TestClient();
 		client.getUpdates
@@ -346,6 +403,17 @@ function waitForAbort(signal: IAbortSignal | undefined): Promise<readonly Telegr
 			return;
 		}
 		signal?.addEventListener('abort', onAbort);
+	});
+}
+
+function waitForDelayAbort(signal: IAbortSignal): Promise<void> {
+	return new Promise((_resolve, reject) => {
+		const onAbort = () => reject(new TelegramBotApiError('aborted', 'Cancelled.'));
+		if (signal.aborted) {
+			onAbort();
+			return;
+		}
+		signal.addEventListener('abort', onAbort);
 	});
 }
 

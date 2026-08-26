@@ -39,7 +39,7 @@ import { CopilotCLIChatSessionContentProvider, CopilotCLIChatSessionParticipant,
 import { PullRequestDetectionService } from '../pullRequestDetectionService';
 import { ISessionOptionGroupBuilder } from '../sessionOptionGroupBuilder';
 import { ISessionRequestLifecycle } from '../sessionRequestLifecycle';
-import { RemoteControlRegistry } from '../../../telegramRemote/node/remoteControlRegistry';
+import { RemoteControlRegistry } from '../../../remoteControl/node/remoteControlRegistry';
 vi.mock('../copilotCLIShim.ps1', () => ({ default: '# mock powershell script' }));
 
 beforeAll(() => {

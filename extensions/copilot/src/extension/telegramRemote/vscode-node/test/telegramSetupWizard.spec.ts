@@ -90,7 +90,7 @@ describe('TelegramSetupWizard lifecycle', () => {
 		const first = createContribution(context);
 		await seedReadyConnection(first.contribution);
 		const firstTransport = mockTransportStartup(first.contribution);
-		const firstWizard = new TelegramSetupWizard(first.contribution, configuration.service, context, first.logService);
+		const firstWizard = new TelegramSetupWizard(first.contribution, createDiagnostics(), configuration.service, context, first.logService);
 		await vi.waitFor(() => expect(firstWizard.isConfigured).toBe(true));
 
 		await invoke(TelegramRemoteCommand.Enable);
@@ -102,7 +102,7 @@ describe('TelegramSetupWizard lifecycle', () => {
 
 		const reloaded = createContribution(context);
 		const reloadedTransport = mockTransportStartup(reloaded.contribution);
-		const reloadedWizard = new TelegramSetupWizard(reloaded.contribution, configuration.service, context, reloaded.logService);
+		const reloadedWizard = new TelegramSetupWizard(reloaded.contribution, createDiagnostics(), configuration.service, context, reloaded.logService);
 		expect(reloadedWizard.isConfigured).toBe(true);
 		await invoke(TelegramRemoteCommand.Enable);
 		expect({ enabled: configuration.enabled, starts: reloadedTransport.start.mock.calls.length, tokenPrompts: vscodeHost.showInputBox.mock.calls.length }).toEqual({ enabled: true, starts: 1, tokenPrompts: 0 });
@@ -120,7 +120,7 @@ describe('TelegramSetupWizard lifecycle', () => {
 		await contributionHost.contribution.consent.commit(tokenFingerprint);
 		const start = vi.spyOn(contributionHost.contribution.transport, 'start');
 		const configuration = createConfiguration(false);
-		const wizard = new TelegramSetupWizard(contributionHost.contribution, configuration.service, context, contributionHost.logService);
+		const wizard = new TelegramSetupWizard(contributionHost.contribution, createDiagnostics(), configuration.service, context, contributionHost.logService);
 
 		await invoke(TelegramRemoteCommand.Enable);
 		expect({ setupDisclosure: vscodeHost.showWarningMessage.mock.calls.length, starts: start.mock.calls.length, enabled: configuration.enabled }).toEqual({ setupDisclosure: 1, starts: 0, enabled: false });
@@ -138,7 +138,7 @@ describe('TelegramSetupWizard lifecycle', () => {
 		vscodeHost.workspaceFolders = [{ uri: { fsPath: 'C:\\workspace-b', toString: () => 'file:///c:/workspace-b' } }];
 		const transport = mockTransportStartup(contributionHost.contribution);
 		vscodeHost.showWarningMessage.mockResolvedValue('Enable Remote Access');
-		const wizard = new TelegramSetupWizard(contributionHost.contribution, configuration.service, context, contributionHost.logService);
+		const wizard = new TelegramSetupWizard(contributionHost.contribution, createDiagnostics(), configuration.service, context, contributionHost.logService);
 		await vi.waitFor(() => expect(contributionHost.contribution.authorizationState).toBe('needs-consent'));
 
 		await invoke(TelegramRemoteCommand.Enable);
@@ -164,7 +164,7 @@ describe('TelegramSetupWizard lifecycle', () => {
 		vi.spyOn(contributionHost.contribution.transport, 'stop').mockResolvedValue();
 		const start = vi.spyOn(contributionHost.contribution.transport, 'start');
 		start.mockRejectedValueOnce(new TelegramBotApiError('network', 'Offline.'));
-		const wizard = new TelegramSetupWizard(contributionHost.contribution, configuration.service, context, contributionHost.logService);
+		const wizard = new TelegramSetupWizard(contributionHost.contribution, createDiagnostics(), configuration.service, context, contributionHost.logService);
 		await vi.waitFor(() => expect(wizard.isConfigured).toBe(true));
 
 		await invoke(TelegramRemoteCommand.Enable);
@@ -192,7 +192,7 @@ describe('TelegramSetupWizard lifecycle', () => {
 			await new Promise<void>(resolve => finishStart = resolve);
 			return bot;
 		});
-		const wizard = new TelegramSetupWizard(contributionHost.contribution, configuration.service, context, contributionHost.logService);
+		const wizard = new TelegramSetupWizard(contributionHost.contribution, createDiagnostics(), configuration.service, context, contributionHost.logService);
 		await vi.waitFor(() => expect(wizard.isConfigured).toBe(true));
 
 		const enable = invoke(TelegramRemoteCommand.Enable);
@@ -239,7 +239,13 @@ function createContribution(context: TestTelegramExtensionContext): {
 		override info = vi.fn();
 	};
 	const registry = new RemoteControlRegistry(logService);
-	const contribution = new TelegramRemoteContribution(context as IVSCodeExtensionContext, registry, new class extends mock<IFetcherService>() { }, logService);
+	const contribution = new TelegramRemoteContribution(
+		{ record: vi.fn(), show: vi.fn(), copyReport: vi.fn(async () => { }) },
+		context as IVSCodeExtensionContext,
+		registry,
+		new class extends mock<IFetcherService>() { },
+		logService,
+	);
 	return { contribution, logService };
 }
 
@@ -266,4 +272,8 @@ async function invoke(command: string): Promise<void> {
 		throw new Error(`Command was not registered: ${command}`);
 	}
 	await handler();
+}
+
+function createDiagnostics() {
+	return { record: vi.fn(), show: vi.fn(), copyReport: vi.fn(async () => { }) };
 }

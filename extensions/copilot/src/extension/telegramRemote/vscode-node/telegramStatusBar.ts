@@ -7,7 +7,7 @@ import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
-import { IRemoteControlRegistry } from '../common/remoteControlTypes';
+import { IRemoteControlRegistry } from '../../remoteControl/common/remoteControlTypes';
 import type { TelegramPollingStatus } from '../common/telegramTypes';
 import { TelegramRemoteContribution, type TelegramRemoteAuthorizationState } from './telegramRemoteContribution';
 import { getTelegramRemoteCapabilities, TelegramRemoteCommand, TelegramSetupWizard } from './telegramSetupWizard';

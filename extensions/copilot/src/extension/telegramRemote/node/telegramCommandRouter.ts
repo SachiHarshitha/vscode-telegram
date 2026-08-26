@@ -11,7 +11,7 @@ import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
 import { basename } from '../../../util/vs/base/common/resources';
 import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
-import type { IRemoteControlRegistry, RemoteNonElevatingMode, RemoteRequestOrigin } from '../common/remoteControlTypes';
+import type { IRemoteControlRegistry, RemoteNonElevatingMode, RemoteRequestOrigin } from '../../remoteControl/common/remoteControlTypes';
 import type { TelegramModelSource } from '../common/telegramLanguageModelBridgeTypes';
 import type { TelegramAuthorizedSessionScope, TelegramSessionScopePolicy } from '../common/telegramSessionScope';
 import { TelegramBotApiError, type TelegramAnswerCallbackQueryOptions, type TelegramEditMessageTextOptions, type TelegramInlineKeyboardMarkup, type TelegramMessage, type TelegramSendMessageOptions, type TelegramUpdate } from '../common/telegramTypes';
@@ -719,7 +719,7 @@ export class TelegramCommandRouter extends Disposable {
 			this.host.invalidateRequestCallbacks(previous.sessionId, previous.requestId);
 			await this.activity.completeRequest(identity, previous.sessionId, previous.requestId, 'superseded');
 		}
-		const origin = this.registry.createTelegramOrigin(String(update.update_id), preference.value.mode);
+		const origin = this.registry.createRequestOrigin('telegram', String(update.update_id), preference.value.mode);
 		const prepared = preference.value.modelId
 			? this.promptDispatcher.prepare(selected.item.id, prompt, origin, { modelId: preference.value.modelId, modelSource: preference.value.modelSource, reasoningEffort: preference.value.reasoningEffort })
 			: this.promptDispatcher.prepare(selected.item.id, prompt, origin);
@@ -767,7 +767,7 @@ export class TelegramCommandRouter extends Disposable {
 		}
 		this.activeDispatches.delete(identity.pairingId);
 		this.host.invalidateRequestCallbacks(active.sessionId, active.requestId);
-		const stopped = await this.registry.abort(active.sessionId);
+		const stopped = await this.registry.abort(active.sessionId, 'telegram');
 		await this.activity.completeRequest(identity, active.sessionId, active.requestId, 'cancelled');
 		if (!stopped) {
 			await this.safeSend(identity.chatId, l10n.t('There is no live Copilot task to stop. The session was not reopened.'));

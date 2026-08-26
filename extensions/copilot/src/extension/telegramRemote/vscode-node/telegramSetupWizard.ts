@@ -10,13 +10,14 @@ import { IVSCodeExtensionContext } from '../../../platform/extContext/common/ext
 import { ILogService } from '../../../platform/log/common/logService';
 import { Emitter } from '../../../util/vs/base/common/event';
 import { Disposable, DisposableStore, toDisposable } from '../../../util/vs/base/common/lifecycle';
-import type { IRemoteControlTransport } from '../common/remoteControlTypes';
+import type { IRemoteControlTransport } from '../../remoteControl/common/remoteControlTypes';
 import { TelegramBotApiError, TelegramPollingStatus, validateTelegramBotToken } from '../common/telegramTypes';
 import type { TelegramPairedIdentity } from '../node/telegramAuthorization';
 import { TelegramPairingChallenge } from '../node/telegramPairingService';
 import { getTelegramBotTokenFingerprint, TelegramPollerLeaseHeldError } from '../node/telegramPollerLease';
 import { getTelegramRemoteEnvironment } from './telegramRemoteEnvironment';
 import { TelegramRemoteContribution } from './telegramRemoteContribution';
+import type { ITelegramRemoteDiagnostics } from './telegramRemoteDiagnostics';
 
 const configuredStateKey = 'vscode-telegram.telegram-remote.configured.v1';
 const configuredContextKey = 'github.copilot.cli.telegram.configured';
@@ -38,6 +39,7 @@ export const TelegramRemoteCommand = Object.freeze({
 	ForgetConfiguration: 'github.copilot.cli.telegram.forgetConfiguration',
 	ShowStatus: 'github.copilot.cli.telegram.showStatus',
 	ShowLog: 'github.copilot.cli.telegram.showLog',
+	CopyDiagnostics: 'github.copilot.cli.telegram.copyDiagnostics',
 	StatusBarMenu: 'github.copilot.cli.telegram.statusBarMenu',
 });
 
@@ -61,6 +63,7 @@ export class TelegramSetupWizard extends Disposable {
 
 	constructor(
 		private readonly contribution: TelegramRemoteContribution,
+		private readonly diagnostics: ITelegramRemoteDiagnostics,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IVSCodeExtensionContext private readonly extensionContext: IVSCodeExtensionContext,
 		@ILogService private readonly logService: ILogService,
@@ -78,7 +81,8 @@ export class TelegramSetupWizard extends Disposable {
 		this.registerCommand(TelegramRemoteCommand.Disable, () => this.disableRemoteAccess(true));
 		this.registerCommand(TelegramRemoteCommand.ForgetConfiguration, () => this.forgetConfiguration());
 		this.registerCommand(TelegramRemoteCommand.ShowStatus, () => this.showStatus());
-		this.registerCommand(TelegramRemoteCommand.ShowLog, () => vscode.commands.executeCommand('github.copilot.debug.showOutputChannel.internal'));
+		this.registerCommand(TelegramRemoteCommand.ShowLog, async () => this.diagnostics.show());
+		this.registerCommand(TelegramRemoteCommand.CopyDiagnostics, () => this.copyDiagnostics());
 		this._register(this.configurationService.onDidChangeConfiguration(event => {
 			if (!event.affectsConfiguration(ConfigKey.Advanced.CLITelegramEnabled.fullyQualifiedId) || this.configurationWriteDepth > 0) {
 				return;
@@ -496,6 +500,18 @@ export class TelegramSetupWizard extends Disposable {
 		));
 	}
 
+	private async copyDiagnostics(): Promise<void> {
+		await this.diagnostics.copyReport({
+			configured: this.configured,
+			enabled: this.configurationService.getConfig(ConfigKey.Advanced.CLITelegramEnabled),
+			paired: !!this.contribution.pairedIdentity,
+			authorizationState: this.contribution.authorizationState,
+			pollingStatus: this.contribution.currentStatus,
+			consentScopeFingerprint: this.getConsentScope().fingerprint,
+		});
+		await vscode.window.showInformationMessage(l10n.t('Telegram Remote diagnostics were copied without credentials or conversation content.'));
+	}
+
 	private getConsentScope(): TelegramConsentScope {
 		const environment = getTelegramRemoteEnvironment();
 		return {
@@ -564,7 +580,7 @@ export interface TelegramRemoteCapabilities {
 }
 
 export function getTelegramRemoteCapabilities(transport: IRemoteControlTransport): TelegramRemoteCapabilities {
-	return { remotePermissionResponses: typeof transport.requestPermission === 'function' };
+	return { remotePermissionResponses: transport.capabilities?.permissionResponses === true && typeof transport.requestPermission === 'function' };
 }
 
 export function buildTelegramConsentDetail(workstationLabel: string, workspaceLabel: string, capabilities: TelegramRemoteCapabilities = { remotePermissionResponses: false }): string {

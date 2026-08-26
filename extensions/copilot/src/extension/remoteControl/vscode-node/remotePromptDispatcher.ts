@@ -12,8 +12,8 @@ import {
 	createPendingCopilotCLIRequestMarker,
 	setPendingCopilotCLIRequestContext,
 } from '../../chatSessions/copilotcli/common/pendingRequestContext';
+import { REMOTE_CONTROL_MODEL_SELECTION_PROPERTY, type RemoteModelSource } from '../common/remoteLanguageModelBridgeTypes';
 import type { RemoteRequestOrigin } from '../common/remoteControlTypes';
-import { TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY, type TelegramModelSource } from '../common/telegramLanguageModelBridgeTypes';
 import { SessionIdForCLI } from '../../chatSessions/copilotcli/common/utils';
 
 export interface IRemotePromptDispatchResult {
@@ -29,7 +29,7 @@ export interface IPreparedRemotePromptDispatch {
 
 export interface IRemotePromptRequestOptions {
 	readonly modelId?: string;
-	readonly modelSource?: TelegramModelSource;
+	readonly modelSource?: RemoteModelSource;
 	readonly reasoningEffort?: string;
 }
 
@@ -41,6 +41,7 @@ export interface IRemotePromptDispatcher {
 
 export const IRemotePromptDispatcher = createServiceIdentifier<IRemotePromptDispatcher>('IRemotePromptDispatcher');
 
+/** Dispatches a registry-issued remote prompt through the native chat request path. */
 export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 	declare readonly _serviceBrand: undefined;
 
@@ -73,8 +74,8 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 
 	private startDispatch(sessionId: string, prompt: string, origin: RemoteRequestOrigin, options: IRemotePromptRequestOptions | undefined, correlationId: string): IRemotePromptDispatchResult {
 		const marker = createPendingCopilotCLIRequestMarker(correlationId);
-		const source: `command-${string}` | undefined = origin.kind === 'missionControl'
-			? `command-${origin.commandId}`
+		const source: `command-${string}` | undefined = origin.transportId === 'missionControl'
+			? `command-${origin.requestId}`
 			: undefined;
 
 		setPendingCopilotCLIRequestContext(sessionId, correlationId, {
@@ -89,7 +90,7 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 			const isVSCodeModel = options?.modelSource === 'vscode-lm';
 			const modelConfiguration = {
 				...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
-				...(isVSCodeModel && options.modelId ? { [TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY]: options.modelId } : {}),
+				...(isVSCodeModel && options.modelId ? { [REMOTE_CONTROL_MODEL_SELECTION_PROPERTY]: options.modelId } : {}),
 			};
 			dispatched = vscode.commands.executeCommand(
 				'workbench.action.chat.openSessionWithPrompt.copilotcli',

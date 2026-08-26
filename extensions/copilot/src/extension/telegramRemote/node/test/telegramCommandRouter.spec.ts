@@ -114,7 +114,7 @@ describe('TelegramCommandRouter', () => {
 		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(
 			firstSession.id,
 			'Create a safe implementation plan',
-			expect.objectContaining({ kind: 'telegram', mode: 'plan' }),
+			expect.objectContaining({ kind: 'remoteControl', transportId: 'telegram', mode: 'plan' }),
 			{ modelId: 'claude-sonnet', reasoningEffort: 'high' },
 		);
 	});
@@ -199,7 +199,7 @@ describe('TelegramCommandRouter', () => {
 		await test.host.deliver(telegramMessageUpdate(2, 'Inspect the current changes'));
 		expect(test.sessionCreator.createSession).toHaveBeenCalledWith(test.workspaceRoots[0], 'Inspect the current changes');
 		expect(test.state.getSelectedSessionId(identity)).toBe('new-session-1');
-		expect(test.dispatcher.dispatch).toHaveBeenCalledWith('new-session-1', 'Inspect the current changes', expect.objectContaining({ kind: 'telegram', updateId: '2' }));
+		expect(test.dispatcher.dispatch).toHaveBeenCalledWith('new-session-1', 'Inspect the current changes', expect.objectContaining({ kind: 'remoteControl', transportId: 'telegram', requestId: '2' }));
 	});
 
 	it('accepts the first prompt directly in /new', async () => {
@@ -255,7 +255,7 @@ describe('TelegramCommandRouter', () => {
 		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
 
 		await test.host.deliver(telegramMessageUpdate(42, 'Please inspect the failing test'));
-		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Please inspect the failing test', expect.objectContaining({ kind: 'telegram', updateId: '42' }));
+		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Please inspect the failing test', expect.objectContaining({ kind: 'remoteControl', transportId: 'telegram', requestId: '42' }));
 		expect(test.activity.beginRequest.mock.invocationCallOrder[0]).toBeLessThan(test.dispatcher.dispatch.mock.invocationCallOrder[0]);
 		expect(lastSentText(test.host)).toContain('Prompt accepted');
 		expect(lastSendOptions(test.host).replyMarkup?.inline_keyboard[0][0].text).toBe('Stop');
@@ -284,7 +284,7 @@ describe('TelegramCommandRouter', () => {
 		await test.host.deliver(replyUpdate);
 
 		expect(test.activity.resolveReply).toHaveBeenCalledWith(replyUpdate, identity);
-		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Use the generic transport registry', expect.objectContaining({ kind: 'telegram', updateId: '43' }));
+		expect(test.dispatcher.dispatch).toHaveBeenCalledWith(firstSession.id, 'Use the generic transport registry', expect.objectContaining({ kind: 'remoteControl', transportId: 'telegram', requestId: '43' }));
 		expect(test.sessionService.getSession).not.toHaveBeenCalled();
 	});
 
@@ -436,7 +436,14 @@ function createRouter(
 ) {
 	const context = new TestTelegramExtensionContext('C:\\telegram-router-test');
 	const registry = new RemoteControlRegistry(new class extends mock<ILogService>() { });
-	registry.registerTransport({ id: 'telegram', label: 'Telegram', themeIcon: 'radio-tower', publish: () => { }, dispose: () => { } } satisfies IRemoteControlTransport);
+	registry.registerTransport({
+		id: 'telegram',
+		label: 'Telegram',
+		themeIcon: 'radio-tower',
+		capabilities: { submitPrompt: true, requestModes: ['interactive', 'plan'], abort: true },
+		publish: () => { },
+		dispose: () => { },
+	} satisfies IRemoteControlTransport);
 	const state = new TelegramSessionState('abcdefabcdefabcdefabcdef', context, registry);
 	const host = new TestCommandHost();
 	const sessionService = new TestSessionService();

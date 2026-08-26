@@ -17,8 +17,8 @@ import { ChatVariablesCollection, extractDebugTargetSessionIds, isPromptFile } f
 import { FolderRepositoryInfo, IFolderRepositoryManager, IsolationMode } from '../../common/folderRepositoryManager';
 import { emptyWorkspaceInfo, getWorkingDirectory, isIsolationEnabled, IWorkspaceInfo } from '../../common/workspaceInfo';
 import { SessionIdForCLI } from '../../copilotcli/common/utils';
-import { IRemoteControlRegistry } from '../../../telegramRemote/common/remoteControlTypes';
-import { ITelegramLanguageModelBridge, TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY, type TelegramAdditionalModelRegistry } from '../../../telegramRemote/common/telegramLanguageModelBridgeTypes';
+import { IRemoteLanguageModelBridge, REMOTE_CONTROL_MODEL_SELECTION_PROPERTY, type RemoteAdditionalModelRegistry } from '../../../remoteControl/common/remoteLanguageModelBridgeTypes';
+import { IRemoteControlRegistry } from '../../../remoteControl/common/remoteControlTypes';
 import { COPILOT_CLI_CONTEXT_SIZE_PROPERTY, COPILOT_CLI_REASONING_EFFORT_PROPERTY, ICopilotCLIAgents, ICopilotCLIModels, resolveContextTier } from '../../copilotcli/node/copilotCli';
 import { ICopilotCLISession } from '../../copilotcli/node/copilotcliSession';
 import { ICopilotCLISessionService } from '../../copilotcli/node/copilotcliSessionService';
@@ -40,7 +40,7 @@ export interface CopilotCLIResolvedModel {
 	readonly model: string;
 	readonly reasoningEffort?: string;
 	readonly contextTier?: 'default' | 'long_context';
-	readonly additionalModels?: TelegramAdditionalModelRegistry;
+	readonly additionalModels?: RemoteAdditionalModelRegistry;
 }
 
 export interface ICopilotCLIChatSessionInitializer {
@@ -99,7 +99,7 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 		@ILogService private readonly logService: ILogService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IRemoteControlRegistry private readonly remoteControlRegistry: IRemoteControlRegistry,
-		@ITelegramLanguageModelBridge private readonly telegramLanguageModelBridge: ITelegramLanguageModelBridge,
+		@IRemoteLanguageModelBridge private readonly remoteLanguageModelBridge: IRemoteLanguageModelBridge,
 	) { }
 
 	async getOrCreateSession(
@@ -222,11 +222,11 @@ export class CopilotCLIChatSessionInitializer implements ICopilotCLIChatSessionI
 		if (model) {
 			return { model };
 		}
-		const telegramModelId = request?.modelConfiguration?.[TELEGRAM_REMOTE_MODEL_SELECTION_PROPERTY];
-		if (typeof telegramModelId === 'string' && telegramModelId) {
-			const selection = await this.telegramLanguageModelBridge.resolveSelection(telegramModelId);
+		const remoteModelId = request?.modelConfiguration?.[REMOTE_CONTROL_MODEL_SELECTION_PROPERTY];
+		if (typeof remoteModelId === 'string' && remoteModelId) {
+			const selection = await this.remoteLanguageModelBridge.resolveSelection(remoteModelId);
 			if (!selection) {
-				throw new Error(l10n.t('The Telegram-selected language model is no longer available. Refresh /models and try again.'));
+				throw new Error(l10n.t('The remotely selected language model is no longer available. Refresh the transport model list and try again.'));
 			}
 			const reasoningEffort = isReasoningEffortFeatureEnabled(this.configurationService) ? request?.modelConfiguration?.[COPILOT_CLI_REASONING_EFFORT_PROPERTY] : undefined;
 			return {

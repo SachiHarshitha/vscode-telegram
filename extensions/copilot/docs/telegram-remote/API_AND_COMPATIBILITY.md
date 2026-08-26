@@ -119,7 +119,7 @@ Current source now provides:
 - a wrapper-lifetime transport-neutral event/replay/control bridge,
 - registry-coordinated permission and user-input response races,
 - registry-coordinated plan-exit response races with a non-elevating remote action type,
-- Mission Control forwarding and command processing in `missionControlTransport.ts`.
+- Mission Control forwarding and command processing in `extension/remoteControl/vscode-node/missionControlTransport.ts`.
 
 This is the most important reference implementation for Telegram remote semantics.
 
@@ -133,7 +133,15 @@ Phase 1 adds these narrow transport-neutral members to `ICopilotCLISession`:
 
 SDK response calls remain owned by `CopilotCLISession`; transports return correlated values through the registry and never receive `respondToPermission()`, `respondToUserInput()`, `respondToExitPlanMode()`, selected-model mutation, or raw SDK access. Native rendering listeners remain request-scoped, while one constructor-owned wildcard listener feeds the registry bridge for wrapper lifetime.
 
-Mission Control mode attribution now uses only a registry-created, runtime-validated typed origin carried separately from the SDK source string. `SendOptions.source` is telemetry/correlation data only. Registry deduplication and a single wrapper-lifetime publication point ensure each SDK event ID is exported once per attached transport.
+Mission Control and Telegram mode attribution use only a registry-created, runtime-validated typed origin carried separately from the SDK source string. `SendOptions.source` is telemetry/correlation data only. Registry deduplication and a single wrapper-lifetime publication point ensure each SDK event ID is exported once per attached transport.
+
+### Internal remote-control framework
+
+Sources: `extension/remoteControl/common`, `extension/remoteControl/node`, and `extension/remoteControl/vscode-node`.
+
+`IRemoteControlTransport` is a bundled-fork composition contract, not a VS Code contribution point. Registrations declare prompt modes, response kinds, and abort capability. Omitted declarations deny access. `RemoteControlRegistry.createRequestOrigin()` returns an object whose identity is retained privately; copying the visible fields does not reproduce trust. Autopilot provenance requires both a declared request mode and the explicit `elevatedModes` grant. Telegram never declares that grant.
+
+The framework contains no Telegram Bot API, polling, authorization, consent, callback, formatting, or credential type. `CopilotCLISession` and the native dispatcher import this generic layer only. Response races cancel losing or removed transports, and session/transport/extension teardown clears their pending state. Compatibility is proven with Mission Control, Telegram, and a synthetic third adapter, but no stable cross-extension API compatibility is promised.
 
 ### Controller path
 
@@ -250,6 +258,8 @@ Minimum/matching VS Code version
 ```
 
 A rebase is not considered compatible merely because TypeScript compiles. Critical runtime flows in [TEST_STRATEGY.md](./TEST_STRATEGY.md) must also pass.
+
+Phase 8 materializes this policy through `script/telegram-remote/test-phase8.ps1`, `script/telegram-remote/generate-release-report.ps1`, and the ephemeral `.github/workflows/telegram-remote-rebase.yml` job. Human release acceptance remains defined in [PHASE8_ACCEPTANCE.md](./PHASE8_ACCEPTANCE.md).
 
 ## 9. External references
 

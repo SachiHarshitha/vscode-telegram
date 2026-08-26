@@ -820,6 +820,8 @@ extensions/copilot/script/telegram-remote/test-phase7.ps1                       
 
 ## 12. Phase 8 — release hardening
 
+**Status:** Implementation complete on 2026-08-26. The deterministic framework, security, diagnostics, compatibility, release-tooling, extension-bundle smoke, and focused core workbench gates pass. Release-candidate signoff remains intentionally pending until a clean-worktree bundled artifact, clean-profile launch, real-bot scenario, Mission Control coexistence, and competing-host checks are run by a human.
+
 ### Implement
 
 - Harden the existing internal remote-control framework as an explicitly reusable transport seam:
@@ -837,6 +839,32 @@ extensions/copilot/script/telegram-remote/test-phase7.ps1                       
 - Rebase CI that runs targeted Copilot CLI tests, Telegram tests, controller/native-dispatch integration, Mission Control regression, typecheck, and packaging smoke tests.
 - Manual acceptance covering consent, pairing, prompt, steering, permission, question, plan exit, abort, Mission Control coexistence, disable, reload, and competing host.
 
+### Implementation record
+
+- Transport-neutral contracts, event normalization, registry orchestration, native prompt dispatch, Mission Control transport/QR integration, and the language-model bridge service contract now live under `extension/remoteControl/**`. Telegram retains protocol, authorization, consent, polling, commands, callbacks, rendering, activity, setup, and concrete model-adapter code. Compatibility re-exports preserve existing downstream imports without reversing the dependency.
+- `RemoteControlRegistry` validates bounded transport metadata and declared capabilities. Prompt provenance is registry-issued and identity-trusted; forged structural copies fail validation. Capabilities default off, Telegram declares no elevated mode, and autopilot requires an explicit elevated registration. Pending response races are cancelled on transport removal/suspension, attachment disposal, session replacement/disposal, and registry shutdown.
+- A synthetic third-transport suite covers replay/live events, trusted native prompt provenance, permission/question/plan responses, abort, detach, removal, and disposal. Framework/session architecture checks reject Telegram imports and Bot API types.
+- Pairing retains its bounded attempt window. Authorized messages and callbacks now pass separate per-identity bounded windows. Bot API sends/edits/callback answers use one serialized queue capped at 128 pending operations with at most three attempts for transient network/429/server failures; stale lifecycle generations cancel delivery.
+- A Telegram-only output channel records content-free, credential-redacted lifecycle events. **Copy Diagnostics** copies patch/build, VS Code/extension/runtime/platform, proposal, consent-scope fingerprint, authorization, pairing, and polling metadata without tokens, callback payloads, paths, prompts, answers, or event content.
+- `generate-release-report.ps1` records the exact source/upstream commits, extension/runtime versions, proposal set, patch revision, operating system, test status, dependency/license inventory, bundled licenses, artifact SHA-256 checksums, and a bundled-fork/no-public-API disclaimer. A secret-shaped metadata scan fails generation.
+- `telegram-remote-rebase.yml` performs a scheduled or manual ephemeral rebase onto `microsoft/vscode/main`, installs pinned dependencies, runs the Phase 8 gate and packaging smoke build, generates release metadata, and uploads it without pushing or publishing.
+- `PHASE8_ACCEPTANCE.md` is the human release-candidate runbook. Automated completion is not treated as real-bot or clean-profile approval.
+
+### Files
+
+```text
+extensions/copilot/src/extension/remoteControl/**                                      (new/extracted)
+extensions/copilot/src/extension/telegramRemote/node/telegramUpdateRateLimiter.ts      (new)
+extensions/copilot/src/extension/telegramRemote/node/telegramService.ts                 (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteDiagnostics.ts (new)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramRemoteContribution.ts (modify)
+extensions/copilot/src/extension/telegramRemote/vscode-node/telegramSetupWizard.ts      (modify)
+extensions/copilot/script/telegram-remote/test-phase8.ps1                               (new)
+extensions/copilot/script/telegram-remote/generate-release-report.ps1                   (new)
+.github/workflows/telegram-remote-rebase.yml                                             (new)
+eslint.config.js                                                                         (modify)
+```
+
 ### Remote-control framework acceptance
 
 - `CopilotCLISession` depends only on the generic registry/session contract and contains no Telegram-specific control branches.
@@ -853,6 +881,19 @@ extensions/copilot/script/telegram-remote/test-phase7.ps1                       
 - The reusable remote-control seam passes Mission Control, Telegram, and synthetic-third-transport lifecycle/capability regression tests.
 - Release notes describe the seam as an internal bundled-fork framework and do not claim a stable cross-extension API.
 - The release contains exact compatibility metadata and no secret test data.
+
+### Validation record
+
+| Check | Result |
+| --- | --- |
+| Generic + Telegram aggregate | Passed: 31 files / 212 tests |
+| Generic boundary | Passed: no `telegramRemote` import and no Telegram Bot API type in the generic/session layer |
+| TypeScript / lint | Passed: extension typecheck and targeted ESLint with zero warnings |
+| Synthetic transport/security | Passed: lifecycle/capability coverage, forged provenance/elevation rejection, and pending-response cleanup |
+| Rate limits/retries | Passed: pairing attempt limits, per-identity message/callback limits, 128-entry outbound bound, serialized delivery, transient retry cap, and lifecycle invalidation |
+| Diagnostics/release metadata | Passed with deterministic mocks and local dirty-worktree preview; generated metadata is redacted and checksummed |
+| Packaging + focused core workbench regression | Passed: extension `npm run compile`; core 33 passed / 13 pending |
+| Clean-profile/real-bot/Mission Control/competing host | Pending human acceptance per `PHASE8_ACCEPTANCE.md` |
 
 ## 13. Optional Phase 9 — own-ID companion research
 
@@ -911,12 +952,18 @@ The bot token is never a setting. Poll timeout and rate-limit values must have s
 
 ```text
 github.copilot.cli.telegram.setup
+github.copilot.cli.telegram.enable
+github.copilot.cli.telegram.reconnect
 github.copilot.cli.telegram.testConnection
 github.copilot.cli.telegram.startPairing
 github.copilot.cli.telegram.revokePairing
 github.copilot.cli.telegram.disable
+github.copilot.cli.telegram.authorizeWorkspace
+github.copilot.cli.telegram.keepDisabled
+github.copilot.cli.telegram.forgetConfiguration
 github.copilot.cli.telegram.showStatus
 github.copilot.cli.telegram.showLog
+github.copilot.cli.telegram.copyDiagnostics
 github.copilot.cli.telegram.statusBarMenu
 ```
 
