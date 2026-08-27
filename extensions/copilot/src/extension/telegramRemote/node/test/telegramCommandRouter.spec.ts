@@ -49,8 +49,9 @@ describe('TelegramCommandRouter', () => {
 		await test.host.deliver(callbackUpdate(2, callbackData, 1));
 		expect(test.state.getSelectedSessionId(identity)).toBe(firstSession.id);
 		expect(test.registry.getAttachedSessionIds('telegram')).toEqual([firstSession.id]);
-		expect(test.host.sendMessage).toHaveBeenCalledTimes(1);
-		expect(test.host.editMessageText).toHaveBeenCalledTimes(1);
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
+		expect(test.host.editMessageText).not.toHaveBeenCalled();
+		expect(test.host.editMessageReplyMarkup).toHaveBeenCalledWith(identity.chatId, 1, emptyInlineKeyboardForTest());
 		expect(lastSentText(test.host)).toContain('<b>Authorized workspace</b>: C:\\workspace');
 	});
 
@@ -62,15 +63,25 @@ describe('TelegramCommandRouter', () => {
 		expect(JSON.stringify(test.host.sendMessage.mock.calls)).not.toContain(firstSession.label);
 	});
 
-	it('skips duplicate status rendering when text and controls are unchanged', async () => {
+	it('answers each explicit status command with a fresh nearby message', async () => {
 		const test = createRouter([firstSession], new Set([firstSession.id]));
 
 		await test.host.deliver(telegramMessageUpdate(1, '/status'));
 		await test.host.deliver(telegramMessageUpdate(2, '/status'));
 
-		expect(test.host.sendMessage).toHaveBeenCalledTimes(1);
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
 		expect(test.host.editMessageText).not.toHaveBeenCalled();
-		expect(test.logService.info).toHaveBeenCalledWith('[TelegramRemote] status-edit=skipped reason=unchanged');
+	});
+
+	it('retires controls on the previous menu before an explicit command posts a new response', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]));
+
+		await test.host.deliver(telegramMessageUpdate(1, '/sessions'));
+		await test.host.deliver(telegramMessageUpdate(2, '/status'));
+
+		expect(test.host.editMessageReplyMarkup).toHaveBeenCalledWith(identity.chatId, 1, emptyInlineKeyboardForTest());
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
+		expect(lastSentText(test.host)).toContain('<b>📡 Telegram Remote</b>');
 	});
 
 	it('shows the actual selected model and live mode in status when known', async () => {
@@ -122,12 +133,12 @@ describe('TelegramCommandRouter', () => {
 		const running = { ...completed, status: ChatSessionStatus.InProgress };
 		test.sessionService.getSessionItem.mockResolvedValue(running);
 		test.sessionService.changeSessionEmitter.fire(running);
-		await vi.waitFor(() => expect(firstReplyKeyboardRow(test.host)).toEqual([{ text: '/stop' }, { text: '/steer' }, { text: '/status' }]));
+		await vi.waitFor(() => expect(firstReplyKeyboardRow(test.host)).toEqual([{ text: 'Stop' }, { text: 'Steer' }, { text: 'Status' }]));
 
 		const finished = { ...completed, status: ChatSessionStatus.Completed };
 		test.sessionService.getSessionItem.mockResolvedValue(finished);
 		test.sessionService.changeSessionEmitter.fire(finished);
-		await vi.waitFor(() => expect(firstReplyKeyboardRow(test.host)).toEqual([{ text: '/new' }, { text: '/sessions' }, { text: '/model' }]));
+		await vi.waitFor(() => expect(firstReplyKeyboardRow(test.host)).toEqual([{ text: 'New session' }, { text: 'Sessions' }, { text: 'Model' }]));
 	});
 
 	it('escapes dynamic status-card values before enabling Telegram HTML', async () => {
@@ -333,27 +344,28 @@ describe('TelegramCommandRouter', () => {
 		expect(test.sessionService.getSession).not.toHaveBeenCalled();
 	});
 
-	it('binds Stop to the current activity message and rejects stale generations', async () => {
+	it('binds native Stop to the current activity draft and rejects stale generations', async () => {
 		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
 		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
 		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
 
 		await test.host.deliver(telegramMessageUpdate(1, 'First prompt'));
-		const oldStop = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
-		const oldMessageId = test.host.sendMessage.mock.results[0].value ? 1 : 1;
+		const oldDraftId = (await test.activity.beginRequest.mock.results[0].value)?.messageId;
 		test.dispatcher.prepare.mockReturnValueOnce({
 			correlationId: 'request-2',
+			cancel: () => false,
 			start: () => ({ accepted: true, correlationId: 'request-2', completion: new Promise<void>(() => { }) }),
 		});
 		await test.host.deliver(telegramMessageUpdate(2, 'Steer with this'));
-		const currentStop = lastSendOptions(test.host).replyMarkup!.inline_keyboard[0][0].callback_data!;
-		const currentMessageId = test.host.sendMessage.mock.calls.length;
+		const currentDraftId = (await test.activity.beginRequest.mock.results[1].value)?.messageId;
+		test.activity.handleStoppedMessageGeneration.mockResolvedValue(false);
 
-		await test.host.deliver(callbackUpdate(3, oldStop, oldMessageId));
+		await test.host.deliver(nativeStopUpdate(3, oldDraftId!));
 		expect(abort).not.toHaveBeenCalled();
-		await test.host.deliver(callbackUpdate(4, currentStop, currentMessageId));
+		await test.host.deliver(nativeStopUpdate(4, currentDraftId!));
 		expect(abort).toHaveBeenCalledOnce();
-		expect(test.activity.completeRequest).toHaveBeenLastCalledWith(identity, firstSession.id, 'request-2', 'cancelled');
+		expect(test.activity.requestStop).toHaveBeenCalledWith(identity, firstSession.id);
+		expect(test.activity.completeRequest).not.toHaveBeenCalledWith(identity, firstSession.id, 'request-2', 'cancelled');
 	});
 
 	it('does not start the native prompt when activity-card creation fails', async () => {
@@ -379,14 +391,24 @@ describe('TelegramCommandRouter', () => {
 		expect(test.sessionService.getAllSessions).toHaveBeenCalledTimes(2);
 	});
 
+	it('routes inexact or unknown ordinary text as a prompt rather than a command', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+
+		await test.host.deliver(telegramMessageUpdate(1, 'New Session'));
+
+		expect(test.sessionCreator.createSession).not.toHaveBeenCalled();
+		expect(test.dispatcher.prepare).toHaveBeenCalledWith(firstSession.id, 'New Session', expect.anything());
+	});
+
 	it('persists opt-in quick controls and removes them explicitly', async () => {
 		const test = createRouter([firstSession], new Set([firstSession.id]));
 
 		await test.host.deliver(telegramMessageUpdate(1, '/controls'));
 		expect(lastSendOptions(test.host).replyKeyboardMarkup).toEqual({
 			keyboard: [
-				[{ text: '/new' }, { text: '/sessions' }, { text: '/model' }],
-				[{ text: '/status' }, { text: '/files' }, { text: '/help' }],
+				[{ text: 'New session' }, { text: 'Sessions' }, { text: 'Model' }],
+				[{ text: 'Status' }, { text: 'Files' }, { text: 'Help' }],
 			],
 			resize_keyboard: true,
 			is_persistent: true,
@@ -412,7 +434,7 @@ describe('TelegramCommandRouter', () => {
 
 		await vi.waitFor(() => expect(lastSendOptions(restored.host).replyKeyboardMarkup).toMatchObject({ is_persistent: true }));
 		const restoredKeyboard = lastSendOptions(restored.host).replyKeyboardMarkup;
-		expect(restoredKeyboard && 'keyboard' in restoredKeyboard ? restoredKeyboard.keyboard[0] : undefined).toEqual([{ text: '/new' }, { text: '/sessions' }, { text: '/model' }]);
+		expect(restoredKeyboard && 'keyboard' in restoredKeyboard ? restoredKeyboard.keyboard[0] : undefined).toEqual([{ text: 'New session' }, { text: 'Sessions' }, { text: 'Model' }]);
 	});
 
 	it('changes an enabled control keyboard only at request lifecycle transitions', async () => {
@@ -426,11 +448,11 @@ describe('TelegramCommandRouter', () => {
 			.map(call => call[2]?.replyKeyboardMarkup)
 			.filter(markup => !!markup && 'keyboard' in markup);
 		expect(keyboardStates()).toHaveLength(2);
-		expect(keyboardStates().at(-1)?.keyboard[0]).toEqual([{ text: '/stop' }, { text: '/steer' }, { text: '/status' }]);
+		expect(keyboardStates().at(-1)?.keyboard[0]).toEqual([{ text: 'Stop' }, { text: 'Steer' }, { text: 'Status' }]);
 
 		test.activity.reachTerminal({ identity, sessionId: firstSession.id, requestId: 'request-1', outcome: 'completed' });
 		await vi.waitFor(() => expect(keyboardStates()).toHaveLength(3));
-		expect(keyboardStates().at(-1)?.keyboard[0]).toEqual([{ text: '/new' }, { text: '/sessions' }, { text: '/model' }]);
+		expect(keyboardStates().at(-1)?.keyboard[0]).toEqual([{ text: 'New session' }, { text: 'Sessions' }, { text: 'Model' }]);
 	});
 
 	it('leaves an enabled disconnected keyboard when remote routing stops', async () => {
@@ -441,12 +463,12 @@ describe('TelegramCommandRouter', () => {
 		test.host.blockedEmitter.fire();
 
 		await vi.waitFor(() => expect(lastSendOptions(test.host).replyKeyboardMarkup).toMatchObject({
-			keyboard: [[{ text: '/reconnect' }, { text: '/status' }], [{ text: '/settings' }]],
+			keyboard: [[{ text: 'Reconnect' }, { text: 'Status' }], [{ text: 'Settings' }]],
 		}));
 	});
 
 	it('routes slash and reply-keyboard Stop through the same registry abort', async () => {
-		for (const stopAction of ['/stop', '■ Stop']) {
+		for (const stopAction of ['/stop', 'Stop']) {
 			const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
 			await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
 			const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
@@ -456,6 +478,106 @@ describe('TelegramCommandRouter', () => {
 
 			expect(abort).toHaveBeenCalledWith(firstSession.id, 'telegram');
 		}
+	});
+
+	it('routes a matched native draft Stop through the registry abort', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
+		await test.host.deliver(telegramMessageUpdate(1, 'Run task'));
+		test.activity.handleStoppedMessageGeneration.mockResolvedValueOnce(true);
+
+		await test.host.deliver({
+			update_id: 2,
+			stopped_message_generation: {
+				chat: { id: identity.chatId, type: 'private' },
+				draft_id: 845721,
+			},
+		});
+
+		expect(test.activity.handleStoppedMessageGeneration).toHaveBeenCalledOnce();
+		expect(abort).toHaveBeenCalledWith(firstSession.id, 'telegram');
+	});
+
+	it('cancels a correlated prompt before its live session wrapper is bound', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		test.cancelPending.mockReturnValueOnce(true);
+		test.activity.handleStoppedMessageGeneration.mockResolvedValueOnce(true);
+		await test.host.deliver(telegramMessageUpdate(1, 'Run task'));
+		const sendsBeforeStop = test.host.sendMessage.mock.calls.length;
+
+		await test.host.deliver({
+			update_id: 2,
+			stopped_message_generation: {
+				chat: { id: identity.chatId, type: 'private' },
+				draft_id: 845721,
+			},
+		});
+
+		expect(test.cancelPending).toHaveBeenCalledOnce();
+		expect(test.logService.info).toHaveBeenCalledWith('[TelegramRemote] stop=pipeline pending=true live=false');
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(sendsBeforeStop);
+		expect(test.activity.completeRequest).toHaveBeenCalledWith(identity, firstSession.id, 'request-1', 'cancelled');
+	});
+
+	it('keeps a live Stop in flight without sending a separate Stopped message', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
+		await test.host.deliver(telegramMessageUpdate(1, 'Run task'));
+		const sendsBeforeStop = test.host.sendMessage.mock.calls.length;
+
+		await test.host.deliver(telegramMessageUpdate(2, '/stop'));
+
+		expect(abort).toHaveBeenCalledOnce();
+		expect(test.activity.requestStop).toHaveBeenCalledWith(identity, firstSession.id);
+		expect(test.activity.completeRequest).not.toHaveBeenCalledWith(identity, firstSession.id, 'request-1', 'cancelled');
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(sendsBeforeStop);
+
+		await test.host.deliver(telegramMessageUpdate(3, '/stop'));
+		expect(abort).toHaveBeenCalledOnce();
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(sendsBeforeStop);
+	});
+
+	it('uses the active dispatch draft id when timeline UI state no longer matches native Stop', async () => {
+		const test = createRouter([firstSession], new Set([firstSession.id]), new Promise<void>(() => { }));
+		await test.state.select(identity, firstSession.id, sessionScopeFingerprint);
+		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
+		await test.host.deliver(telegramMessageUpdate(1, 'Run task'));
+		const draftId = (await test.activity.beginRequest.mock.results[0].value)?.messageId;
+		expect(draftId).toBeDefined();
+		test.activity.handleStoppedMessageGeneration.mockResolvedValueOnce(false);
+
+		await test.host.deliver({
+			update_id: 2,
+			stopped_message_generation: {
+				chat: { id: identity.chatId, type: 'private' },
+				draft_id: draftId!,
+			},
+		});
+
+		expect(abort).toHaveBeenCalledWith(firstSession.id, 'telegram');
+		expect(test.logService.info).toHaveBeenCalledWith('[TelegramRemote] native-stop=correlated timeline=false dispatch=true selectedRunning=false');
+	});
+
+	it('routes native draft Stop to a selected task started in VS Code', async () => {
+		const running = { ...firstSession, status: ChatSessionStatus.InProgress };
+		const test = createRouter([running], new Set([running.id]));
+		await test.state.select(identity, running.id, sessionScopeFingerprint);
+		const abort = vi.spyOn(test.registry, 'abort').mockResolvedValue(true);
+		test.activity.handleStoppedMessageGeneration.mockResolvedValueOnce(false);
+
+		await test.host.deliver({
+			update_id: 2,
+			stopped_message_generation: {
+				chat: { id: identity.chatId, type: 'private' },
+				draft_id: 845721,
+			},
+		});
+
+		expect(abort).toHaveBeenCalledWith(running.id, 'telegram');
+		expect(test.logService.info).toHaveBeenCalledWith('[TelegramRemote] native-stop=correlated timeline=false dispatch=false selectedRunning=true');
 	});
 
 	it('allows an explicit Stop command to abort a selected task started in VS Code', async () => {
@@ -470,7 +592,7 @@ describe('TelegramCommandRouter', () => {
 		expect(test.activity.completeRequest).not.toHaveBeenCalled();
 	});
 
-	it('browses workspace files with opaque callbacks and edits the existing menu', async () => {
+	it('browses workspace files with opaque callbacks and posts the result nearby', async () => {
 		const fileSession = { ...firstSession, workingDirectory: URI.file('C:\\workspace') };
 		const test = createRouter([fileSession], new Set([fileSession.id]));
 		await test.state.select(identity, fileSession.id, sessionScopeFingerprint);
@@ -487,8 +609,10 @@ describe('TelegramCommandRouter', () => {
 
 		await test.host.deliver(callbackUpdate(2, fileButton.callback_data!, 1));
 		expect(test.host.answerCallbackQuery).toHaveBeenCalledWith('callback-2', expect.objectContaining({ text: 'Opening file…' }));
-		expect(test.host.sendMessage).toHaveBeenCalledTimes(1);
-		expect(test.host.editMessageText).toHaveBeenCalledWith(identity.chatId, 1, expect.stringContaining('const value = 1 &lt; 2;'), expect.objectContaining({ parseMode: 'HTML' }));
+		expect(test.host.sendMessage).toHaveBeenCalledTimes(2);
+		expect(test.host.editMessageText).not.toHaveBeenCalled();
+		expect(lastSentText(test.host)).toContain('const value = 1 &lt; 2;');
+		expect(lastSendOptions(test.host)).toEqual(expect.objectContaining({ parseMode: 'HTML' }));
 	});
 
 	it('rejects a routed update when the exact paired identity has changed', async () => {
@@ -609,6 +733,9 @@ class TestRequestActivity implements TelegramRequestActivity {
 			this.active = undefined;
 		}
 	});
+	readonly handleStoppedMessageGeneration = vi.fn(async () => false);
+	readonly requestStop = vi.fn(async () => { });
+	readonly cancelStop = vi.fn(async () => { });
 	readonly handleCallback = vi.fn(async () => false);
 	readonly resolveReply = vi.fn<(_update: TelegramUpdate, _identity: TelegramPairedIdentity) => Promise<TelegramActivityReplyResolution>>(async () => ({ kind: 'none' }));
 	closeRemoteConnection(): string | undefined {
@@ -645,10 +772,12 @@ function createRouter(
 	sessionService.getAllSessions.mockResolvedValue(sessions);
 	sessionService.getSessionItem.mockImplementation(async sessionId => sessions.find(session => session.id === sessionId));
 	const dispatch = vi.fn<TelegramPromptDispatcher['dispatch']>(() => ({ accepted: true as const, correlationId: 'request-1', completion }));
+	const cancelPending = vi.fn(() => false);
 	const dispatcher = {
 		dispatch,
 		prepare: vi.fn<TelegramPromptDispatcher['prepare']>((sessionId, prompt, origin, options) => ({
 			correlationId: 'request-1',
+			cancel: cancelPending,
 			start: () => options ? dispatch(sessionId, prompt, origin, options) : dispatch(sessionId, prompt, origin),
 		})),
 	} satisfies TelegramPromptDispatcher;
@@ -689,7 +818,7 @@ function createRouter(
 	const router = new TelegramCommandRouter(host, state, sessionService, registry, dispatcher, sessionCreator, {
 		workstationLabel: 'workstation-1', workspaceLabel: 'C:\\workspace', workspaceRoots, remotePermissionResponses: false,
 	}, scopePolicy, activity, requestPreferences, controlUiState, fileBrowser, logService);
-	return { router, host, state, registry, sessionService, dispatcher, sessionCreator, activity, requestPreferences, controlUiState, fileBrowser, logService, workspaceRoots, context };
+	return { router, host, state, registry, sessionService, dispatcher, cancelPending, sessionCreator, activity, requestPreferences, controlUiState, fileBrowser, logService, workspaceRoots, context };
 }
 
 function callbackUpdate(updateId: number, callbackData: string, messageId: number): TelegramUpdate {
@@ -700,6 +829,16 @@ function callbackUpdate(updateId: number, callbackData: string, messageId: numbe
 			...update.callback_query,
 			message: update.callback_query.message ? { ...update.callback_query.message, message_id: messageId } : undefined,
 		} : undefined,
+	};
+}
+
+function nativeStopUpdate(updateId: number, draftId: number): TelegramUpdate {
+	return {
+		update_id: updateId,
+		stopped_message_generation: {
+			chat: { id: identity.chatId, type: 'private' },
+			draft_id: draftId,
+		},
 	};
 }
 

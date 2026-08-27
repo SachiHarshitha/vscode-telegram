@@ -254,6 +254,25 @@ describe('TelegramBotClient', () => {
 		expect(updates[0].message?.reply_to_message).toMatchObject({ message_id: 7, text: 'activity' });
 	});
 
+	it('normalizes the decimal-string draft id in a native Stop update', async () => {
+		responses.push(ok([{
+			update_id: 18,
+			stopped_message_generation: {
+				chat: { id: 99, type: 'private', first_name: 'Tester' },
+				draft_id: '845721',
+			},
+		}]));
+		const client = new TelegramBotClient(botToken, origin, new TestTelegramFetcher());
+
+		const updates = await client.getUpdates({ timeoutSeconds: 0, allowedUpdates: ['stopped_message_generation'] });
+
+		expect(updates[0].stopped_message_generation).toEqual({
+			chat: { id: 99, type: 'private', first_name: 'Tester', username: undefined, last_name: undefined, title: undefined },
+			message_thread_id: undefined,
+			draft_id: 845721,
+		});
+	});
+
 	it.each([
 		{ status: 401, errorCode: 401, expectedKind: 'authentication' },
 		{ status: 429, errorCode: 429, expectedKind: 'rate-limit' },

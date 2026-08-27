@@ -297,7 +297,9 @@ function parseTelegramCallbackQuery(value: unknown): TelegramCallbackQuery {
 
 function parseTelegramMessageGenerationStopped(value: unknown): TelegramMessageGenerationStopped {
 	const record = asRecord(value, 'Telegram stopped message generation');
-	const draftId = asSafeInteger(record.draft_id, 'Telegram stopped message generation draft id');
+	// The Bot API documents draft_id as an Integer, but its server serializes the underlying
+	// 64-bit value as a decimal string. Normalize the wire representation at the adapter boundary.
+	const draftId = asSafeIntegerOrDecimalString(record.draft_id, 'Telegram stopped message generation draft id');
 	if (draftId === 0) {
 		throw new TelegramBotApiError('invalid-response', 'Telegram stopped message generation draft id is invalid.');
 	}
@@ -338,6 +340,16 @@ function asSafeInteger(value: unknown, label: string): number {
 		throw new TelegramBotApiError('invalid-response', `${label} is invalid.`);
 	}
 	return value;
+}
+
+function asSafeIntegerOrDecimalString(value: unknown, label: string): number {
+	if (typeof value === 'string' && /^-?(?:0|[1-9]\d*)$/.test(value)) {
+		const parsed = Number(value);
+		if (Number.isSafeInteger(parsed)) {
+			return parsed;
+		}
+	}
+	return asSafeInteger(value, label);
 }
 
 function asOptionalSafeInteger(value: unknown, label: string): number | undefined {

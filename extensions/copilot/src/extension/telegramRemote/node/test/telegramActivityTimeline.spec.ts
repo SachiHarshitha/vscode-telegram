@@ -12,7 +12,7 @@ import { mock } from '../../../../util/common/test/simpleMock';
 import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../../chatSessions/copilotcli/node/copilotcliSessionService';
 import type { IRemoteControlSessionEvent, IRemotePermissionRequest } from '../../common/remoteControlTypes';
 import type { TelegramSessionScopePolicy } from '../../common/telegramSessionScope';
-import { TelegramBotApiError, type TelegramAnswerCallbackQueryOptions, type TelegramEditRichMessageOptions, type TelegramInlineKeyboardMarkup, type TelegramInputRichMessage, type TelegramMessage, type TelegramSendRichMessageOptions, type TelegramUpdate } from '../../common/telegramTypes';
+import { TelegramBotApiError, type TelegramAnswerCallbackQueryOptions, type TelegramEditRichMessageOptions, type TelegramInlineKeyboardMarkup, type TelegramInputRichMessage, type TelegramMessage, type TelegramSendRichMessageDraftOptions, type TelegramSendRichMessageOptions, type TelegramUpdate } from '../../common/telegramTypes';
 import { TelegramActivityTimeline, type TelegramActivityTimelineHost, type TelegramActivityTimelineScheduler } from '../telegramActivityTimeline';
 import type { TelegramPairedIdentity } from '../telegramAuthorization';
 import { TelegramCallbackRegistry, type TelegramCallbackConstraints, type TelegramCallbackInput } from '../telegramCallbackRegistry';
@@ -143,6 +143,37 @@ describe('TelegramActivityTimeline', () => {
 		expect(JSON.stringify(test.host.sendRichMessage.mock.calls.at(-1)?.[1])).toContain('The build completed successfully.');
 	});
 
+	it('reuses the live draft as Stopping until the correlated abort arrives', async () => {
+		const test = await createTimeline();
+		const request = await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		const initialDraft = test.host.sendRichMessageDraft.mock.calls.at(-1)!;
+		expect(initialDraft[3]).toMatchObject({ canStop: true, keepOnStop: true });
+
+		expect(await test.timeline.handleStoppedMessageGeneration({
+			update_id: 2,
+			stopped_message_generation: {
+				chat: { id: identity.chatId, type: 'private' },
+				draft_id: request!.messageId,
+			},
+		}, identity)).toBe(true);
+
+		const stoppingDraft = test.host.sendRichMessageDraft.mock.calls.at(-1)!;
+		expect(stoppingDraft[1]).toBe(initialDraft[1]);
+		expect(JSON.stringify(stoppingDraft[2])).toContain('Stopping…');
+		expect(stoppingDraft[3]).toMatchObject({ canStop: false, keepOnStop: true });
+
+		await test.timeline.refreshActiveDraft();
+		expect(JSON.stringify(test.host.sendRichMessageDraft.mock.calls.at(-1)?.[2])).toContain('Stopping…');
+		const sendsBeforeConfirmation = test.host.sendRichMessageDraft.mock.calls.length;
+
+		await test.timeline.publish(session.id, event('abort', 'abort', { reason: 'user' }));
+		await test.timeline.refreshActiveDraft();
+
+		expect(test.host.sendRichMessageDraft).toHaveBeenCalledTimes(sendsBeforeConfirmation);
+		expect(test.host.sendRichMessage).toHaveBeenCalledOnce();
+		expect(JSON.stringify(test.host.sendRichMessage.mock.calls.at(-1)?.[1])).toContain('Request cancelled');
+	});
+
 	it('does not send a late duplicate when a reasoning edit fails at completion', async () => {
 		const test = await createTimeline();
 		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
@@ -235,18 +266,20 @@ describe('TelegramActivityTimeline', () => {
 		expect(JSON.stringify(test.host.editRichMessage.mock.calls.at(-1)?.[2])).toContain('Build passed');
 	});
 
-	it('keeps Stop attached when a stale idle event arrives before the new turn starts', async () => {
+	it('keeps the live draft active when a stale idle event arrives before the new turn starts', async () => {
 		const test = await createTimeline();
-		const request = await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
+		await test.timeline.beginRequest(identity, session, 'request-1', stopMarkup);
 
 		await test.timeline.publish(session.id, event('old-idle', 'session.idle', { aborted: false }));
-		expect(test.timeline.isStopControl(session.id, 'request-1', request!.generation, request!.messageId)).toBe(true);
-		expect(test.host.editMessageReplyMarkup).not.toHaveBeenCalled();
+		const sendsBeforeRefresh = test.host.sendRichMessageDraft.mock.calls.length;
+		await test.timeline.refreshActiveDraft();
+		expect(test.host.sendRichMessageDraft).toHaveBeenCalledTimes(sendsBeforeRefresh + 1);
 
 		await test.timeline.publish(session.id, event('turn', 'assistant.turn_start', { turnId: 'turn-1' }));
 		await test.timeline.publish(session.id, event('idle', 'session.idle', { aborted: false }));
-		expect(test.timeline.isStopControl(session.id, 'request-1', request!.generation, request!.messageId)).toBe(false);
-		expect(test.host.editMessageReplyMarkup).toHaveBeenCalled();
+		const sendsAfterTerminal = test.host.sendRichMessageDraft.mock.calls.length;
+		await test.timeline.refreshActiveDraft();
+		expect(test.host.sendRichMessageDraft).toHaveBeenCalledTimes(sendsAfterTerminal);
 	});
 
 	it('holds provisional assistant text and publishes one expandable final answer with usage', async () => {
@@ -332,7 +365,7 @@ class TestActivityHost implements TelegramActivityTimelineHost {
 		date: 1,
 		chat: { id: chatId, type: 'private' },
 	}));
-	readonly sendRichMessageDraft = vi.fn(async (): Promise<true> => true);
+	readonly sendRichMessageDraft = vi.fn(async (_chatId: number, _draftId: number, _richMessage: TelegramInputRichMessage, _options?: TelegramSendRichMessageDraftOptions): Promise<true> => true);
 	readonly editRichMessage = vi.fn(async (_chatId: number, _messageId: number, _richMessage: TelegramInputRichMessage, _options?: TelegramEditRichMessageOptions): Promise<true> => true);
 	readonly editMessageReplyMarkup = vi.fn(async (): Promise<true> => true);
 	readonly answerCallbackQuery = vi.fn(async (_callbackQueryId: string, _options?: TelegramAnswerCallbackQueryOptions): Promise<void> => { });
@@ -376,7 +409,10 @@ class TestSessionService extends mock<ICopilotCLISessionService>() {
 
 async function createTimeline() {
 	const context = new TestTelegramExtensionContext('C:\\telegram-timeline-test');
-	const logService = new class extends mock<ILogService>() { override warn = vi.fn(); };
+	const logService = new class extends mock<ILogService>() {
+		override info = vi.fn();
+		override warn = vi.fn();
+	};
 	const state = new TelegramSessionState('abcdefabcdefabcdefabcdef', context, { attachTransport: () => ({ dispose() { } }) } as never);
 	await state.select(identity, session.id, sessionScopeFingerprint);
 	const scopePolicy: TelegramSessionScopePolicy = {

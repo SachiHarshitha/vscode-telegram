@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { TelegramReplyKeyboardMarkup, TelegramReplyKeyboardRemove } from '../common/telegramTypes';
+import { TelegramReplyKeyboardLabel } from './telegramBotActions';
 
 export type TelegramControlState = 'idle' | 'running' | 'disconnected';
 
@@ -12,18 +13,18 @@ export function buildControlKeyboard(state: TelegramControlState): TelegramReply
 	switch (state) {
 		case 'idle':
 			return keyboard([
-				['/new', '/sessions', '/model'],
-				['/status', '/files', '/help'],
+				[TelegramReplyKeyboardLabel.NewSession, TelegramReplyKeyboardLabel.Sessions, TelegramReplyKeyboardLabel.Model],
+				[TelegramReplyKeyboardLabel.Status, TelegramReplyKeyboardLabel.Files, TelegramReplyKeyboardLabel.Help],
 			], 'Ask Copilot...');
 		case 'running':
 			return keyboard([
-				['/stop', '/steer', '/status'],
-				['/files', '/help'],
+				[TelegramReplyKeyboardLabel.Stop, TelegramReplyKeyboardLabel.Steer, TelegramReplyKeyboardLabel.Status],
+				[TelegramReplyKeyboardLabel.Files, TelegramReplyKeyboardLabel.Help],
 			], 'Send instructions to Copilot...');
 		case 'disconnected':
 			return keyboard([
-				['/reconnect', '/status'],
-				['/settings'],
+				[TelegramReplyKeyboardLabel.Reconnect, TelegramReplyKeyboardLabel.Status],
+				[TelegramReplyKeyboardLabel.Settings],
 			]);
 	}
 }

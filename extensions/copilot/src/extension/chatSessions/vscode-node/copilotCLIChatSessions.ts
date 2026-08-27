@@ -38,7 +38,7 @@ import { IChatFolderMruService, IFolderRepositoryManager, IsolationMode } from '
 import { getWorkingDirectory, IWorkspaceInfo } from '../common/workspaceInfo';
 import { ICustomSessionTitleService } from '../copilotcli/common/customSessionTitleService';
 import { IChatDelegationSummaryService } from '../copilotcli/common/delegationSummaryService';
-import { clearPendingCopilotCLIRequestContext, COPILOT_CLI_PENDING_REQUEST_MARKER_ID, createPendingCopilotCLIRequestCorrelationId, createPendingCopilotCLIRequestMarker, getPendingCopilotCLIRequestCorrelationId, setPendingCopilotCLIRequestContext, takePendingCopilotCLIRequestContext } from '../copilotcli/common/pendingRequestContext';
+import { clearPendingCopilotCLIRequestContext, COPILOT_CLI_PENDING_REQUEST_MARKER_ID, createPendingCopilotCLIRequestCorrelationId, createPendingCopilotCLIRequestMarker, getPendingCopilotCLIRequestCorrelationId, setPendingCopilotCLIRequestContext, takePendingCopilotCLIRequestContextResult } from '../copilotcli/common/pendingRequestContext';
 import { IRemoteControlRegistry, type IRemoteAttachmentInfo, type RemoteRequestOrigin } from '../../remoteControl/common/remoteControlTypes';
 import { SessionIdForCLI } from '../copilotcli/common/utils';
 import { getCopilotCLISessionDir } from '../copilotcli/node/cliHelpers';
@@ -840,25 +840,31 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 		isNewSession: boolean,
 		correlationId: string | undefined,
 		token: vscode.CancellationToken,
-	): Promise<{ input: { prompt: string; command?: CopilotCLICommand; source?: SendOptions['source']; origin?: RemoteRequestOrigin }; attachments: Attachment[] }> {
-		const contextForRequest = correlationId ? takePendingCopilotCLIRequestContext(session.sessionId, correlationId) : undefined;
+	): Promise<
+		| { readonly kind: 'ready'; readonly input: { prompt: string; command?: CopilotCLICommand; source?: SendOptions['source']; origin?: RemoteRequestOrigin }; readonly attachments: Attachment[] }
+		| { readonly kind: 'cancelled' }
+	> {
+		const pending = correlationId ? takePendingCopilotCLIRequestContextResult(session.sessionId, correlationId) : undefined;
 
-		if (contextForRequest) {
-			return { input: { prompt: contextForRequest.prompt, source: contextForRequest.source, origin: contextForRequest.origin }, attachments: contextForRequest.attachments };
+		if (pending?.kind === 'cancelled') {
+			return pending;
+		}
+		if (pending?.kind === 'ready') {
+			return { kind: 'ready', input: { prompt: pending.context.prompt, source: pending.context.source, origin: pending.context.origin }, attachments: pending.context.attachments };
 		}
 
 		if (request.command && !request.prompt && !isNewSession) {
 			const input = (copilotCLICommands as readonly string[]).includes(request.command)
 				? { command: request.command as CopilotCLICommand, prompt: '' }
 				: { prompt: `/${request.command}` };
-			return { input, attachments: [] };
+			return { kind: 'ready', input, attachments: [] };
 		}
 
 		const { prompt, attachments } = await this.promptResolver.resolvePrompt(request, undefined, [], session.workspace, [], token);
 		const input = (request.command && (copilotCLICommands as readonly string[]).includes(request.command))
 			? { command: request.command as CopilotCLICommand, prompt }
 			: { prompt };
-		return { input, attachments };
+		return { kind: 'ready', input, attachments };
 	}
 
 	private generateNewBranchName(request: vscode.ChatRequest, token: vscode.CancellationToken): Promise<string | undefined> {
@@ -945,8 +951,12 @@ export class CopilotCLIChatSessionParticipant extends Disposable {
 				await this.handleDelegationToCloud(session.object, sanitizedRequest, context, stream, token);
 				return {};
 			} else {
-				const { input, attachments } = await this.resolveInput(sanitizedRequest, session.object, isNewSession, correlationId, token);
-				await session.object.handleRequest(sanitizedRequest, input, attachments, model, authInfo, token);
+				const resolvedInput = await this.resolveInput(sanitizedRequest, session.object, isNewSession, correlationId, token);
+				if (resolvedInput.kind === 'cancelled') {
+					this.logService.info('[RemotePromptDispatcher] pending-request=cancelled-before-start');
+					return {};
+				}
+				await session.object.handleRequest(sanitizedRequest, resolvedInput.input, resolvedInput.attachments, model, authInfo, token);
 			}
 
 			const modelDetailsEnabled = this.configurationService.getConfig(ConfigKey.Advanced.CLIModelDetailsEnabled);

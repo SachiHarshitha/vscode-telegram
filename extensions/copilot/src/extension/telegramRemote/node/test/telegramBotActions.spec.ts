@@ -4,37 +4,56 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, it } from 'vitest';
-import { parseTelegramBotAction } from '../telegramBotActions';
+import { parseTelegramBotAction, TELEGRAM_REPLY_KEYBOARD_COMMAND_ALIASES } from '../telegramBotActions';
 import { buildControlKeyboard } from '../telegramControlKeyboards';
 
 describe('Telegram bot actions', () => {
 	it('maps every quick-control label to the same application action as its command', () => {
+		expect([...TELEGRAM_REPLY_KEYBOARD_COMMAND_ALIASES]).toEqual([
+			['New session', '/new'],
+			['Sessions', '/sessions'],
+			['Model', '/model'],
+			['Status', '/status'],
+			['Files', '/files'],
+			['Help', '/help'],
+			['Stop', '/stop'],
+			['Steer', '/steer'],
+			['Reconnect', '/reconnect'],
+			['Settings', '/settings'],
+		]);
 		expect([
-			['＋ New', parseTelegramBotAction('＋ New')],
+			['New session', parseTelegramBotAction('New session')],
 			['Sessions', parseTelegramBotAction('Sessions')],
 			['Model', parseTelegramBotAction('Model')],
 			['Status', parseTelegramBotAction('Status')],
 			['Files', parseTelegramBotAction('Files')],
-			['■ Stop', parseTelegramBotAction('■ Stop')],
-			['More', parseTelegramBotAction('More')],
+			['Help', parseTelegramBotAction('Help')],
+			['Stop', parseTelegramBotAction('Stop')],
 			['Steer', parseTelegramBotAction('Steer')],
 			['Reconnect', parseTelegramBotAction('Reconnect')],
 			['Settings', parseTelegramBotAction('Settings')],
 		]).toEqual([
-			['＋ New', { action: 'new' }],
+			['New session', { action: 'new' }],
 			['Sessions', { action: 'sessions' }],
 			['Model', { action: 'model' }],
 			['Status', { action: 'status' }],
 			['Files', { action: 'files' }],
-			['■ Stop', { action: 'stop' }],
-			['More', { action: 'more' }],
+			['Help', { action: 'help' }],
+			['Stop', { action: 'stop' }],
 			['Steer', { action: 'steer' }],
 			['Reconnect', { action: 'reconnect' }],
 			['Settings', { action: 'settings' }],
 		]);
 	});
 
-	it('parses every reply-keyboard payload as an explicit slash command', () => {
+	it('does not reinterpret unknown or inexact ordinary text as a command', () => {
+		expect(['new session', 'New Session', 'New session now', '■ Stop', 'More', 'Help me'].map(text => parseTelegramBotAction(text))).toEqual([
+			undefined, undefined, undefined, undefined, undefined, undefined,
+		]);
+		expect(parseTelegramBotAction('/unknown')).toBe('unknown-command');
+	});
+
+	it('keeps every canonical slash command working', () => {
 		expect(['/new', '/sessions', '/model', '/status', '/files', '/help', '/stop', '/steer', '/reconnect', '/settings'].map(command => parseTelegramBotAction(command))).toEqual([
 			{ action: 'new' },
 			{ action: 'sessions' },
@@ -56,21 +75,21 @@ describe('Telegram bot actions', () => {
 			disconnected: buildControlKeyboard('disconnected'),
 		}).toEqual({
 			idle: {
-				keyboard: [[{ text: '/new' }, { text: '/sessions' }, { text: '/model' }], [{ text: '/status' }, { text: '/files' }, { text: '/help' }]],
+				keyboard: [[{ text: 'New session' }, { text: 'Sessions' }, { text: 'Model' }], [{ text: 'Status' }, { text: 'Files' }, { text: 'Help' }]],
 				resize_keyboard: true,
 				is_persistent: true,
 				one_time_keyboard: false,
 				input_field_placeholder: 'Ask Copilot...',
 			},
 			running: {
-				keyboard: [[{ text: '/stop' }, { text: '/steer' }, { text: '/status' }], [{ text: '/files' }, { text: '/help' }]],
+				keyboard: [[{ text: 'Stop' }, { text: 'Steer' }, { text: 'Status' }], [{ text: 'Files' }, { text: 'Help' }]],
 				resize_keyboard: true,
 				is_persistent: true,
 				one_time_keyboard: false,
 				input_field_placeholder: 'Send instructions to Copilot...',
 			},
 			disconnected: {
-				keyboard: [[{ text: '/reconnect' }, { text: '/status' }], [{ text: '/settings' }]],
+				keyboard: [[{ text: 'Reconnect' }, { text: 'Status' }], [{ text: 'Settings' }]],
 				resize_keyboard: true,
 				is_persistent: true,
 				one_time_keyboard: false,

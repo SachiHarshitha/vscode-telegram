@@ -23,7 +23,12 @@ interface IPendingEntry {
 	readonly sessionId: string;
 	readonly context: ICopilotCLIPendingRequestContext;
 	readonly expiresAt: number;
+	cancelled: boolean;
 }
+
+export type CopilotCLIPendingRequestContextResult =
+	| { readonly kind: 'ready'; readonly context: ICopilotCLIPendingRequestContext }
+	| { readonly kind: 'cancelled' };
 
 export interface ICopilotCLIPendingRequestMarker {
 	readonly id: typeof COPILOT_CLI_PENDING_REQUEST_MARKER_ID;
@@ -88,17 +93,34 @@ export function setPendingCopilotCLIRequestContext(sessionId: string, correlatio
 		sessionId,
 		context,
 		expiresAt: Date.now() + pendingRequestContextTtlMs,
+		cancelled: false,
 	});
 }
 
 export function takePendingCopilotCLIRequestContext(sessionId: string, correlationId: string): ICopilotCLIPendingRequestContext | undefined {
+	const result = takePendingCopilotCLIRequestContextResult(sessionId, correlationId);
+	return result?.kind === 'ready' ? result.context : undefined;
+}
+
+export function takePendingCopilotCLIRequestContextResult(sessionId: string, correlationId: string): CopilotCLIPendingRequestContextResult | undefined {
 	prunePendingRequestContexts();
 	const entry = pendingRequestContextByCorrelationId.get(correlationId);
 	if (!entry || entry.sessionId !== sessionId) {
 		return undefined;
 	}
 	pendingRequestContextByCorrelationId.delete(correlationId);
-	return entry.context;
+	return entry.cancelled ? { kind: 'cancelled' } : { kind: 'ready', context: entry.context };
+}
+
+/** Marks a correlated native chat request as cancelled before its live session wrapper exists. */
+export function cancelPendingCopilotCLIRequestContext(sessionId: string, correlationId: string): boolean {
+	prunePendingRequestContexts();
+	const entry = pendingRequestContextByCorrelationId.get(correlationId);
+	if (!entry || entry.sessionId !== sessionId) {
+		return false;
+	}
+	entry.cancelled = true;
+	return true;
 }
 
 export function clearPendingCopilotCLIRequestContext(sessionId: string, correlationId: string): void {

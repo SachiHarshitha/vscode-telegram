@@ -19,6 +19,7 @@ export interface ActiveDraft {
 	draftId: number;
 	runId: string;
 	status: string;
+	canStop: boolean;
 	active: boolean;
 	lastRefresh: number;
 }
@@ -54,6 +55,7 @@ export class TelegramActivityDraftController extends Disposable {
 			draftId: randomInt(1, maximumDraftId),
 			runId,
 			status: '',
+			canStop: true,
 			active: false,
 			lastRefresh: 0,
 		};
@@ -66,6 +68,7 @@ export class TelegramActivityDraftController extends Disposable {
 		}
 		this.draft.active = true;
 		this.draft.status = status;
+		this.draft.canStop = true;
 		await this.enqueueRefresh();
 	}
 
@@ -88,6 +91,20 @@ export class TelegramActivityDraftController extends Disposable {
 			this.semanticUpdateTimer = undefined;
 			await this.enqueueRefresh();
 		}, delay);
+	}
+
+	async updateImmediately(status: string, canStop = this.draft.canStop): Promise<void> {
+		if (!this.draft.active || !status) {
+			return;
+		}
+		const changed = this.draft.status !== status || this.draft.canStop !== canStop;
+		this.draft.status = status;
+		this.draft.canStop = canStop;
+		this.semanticUpdateTimer?.dispose();
+		this.semanticUpdateTimer = undefined;
+		if (changed) {
+			await this.enqueueRefresh();
+		}
 	}
 
 	refreshImmediately(): Promise<void> {
@@ -127,8 +144,8 @@ export class TelegramActivityDraftController extends Disposable {
 		try {
 			await this.host.sendRichMessageDraft(this.draft.chatId, this.draft.draftId, renderDraft(this.draft.status), {
 				messageThreadId: this.draft.threadId,
-				canStop: true,
-				keepOnStop: false,
+				canStop: this.draft.canStop,
+				keepOnStop: true,
 			});
 			this.draft.lastRefresh = this.scheduler.now();
 		} catch {

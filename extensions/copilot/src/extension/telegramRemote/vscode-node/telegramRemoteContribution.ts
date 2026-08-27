@@ -468,6 +468,9 @@ export class TelegramRemoteContribution extends Disposable {
 		}
 		const identity = this.authorization.authorizeUpdate(update, tokenFingerprint);
 		if (!identity) {
+			if (update.stopped_message_generation) {
+				this.logService.warn('[TelegramRemote] native-stop=rejected reason=authorization');
+			}
 			return;
 		}
 		const updateKind = update.callback_query || update.stopped_message_generation ? 'callback' : 'message';

@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ILogService } from '../../../../platform/log/common/logService';
 import { mock } from '../../../../util/common/test/simpleMock';
-import { getPendingCopilotCLIRequestCorrelationId, takePendingCopilotCLIRequestContext } from '../../../chatSessions/copilotcli/common/pendingRequestContext';
+import { getPendingCopilotCLIRequestCorrelationId, takePendingCopilotCLIRequestContext, takePendingCopilotCLIRequestContextResult } from '../../../chatSessions/copilotcli/common/pendingRequestContext';
 import type { RemoteRequestOrigin } from '../../common/remoteControlTypes';
 import { RemotePromptDispatcher } from '../remotePromptDispatcher';
 
@@ -49,6 +49,17 @@ describe('RemotePromptDispatcher', () => {
 		expect(result.correlationId).toBe(prepared.correlationId);
 		expect(vscodeMocks.executeCommand).toHaveBeenCalledOnce();
 		expect(() => prepared.start()).toThrow('already started');
+	});
+
+	it('cancels a started dispatch before the native request takes its context', () => {
+		vscodeMocks.executeCommand.mockReturnValue(new Promise<void>(() => { }));
+		const dispatcher = new RemotePromptDispatcher(new class extends mock<ILogService>() { });
+		const origin: RemoteRequestOrigin = { kind: 'remoteControl', transportId: 'telegram', requestId: 'cancel-1', mode: 'interactive' };
+		const prepared = dispatcher.prepare('session-cancel', 'long task', origin);
+		prepared.start();
+
+		expect(prepared.cancel()).toBe(true);
+		expect(takePendingCopilotCLIRequestContextResult('session-cancel', prepared.correlationId)).toEqual({ kind: 'cancelled' });
 	});
 
 	it('forwards a validated model and reasoning effort through the native ChatRequest options', () => {

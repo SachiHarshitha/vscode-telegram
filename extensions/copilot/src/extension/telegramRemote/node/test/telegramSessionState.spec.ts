@@ -65,23 +65,43 @@ describe('TelegramSessionState', () => {
 		expect(restored.getSelectedModelPreference(identity, 'session-1')).toEqual({
 			modelId: 'openai/work-model', modelSource: 'vscode-lm', reasoningEffort: 'high',
 		});
-		expect(context.globalState.values.get('vscode-telegram.telegram-remote.selected-sessions.v2')).toEqual(expect.objectContaining({ version: 3 }));
+		expect(context.globalState.values.get('vscode-telegram.telegram-remote.selected-sessions.v2')).toEqual(expect.objectContaining({ version: 4 }));
 
 		await restored.select(identity, 'session-2', sessionScopeFingerprint);
-		expect(restored.getSelectedModelPreference(identity, 'session-2')).toBeUndefined();
+		expect(restored.getSelectedModelPreference(identity, 'session-2')).toEqual({
+			modelId: 'openai/work-model', modelSource: 'vscode-lm', reasoningEffort: 'high',
+		});
 	});
 
 	it('never restores a selection from a different consented workspace scope', async () => {
 		const { context, registry, state } = createState();
 		await state.select(identity, 'session-1', sessionScopeFingerprint);
+		await state.setSelectedModelPreference(identity, 'session-1', { modelId: 'gpt-fast', modelSource: 'copilotcli' });
 		state.suspend();
 		const otherWorkspace = new TelegramSessionState('111111111111111111111111', context, registry);
-		const validate = vi.fn(async () => true);
+		const validate = vi.fn(async () => false);
 
 		await expect(otherWorkspace.restore(identity, validate)).resolves.toBeUndefined();
-		expect(validate).not.toHaveBeenCalled();
+		expect(validate).toHaveBeenCalledWith('session-1', sessionScopeFingerprint);
 		expect(registry.getAttachedSessionIds('telegram')).toEqual([]);
 		expect(otherWorkspace.getSelectedSessionId(identity)).toBeUndefined();
+
+		await otherWorkspace.select(identity, 'session-2', sessionScopeFingerprint);
+		expect(otherWorkspace.getSelectedModelPreference(identity, 'session-2')).toEqual({ modelId: 'gpt-fast', modelSource: 'copilotcli' });
+	});
+
+	it('rebinds a revalidated session and its model after workspace reauthorization', async () => {
+		const { context, registry, state } = createState();
+		await state.select(identity, 'session-1', sessionScopeFingerprint);
+		await state.setSelectedModelPreference(identity, 'session-1', { modelId: 'gpt-fast', modelSource: 'copilotcli' });
+		state.suspend();
+
+		const reauthorized = new TelegramSessionState('111111111111111111111111', context, registry);
+		await expect(reauthorized.restore(identity, async () => true)).resolves.toBe('session-1');
+
+		expect(reauthorized.getSelectedSessionId(identity)).toBe('session-1');
+		expect(reauthorized.getSelectedModelPreference(identity, 'session-1')).toEqual({ modelId: 'gpt-fast', modelSource: 'copilotcli' });
+		expect(registry.getAttachedSessionIds('telegram')).toEqual(['session-1']);
 	});
 
 	it('removes deleted sessions and rejects malformed or mismatched persisted identities', async () => {

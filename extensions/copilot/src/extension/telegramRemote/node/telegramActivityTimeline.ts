@@ -80,6 +80,7 @@ interface TimelineState {
 	complete: boolean;
 	connectionClosed: boolean;
 	stopRequested: boolean;
+	statusBeforeStop?: string;
 	terminalOutcome?: 'completed' | 'failed' | 'cancelled';
 	terminalNotified: boolean;
 }
@@ -172,7 +173,7 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		state.terminalOutcome = outcome === 'superseded' ? undefined : outcome;
 		state.draft?.stop();
 		const mutation = state.aggregator.completeRequest(outcome);
-		if (mutation && outcome !== 'cancelled' && outcome !== 'superseded') {
+		if (mutation && outcome !== 'superseded') {
 			await this.publishMutation(state, mutation, undefined, true);
 		}
 		this.notifyTerminal(state);
@@ -220,8 +221,14 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			} else if (event.kind === 'session.idle' || event.kind === 'session.task_complete' || event.kind === 'abort') {
 				// A selected SDK session can still emit the previous turn's idle/terminal
 				// edge while the native remote prompt is being opened. It must not retire
-				// the new request's live draft before that request actually starts.
-				return;
+				// the new request's live draft before that request actually starts. Once
+				// Stop is requested, the next terminal edge is its confirmation.
+				const confirmsPendingStop = state.stopRequested
+					&& (event.kind === 'abort' || (event.kind === 'session.idle' && event.aborted));
+				if (!confirmsPendingStop) {
+					return;
+				}
+				state.requestStarted = true;
 			} else if (isTerminalEvent(event)) {
 				state.requestStarted = true;
 			}
@@ -235,9 +242,6 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			state.terminalOutcome = terminalOutcome(event);
 		}
 		for (const mutation of state.aggregator.accept(event)) {
-			if (terminal && state.stopRequested && state.terminalOutcome === 'cancelled') {
-				continue;
-			}
 			await this.publishMutation(state, mutation, undefined, isUrgent(event, mutation.round));
 		}
 		if (terminal) {
@@ -370,19 +374,27 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 		if (!stopped || !state?.draft || state.complete || !sameIdentity(state.identity, identity) || !state.draft.matches(stopped)) {
 			return false;
 		}
-		state.stopRequested = true;
-		state.draft.stop();
+		await this.showStopping(state);
 		this.logService.info('[TelegramRemote] live-draft=stop-request matched=true');
 		return true;
 	}
 
-	requestStop(identity: TelegramPairedIdentity, sessionId: string): Promise<void> {
+	async requestStop(identity: TelegramPairedIdentity, sessionId: string): Promise<void> {
 		const state = this.activeState;
 		if (state && state.sessionId === sessionId && !state.complete && sameIdentity(state.identity, identity)) {
-			state.stopRequested = true;
-			state.draft?.stop();
+			await this.showStopping(state);
 		}
-		return Promise.resolve();
+	}
+
+	async cancelStop(identity: TelegramPairedIdentity, sessionId: string): Promise<void> {
+		const state = this.activeState;
+		if (!state || state.sessionId !== sessionId || state.complete || !state.stopRequested || !sameIdentity(state.identity, identity)) {
+			return;
+		}
+		state.stopRequested = false;
+		const status = state.statusBeforeStop ?? l10n.t('Working…');
+		state.statusBeforeStop = undefined;
+		await state.draft?.updateImmediately(status, true);
 	}
 
 	refreshActiveDraft(): Promise<void> {
@@ -468,8 +480,9 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			delivery.dirty = true;
 		}
 		if (!state.complete) {
-			await this.ensureDraft(state, draftStatus(mutation.round));
-			await state.draft?.update(draftStatus(mutation.round));
+			const status = state.stopRequested ? l10n.t('Stopping…') : draftStatus(mutation.round);
+			await this.ensureDraft(state, status);
+			await state.draft?.update(status);
 		}
 		if (!shouldPersistRound(mutation.round)) {
 			delivery.dirty = false;
@@ -623,6 +636,17 @@ export class TelegramActivityTimeline extends Disposable implements TelegramRequ
 			);
 		}
 		await state.draft.start(status);
+	}
+
+	private async showStopping(state: TimelineState): Promise<void> {
+		if (!state.draft || state.complete) {
+			return;
+		}
+		if (!state.stopRequested) {
+			state.statusBeforeStop = state.draft.draft.status;
+			state.stopRequested = true;
+		}
+		await state.draft.updateImmediately(l10n.t('Stopping…'), false);
 	}
 
 	private async safeAnswer(callbackQueryId: string, options: TelegramAnswerCallbackQueryOptions): Promise<void> {

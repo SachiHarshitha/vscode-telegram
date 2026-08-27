@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { ILogService } from '../../../platform/log/common/logService';
 import { createServiceIdentifier } from '../../../util/common/services';
 import {
+	cancelPendingCopilotCLIRequestContext,
 	clearPendingCopilotCLIRequestContext,
 	createPendingCopilotCLIRequestCorrelationId,
 	createPendingCopilotCLIRequestMarker,
@@ -24,6 +25,7 @@ export interface IRemotePromptDispatchResult {
 
 export interface IPreparedRemotePromptDispatch {
 	readonly correlationId: string;
+	cancel(): boolean;
 	start(): IRemotePromptDispatchResult;
 }
 
@@ -62,6 +64,7 @@ export class RemotePromptDispatcher implements IRemotePromptDispatcher {
 		let started = false;
 		return {
 			correlationId,
+			cancel: () => cancelPendingCopilotCLIRequestContext(sessionId, correlationId),
 			start: () => {
 				if (started) {
 					throw new Error('Remote prompt dispatch has already started.');

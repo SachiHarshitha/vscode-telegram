@@ -28,18 +28,32 @@ export interface TelegramBotActionRequest {
 
 export type TelegramBotActionParseResult = TelegramBotActionRequest | 'unknown-command' | undefined;
 
-export const QUICK_ACTIONS: Readonly<Record<string, TelegramBotAction>> = Object.freeze({
-	'＋ New': 'new',
-	'Sessions': 'sessions',
-	'Model': 'model',
-	'Status': 'status',
-	'Files': 'files',
-	'More': 'more',
-	'■ Stop': 'stop',
-	'Steer': 'steer',
-	'Reconnect': 'reconnect',
-	'Settings': 'settings',
-});
+export const TelegramReplyKeyboardLabel = Object.freeze({
+	NewSession: 'New session',
+	Sessions: 'Sessions',
+	Model: 'Model',
+	Status: 'Status',
+	Files: 'Files',
+	Help: 'Help',
+	Stop: 'Stop',
+	Steer: 'Steer',
+	Reconnect: 'Reconnect',
+	Settings: 'Settings',
+} as const);
+
+/** Exact reply-keyboard labels mapped to the slash commands they emulate. */
+export const TELEGRAM_REPLY_KEYBOARD_COMMAND_ALIASES: ReadonlyMap<string, string> = new Map([
+	[TelegramReplyKeyboardLabel.NewSession, '/new'],
+	[TelegramReplyKeyboardLabel.Sessions, '/sessions'],
+	[TelegramReplyKeyboardLabel.Model, '/model'],
+	[TelegramReplyKeyboardLabel.Status, '/status'],
+	[TelegramReplyKeyboardLabel.Files, '/files'],
+	[TelegramReplyKeyboardLabel.Help, '/help'],
+	[TelegramReplyKeyboardLabel.Stop, '/stop'],
+	[TelegramReplyKeyboardLabel.Steer, '/steer'],
+	[TelegramReplyKeyboardLabel.Reconnect, '/reconnect'],
+	[TelegramReplyKeyboardLabel.Settings, '/settings'],
+]);
 
 const commandActions: Readonly<Record<string, TelegramBotAction>> = Object.freeze({
 	start: 'start',
@@ -62,14 +76,11 @@ const commandActions: Readonly<Record<string, TelegramBotAction>> = Object.freez
 
 /** Normalizes slash commands and reply-keyboard labels into one application action. */
 export function parseTelegramBotAction(text: string): TelegramBotActionParseResult {
-	const quickAction = QUICK_ACTIONS[text];
-	if (quickAction) {
-		return { action: quickAction };
-	}
-	if (!text.startsWith('/')) {
+	const commandText = TELEGRAM_REPLY_KEYBOARD_COMMAND_ALIASES.get(text) ?? text;
+	if (!commandText.startsWith('/')) {
 		return undefined;
 	}
-	const match = /^\/([a-z_]+)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]+))?$/i.exec(text);
+	const match = /^\/([a-z_]+)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]+))?$/i.exec(commandText);
 	if (!match) {
 		return 'unknown-command';
 	}

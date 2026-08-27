@@ -147,7 +147,8 @@ class Editor extends Disposable {
 					break;
 				}
 				case 'revealComment': {
-					this.#commentsView?.revealComment(message.id);
+					// TODO: Remove this compatibility guard once upstream main requires a markdown-editor build that exposes CommentsView.revealComment.
+					(this.#commentsView as (CommentsView & { revealComment?: (id: string) => void }) | undefined)?.revealComment?.(message.id);
 					break;
 				}
 				case 'command': {
