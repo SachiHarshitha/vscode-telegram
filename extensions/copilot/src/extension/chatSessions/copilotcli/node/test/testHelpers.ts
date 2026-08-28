@@ -35,6 +35,7 @@ export class MockCliSdkSession {
 	};
 	public summary?: string;
 	private readonly eventHandlers = new Map<string, Set<(event: { type: string; data: unknown }) => void>>();
+	public context?: { cwd?: string; gitRoot?: string; repository?: string };
 	constructor(public readonly sessionId: string, public readonly startTime: Date) { }
 	getChatContextMessages(): Promise<{}[]> { return Promise.resolve(this.messages); }
 	getEvents(): {}[] { return this.events; }
@@ -66,7 +67,7 @@ export class MockCliSdkSession {
 	get permissions() {
 		return {
 			setRequired: (_required: boolean) => {
-	// no-op in tests
+				// no-op in tests
 			}
 		};
 	}
@@ -105,11 +106,11 @@ export class MockCliSdkSessionManager {
 		return Promise.resolve(undefined);
 	}
 	listSessions() {
-		return Promise.resolve(Array.from(this.sessions.values()).map(s => ({ sessionId: s.sessionId, startTime: s.startTime, modifiedTime: s.startTime, summary: s.summary, name: s.name, clientName: s.clientName })));
+		return Promise.resolve(Array.from(this.sessions.values()).map(s => ({ sessionId: s.sessionId, startTime: s.startTime, modifiedTime: s.startTime, summary: s.summary, name: s.name, clientName: s.clientName, context: s.context })));
 	}
 	getSessionMetadata({ sessionId }: { sessionId: string }) {
 		const session = this.sessions.get(sessionId);
-		return Promise.resolve(session ? { sessionId: session.sessionId, startTime: session.startTime, modifiedTime: session.startTime, summary: session.summary, name: session.name, clientName: session.clientName, isRemote: false } : undefined);
+		return Promise.resolve(session ? { sessionId: session.sessionId, startTime: session.startTime, modifiedTime: session.startTime, summary: session.summary, name: session.name, clientName: session.clientName, context: session.context, isRemote: false } : undefined);
 	}
 	deleteSession(id: string) { this.sessions.delete(id); return Promise.resolve(); }
 	closeSession(_id: string) { return Promise.resolve(); }
