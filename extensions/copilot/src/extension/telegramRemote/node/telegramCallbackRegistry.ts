@@ -25,6 +25,8 @@ const allowedCallbackActions = new Set<TelegramCallbackAction>([
 	'model.select',
 	'mode.select',
 	'file.browse',
+	'pending.steer',
+	'pending.cancel',
 ]);
 
 export type TelegramCallbackAction =
@@ -40,7 +42,9 @@ export type TelegramCallbackAction =
 	| 'plan.deny'
 	| 'model.select'
 	| 'mode.select'
-	| 'file.browse';
+	| 'file.browse'
+	| 'pending.steer'
+	| 'pending.cancel';
 
 export interface TelegramCallbackRegistration {
 	readonly callbackData: string;
