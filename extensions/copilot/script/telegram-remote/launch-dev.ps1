@@ -12,15 +12,27 @@ param(
 	[switch]$BuildClient,
 	[switch]$BuildExtensions,
 	[switch]$NoLaunch,
-	[switch]$RequireNativeRuntime
+	[switch]$RequireNativeRuntime,
+	[switch]$SkipDependencySync
 )
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\..'))
 $copilotExtensionRoot = Join-Path $repositoryRoot 'extensions\copilot'
-$nativeRuntimeFiles = @(
-	Join-Path $repositoryRoot 'node_modules\@vscode\deviceid\build\Release\windows.node'
-	Join-Path $repositoryRoot 'node_modules\@vscode\windows-registry\build\Release\winregistry.node'
+$nativeRuntimeModules = @(
+	@{ Package = '@vscode/deviceid'; RelativePath = 'node_modules\@vscode\deviceid\build\Release\windows.node' },
+	@{ Package = '@vscode/native-watchdog'; RelativePath = 'node_modules\@vscode\native-watchdog\build\Release\watchdog.node' },
+	@{ Package = '@vscode/policy-watcher'; RelativePath = 'node_modules\@vscode\policy-watcher\build\Release\vscode-policy-watcher.node' },
+	@{ Package = '@vscode/spdlog'; RelativePath = 'node_modules\@vscode\spdlog\build\Release\spdlog.node' },
+	@{ Package = '@vscode/sqlite3'; RelativePath = 'node_modules\@vscode\sqlite3\build\Release\vscode-sqlite3.node' },
+	@{ Package = '@vscode/windows-ca-certs'; RelativePath = 'node_modules\@vscode\windows-ca-certs\build\Release\crypt32.node' },
+	@{ Package = '@vscode/windows-mutex'; RelativePath = 'node_modules\@vscode\windows-mutex\build\Release\CreateMutex.node' },
+	@{ Package = '@vscode/windows-process-tree'; RelativePath = 'node_modules\@vscode\windows-process-tree\build\Release\windows_process_tree.node' },
+	@{ Package = '@vscode/windows-registry'; RelativePath = 'node_modules\@vscode\windows-registry\build\Release\winregistry.node' },
+	@{ Package = 'kerberos'; RelativePath = 'node_modules\kerberos\build\Release\kerberos.node' },
+	@{ Package = 'native-is-elevated'; RelativePath = 'node_modules\native-is-elevated\build\Release\iselevated.node' },
+	@{ Package = 'native-keymap'; RelativePath = 'node_modules\native-keymap\build\Release\keymapping.node' },
+	@{ Package = 'windows-foreground-love'; RelativePath = 'node_modules\windows-foreground-love\build\Release\foreground_love.node' }
 )
 
 function Invoke-CheckedCommand {
@@ -39,6 +51,96 @@ function Invoke-CheckedCommand {
 	}
 }
 
+function Get-LockedDependencyMismatches {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$PackageRoot
+	)
+
+	$lockfilePath = Join-Path $PackageRoot 'package-lock.json'
+	if (-not (Test-Path -LiteralPath $lockfilePath -PathType Leaf)) {
+		throw "Package lockfile does not exist: $lockfilePath"
+	}
+
+	$lockfile = Get-Content -LiteralPath $lockfilePath -Raw | ConvertFrom-Json -AsHashtable
+	$packages = $lockfile['packages']
+	$rootPackage = $packages['']
+	if (-not $packages -or -not $rootPackage) {
+		throw "Package lockfile has no root package metadata: $lockfilePath"
+	}
+
+	$dependencyNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+	foreach ($groupName in @('dependencies', 'devDependencies')) {
+		$group = $rootPackage[$groupName]
+		if (-not $group) {
+			continue
+		}
+		foreach ($dependencyName in $group.Keys) {
+			$dependencyNames.Add([string]$dependencyName) | Out-Null
+		}
+	}
+
+	$mismatches = [System.Collections.Generic.List[string]]::new()
+	foreach ($dependencyName in $dependencyNames) {
+		$lockEntry = $packages["node_modules/$dependencyName"]
+		$lockedVersion = if ($lockEntry) { [string]$lockEntry['version'] } else { $null }
+		if ([string]::IsNullOrWhiteSpace($lockedVersion)) {
+			$mismatches.Add("$dependencyName is missing a locked version")
+			continue
+		}
+
+		$installedPackagePath = Join-Path (Join-Path $PackageRoot 'node_modules') (Join-Path $dependencyName 'package.json')
+		if (-not (Test-Path -LiteralPath $installedPackagePath -PathType Leaf)) {
+			$mismatches.Add("$dependencyName is missing (locked $lockedVersion)")
+			continue
+		}
+
+		try {
+			$installedVersion = [string]((Get-Content -LiteralPath $installedPackagePath -Raw | ConvertFrom-Json).version)
+		} catch {
+			$mismatches.Add("$dependencyName has unreadable package metadata (locked $lockedVersion)")
+			continue
+		}
+		if ($installedVersion -ne $lockedVersion) {
+			$mismatches.Add("$dependencyName is $installedVersion (locked $lockedVersion)")
+		}
+	}
+
+	return @($mismatches)
+}
+
+function Ensure-LockedDependencies {
+	$targets = @(
+		@{ Label = 'repository'; Root = $repositoryRoot },
+		@{ Label = 'Copilot extension'; Root = $copilotExtensionRoot }
+	)
+
+	foreach ($target in $targets) {
+		$mismatches = @(Get-LockedDependencyMismatches -PackageRoot $target.Root)
+		if ($mismatches.Count -eq 0) {
+			continue
+		}
+
+		Write-Host "Synchronizing $($target.Label) dependencies with package-lock.json..."
+		$mismatches | Select-Object -First 8 | ForEach-Object { Write-Host "  - $_" }
+		if ($mismatches.Count -gt 8) {
+			Write-Host "  - and $($mismatches.Count - 8) more"
+		}
+
+		$arguments = if ($target.Root -eq $repositoryRoot) {
+			@('install', '--no-audit', '--no-fund')
+		} else {
+			@('--prefix', $target.Root, 'install', '--no-audit', '--no-fund')
+		}
+		Invoke-CheckedCommand -Command 'npm.cmd' -Arguments $arguments -Operation "$($target.Label) dependency synchronization"
+
+		$remaining = @(Get-LockedDependencyMismatches -PackageRoot $target.Root)
+		if ($remaining.Count -gt 0) {
+			throw "$($target.Label) dependencies still differ from package-lock.json: $($remaining -join '; ')"
+		}
+	}
+}
+
 function Resolve-ExistingDirectory {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -54,21 +156,68 @@ function Resolve-ExistingDirectory {
 }
 
 function Get-MissingNativeRuntimeFiles {
-	return @($nativeRuntimeFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+	return @(
+		Get-MissingNativeRuntimeModules | ForEach-Object {
+			Join-Path $repositoryRoot $_.RelativePath
+		}
+	)
 }
 
-function Test-Vs2022SpectreLibraries {
+function Get-MissingNativeRuntimeModules {
+	return @(
+		$nativeRuntimeModules | Where-Object {
+			-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $_.RelativePath) -PathType Leaf)
+		}
+	)
+}
+
+function Get-VisualStudioNativeToolchain {
 	$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 	if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
-		return $false
+		return $null
 	}
 
-	$installations = @(& $vswhere `
+	$installationJson = & $vswhere `
 		-products '*' `
-		-version '[17.0,18.0)' `
-		-requires 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre' `
-		-property installationPath)
-	return $installations.Count -gt 0
+		-requires 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' `
+		-latest `
+		-format json
+	$installation = @($installationJson | ConvertFrom-Json) | Select-Object -First 1
+	if (-not $installation) {
+		return $null
+	}
+
+	$requiredComponents = @(
+		@{
+			Id = 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre'
+			Label = 'C++ Spectre-mitigated libraries for x64/x86 (Latest MSVC)'
+		},
+		@{
+			Id = 'Microsoft.VisualStudio.Component.VC.ATL.Spectre'
+			Label = 'C++ ATL with Spectre mitigations for x64/x86 (Latest MSVC)'
+		},
+		@{
+			Id = 'Microsoft.VisualStudio.Component.VC.ATLMFC.Spectre'
+			Label = 'C++ MFC with Spectre mitigations for x64/x86 (Latest MSVC)'
+		}
+	)
+	$missingComponents = @(
+		foreach ($component in $requiredComponents) {
+			$matchingInstallations = @(& $vswhere `
+				-products '*' `
+				-requires $component.Id `
+				-property installationPath)
+			if ($matchingInstallations -notcontains $installation.installationPath) {
+				$component
+			}
+		}
+	)
+
+	return [PSCustomObject]@{
+		DisplayName = [string]$installation.displayName
+		InstallationPath = [string]$installation.installationPath
+		MissingSpectreComponents = $missingComponents
+	}
 }
 
 function Assert-BuildPrerequisites {
@@ -86,14 +235,21 @@ function Assert-BuildPrerequisites {
 		}
 	}
 
-	if ($NativeRuntimeRequired -and (Get-MissingNativeRuntimeFiles).Count -gt 0 -and -not (Test-Vs2022SpectreLibraries)) {
-		$problems += @"
-Code OSS native runtime modules are missing, and the required VS 2022 Spectre libraries are not installed.
-Open Visual Studio Installer, modify Visual Studio 2022, and add these Individual components:
-  - MSVC v143 - VS 2022 C++ x64/x86 Spectre-mitigated libs (Latest)
-  - C++ ATL for latest v143 build tools with Spectre Mitigations
-  - C++ MFC for latest v143 build tools with Spectre Mitigations
+	if ($NativeRuntimeRequired -and (Get-MissingNativeRuntimeFiles).Count -gt 0) {
+		$toolchain = Get-VisualStudioNativeToolchain
+		if (-not $toolchain) {
+			$problems += 'Code OSS native runtime modules are missing, but no Visual Studio installation with the x64/x86 C++ toolset was found.'
+		} elseif ($toolchain.MissingSpectreComponents.Count -gt 0) {
+			$missingComponentList = ($toolchain.MissingSpectreComponents | ForEach-Object { "  - $($_.Label)" }) -join "`n"
+			$problems += @"
+Code OSS native runtime modules are missing. node-gyp will use:
+  $($toolchain.DisplayName)
+  $($toolchain.InstallationPath)
+
+Open Visual Studio Installer, modify that exact installation, and add:
+$missingComponentList
 "@
+		}
 	}
 
 	if ($problems.Count -gt 0) {
@@ -157,16 +313,18 @@ function Initialize-DevelopmentProfileState {
 }
 
 function Ensure-NativeRuntimeModules {
-	$missingFiles = Get-MissingNativeRuntimeFiles
-	if ($missingFiles.Count -eq 0) {
+	$missingModules = @(Get-MissingNativeRuntimeModules)
+	if ($missingModules.Count -eq 0) {
 		return
 	}
 
 	Write-Host 'Rebuilding missing Code OSS native runtime modules...'
+	$missingModules | ForEach-Object { Write-Host "  - $($_.Package)" }
 	try {
+		$arguments = @('rebuild') + @($missingModules | ForEach-Object { $_.Package })
 		Invoke-CheckedCommand `
 			-Command 'npm.cmd' `
-			-Arguments @('rebuild', '@vscode/deviceid', '@vscode/windows-registry') `
+			-Arguments $arguments `
 			-Operation 'Native runtime rebuild'
 	} catch {
 		throw "Native runtime rebuild failed. Verify the VS Code Windows prerequisites, restart PowerShell, and retry. $($_.Exception.Message)"
@@ -200,13 +358,16 @@ New-Item -ItemType Directory -Force -Path $userDataPath, $extensionsPath | Out-N
 
 Push-Location $repositoryRoot
 try {
-	Assert-BuildPrerequisites -BuildRequested (-not $SkipBuild) -NativeRuntimeRequired $RequireNativeRuntime
-
-	if ($RequireNativeRuntime) {
-		Ensure-NativeRuntimeModules
-	} else {
-		Initialize-DevelopmentProfileState
+	$nativeRuntimeRequired = $RequireNativeRuntime -or -not $NoLaunch
+	Assert-BuildPrerequisites -BuildRequested (-not $SkipBuild) -NativeRuntimeRequired $nativeRuntimeRequired
+	if (-not $SkipBuild -and -not $SkipDependencySync) {
+		Ensure-LockedDependencies
 	}
+
+	if ($nativeRuntimeRequired) {
+		Ensure-NativeRuntimeModules
+	}
+	Initialize-DevelopmentProfileState
 
 	if (-not $SkipBuild) {
 		if ($Build) {

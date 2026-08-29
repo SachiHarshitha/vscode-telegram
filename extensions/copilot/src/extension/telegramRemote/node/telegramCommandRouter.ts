@@ -23,7 +23,7 @@ import type { TelegramCallbackConstraints, TelegramCallbackContext, TelegramCall
 import { buildControlKeyboard, removeControlKeyboard, type TelegramControlState } from './telegramControlKeyboards';
 import { TelegramControlUiState } from './telegramControlUiState';
 import { escapeTelegramHtml } from './telegramMarkdown';
-import { formatModel, type TelegramPreferenceValidationError, type TelegramRequestPreferenceController } from './telegramRequestPreferences';
+import { formatModel, type TelegramPreferenceValidationError, type TelegramPromptPreference, type TelegramRequestPreferenceController } from './telegramRequestPreferences';
 import { TelegramSessionState } from './telegramSessionState';
 
 const maximumSessionButtons = 30;
@@ -36,6 +36,7 @@ const maximumFilePreviewHtmlLength = 3_200;
 const maximumDisplayedFilePathLength = 256;
 const maximumTelegramMessageLength = 4_096;
 const maximumRememberedCallbackAnswers = 2_048;
+const pendingPromptCallbackLifetimeMs = 24 * 60 * 60_000;
 const emptyInlineKeyboard: TelegramInlineKeyboardMarkup = { inline_keyboard: [] };
 const modelPickerValue = 'picker:model';
 const modePickerValue = 'picker:mode';
@@ -134,6 +135,28 @@ interface ActiveDispatch {
 	stopRequested: boolean;
 }
 
+interface TelegramCapturedPrompt {
+	readonly sessionId: string;
+	readonly prompt: string;
+	readonly originRequestId: string;
+	readonly messageThreadId?: number;
+	readonly preference: TelegramPromptPreference;
+}
+
+type TelegramPendingPromptStatus = 'pending' | 'dispatching' | 'steering' | 'steered' | 'cancelled' | 'unavailable';
+
+interface TelegramPendingPrompt extends TelegramCapturedPrompt {
+	readonly id: string;
+	readonly pairingId: string;
+	readonly chatId: number;
+	readonly userMessageId: number;
+	readonly createdAt: number;
+	status: TelegramPendingPromptStatus;
+	statusMessageId?: number;
+	replyMarkup?: TelegramInlineKeyboardMarkup;
+	failure?: 'send' | 'steer';
+}
+
 interface AuthorizedSession {
 	readonly item: ICopilotCLISessionItem;
 	readonly scope: TelegramAuthorizedSessionScope;
@@ -167,6 +190,8 @@ export class TelegramCommandRouter extends Disposable {
 	private readonly provisionalSessions = new Map<string, ICopilotCLISessionItem>();
 	private readonly selectionRevisionIds = new Map<string, string>();
 	private readonly activeDispatches = new Map<string, ActiveDispatch>();
+	private readonly pendingPrompts = new Map<string, TelegramPendingPrompt>();
+	private readonly explicitSteerSessions = new Map<string, string>();
 	private readonly statusMessages = new Map<string, TrackedStatusMessage>();
 	private readonly visibleControlStates = new Map<string, TelegramControlState>();
 	private readonly sessionStatuses = new Map<string, ChatSessionStatus | undefined>();
@@ -270,6 +295,15 @@ export class TelegramCommandRouter extends Disposable {
 					return;
 				}
 				if (reply.kind === 'steer') {
+					this.explicitSteerSessions.delete(identity.pairingId);
+					await this.dispatchPrompt(update, identity, text);
+					return;
+				}
+			}
+			const explicitSteerSessionId = this.explicitSteerSessions.get(identity.pairingId);
+			if (explicitSteerSessionId) {
+				this.explicitSteerSessions.delete(identity.pairingId);
+				if (this.sessionState.getSelectedSessionId(identity) === explicitSteerSessionId) {
 					await this.dispatchPrompt(update, identity, text);
 					return;
 				}
@@ -277,7 +311,7 @@ export class TelegramCommandRouter extends Disposable {
 			if (await this.dispatchPendingNewSession(update, identity, text)) {
 				return;
 			}
-			await this.dispatchPrompt(update, identity, text);
+			await this.dispatchOrdinaryPrompt(update, identity, text);
 		} catch {
 			this.logService.error('[TelegramRemote] Authorized update routing failed; details were suppressed.');
 			await this.safeSend(identity.chatId, l10n.t('Telegram Remote could not complete that request. Refresh with /status and try again.'));
@@ -347,6 +381,43 @@ export class TelegramCommandRouter extends Disposable {
 		}
 
 		const callbackMessageId = callback.message?.message_id;
+		const pendingPrompt = this.pendingPrompts.get(identity.pairingId);
+		if (pendingPrompt?.status === 'pending' && callbackMessageId !== undefined && pendingPrompt.statusMessageId === callbackMessageId) {
+			const steer = this.host.consumeCallback(update, {
+				sessionId: pendingPrompt.sessionId,
+				requestId: pendingPrompt.id,
+				action: 'pending.steer',
+			});
+			if (steer) {
+				const taken = this.takePendingPrompt(identity, pendingPrompt.id, 'steering');
+				if (!taken) {
+					await this.safeAnswer(callback.id, { text: l10n.t('This pending prompt control is stale.'), showAlert: true });
+					return;
+				}
+				await this.safeAnswer(callback.id, { text: l10n.t('Steering…') });
+				await this.steerPendingPrompt(identity, taken);
+				return;
+			}
+
+			const cancel = this.host.consumeCallback(update, {
+				sessionId: pendingPrompt.sessionId,
+				requestId: pendingPrompt.id,
+				action: 'pending.cancel',
+			});
+			if (cancel) {
+				const taken = this.takePendingPrompt(identity, pendingPrompt.id, 'cancelled');
+				if (!taken) {
+					await this.safeAnswer(callback.id, { text: l10n.t('This pending prompt control is stale.'), showAlert: true });
+					return;
+				}
+				this.explicitSteerSessions.delete(identity.pairingId);
+				this.retirePendingPrompt(taken);
+				await this.safeAnswer(callback.id, { text: l10n.t('Pending prompt cancelled.') });
+				await this.renderPendingPrompt(taken);
+				return;
+			}
+		}
+
 		const statusMessage = this.statusMessages.get(identity.pairingId);
 		const newSessionRequestId = this.activeNewSessionRequestIds.get(identity.pairingId);
 		if (newSessionRequestId && callbackMessageId !== undefined && statusMessage?.messageId === callbackMessageId && statusMessage.chatId === identity.chatId) {
@@ -567,6 +638,7 @@ export class TelegramCommandRouter extends Disposable {
 		if (!scope) {
 			throw new Error('Created Telegram session is outside the authorized workspace.');
 		}
+		await this.retirePendingPromptForIdentity(identity, 'unavailable');
 		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		this.provisionalSessions.set(item.id, item);
@@ -915,9 +987,15 @@ export class TelegramCommandRouter extends Disposable {
 	}
 
 	private async sendSteeringHint(identity: TelegramPairedIdentity): Promise<void> {
-		await this.safeSend(identity.chatId, this.getControlState(identity) === 'running'
-			? l10n.t('Send your instruction as a new message or reply to the active Copilot activity.')
-			: l10n.t('There is no active Copilot task to steer.'));
+		const selected = await this.getValidSelectedSession(identity);
+		const active = this.activeDispatches.get(identity.pairingId);
+		if (!selected || (!isSessionRunning(selected.item.status) && active?.sessionId !== selected.item.id)) {
+			this.explicitSteerSessions.delete(identity.pairingId);
+			await this.safeSend(identity.chatId, l10n.t('There is no active Copilot task to steer.'));
+			return;
+		}
+		this.explicitSteerSessions.set(identity.pairingId, selected.item.id);
+		await this.safeSend(identity.chatId, l10n.t('Send your next instruction as a new message or reply to the active Copilot activity.'));
 	}
 
 	private getControlState(identity: TelegramPairedIdentity): TelegramControlState {
@@ -974,6 +1052,7 @@ export class TelegramCommandRouter extends Disposable {
 			await this.sendStatusMessage(identity, l10n.t('That Copilot session is unavailable in the authorized workspace. Run /sessions to refresh the list.'));
 			return false;
 		}
+		await this.retirePendingPromptForIdentity(identity, 'unavailable');
 		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		await this.sessionState.select(identity, item.id, scope.fingerprint);
@@ -984,6 +1063,7 @@ export class TelegramCommandRouter extends Disposable {
 
 	private async deselect(identity: TelegramPairedIdentity): Promise<void> {
 		const selectedSessionId = this.sessionState.getSelectedSessionId(identity);
+		await this.retirePendingPromptForIdentity(identity, 'unavailable');
 		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		const removed = await this.sessionState.deselect(identity);
@@ -997,33 +1077,70 @@ export class TelegramCommandRouter extends Disposable {
 	}
 
 	private async dispatchPrompt(update: TelegramUpdate, identity: TelegramPairedIdentity, prompt: string): Promise<void> {
+		const captured = await this.capturePrompt(update, identity, prompt);
+		if (captured) {
+			await this.dispatchCapturedPrompt(identity, captured.session, captured.prompt);
+		}
+	}
+
+	private async dispatchOrdinaryPrompt(update: TelegramUpdate, identity: TelegramPairedIdentity, prompt: string): Promise<void> {
+		if (this.pendingPrompts.has(identity.pairingId)) {
+			await this.safeSend(identity.chatId, l10n.t('A prompt is already pending. Use "Steer now" or "Cancel" on the pending prompt before sending another queued request.'));
+			return;
+		}
+		const captured = await this.capturePrompt(update, identity, prompt);
+		if (!captured) {
+			return;
+		}
+		const statusIsRunning = isSessionRunning(captured.session.item.status);
+		const active = this.activeDispatches.get(identity.pairingId);
+		if (statusIsRunning || active?.sessionId === captured.session.item.id) {
+			await this.createPendingPrompt(update, identity, captured.prompt, statusIsRunning);
+			return;
+		}
+		await this.dispatchCapturedPrompt(identity, captured.session, captured.prompt);
+	}
+
+	private async capturePrompt(update: TelegramUpdate, identity: TelegramPairedIdentity, prompt: string): Promise<{ readonly session: AuthorizedSession; readonly prompt: TelegramCapturedPrompt } | undefined> {
 		if (prompt.length > maximumPromptLength) {
 			await this.safeSend(identity.chatId, l10n.t('That prompt is too long. Shorten it and try again.'));
-			return;
+			return undefined;
 		}
 		const selected = await this.getValidSelectedSession(identity);
 		if (!selected) {
 			await this.safeSend(identity.chatId, l10n.t('No Copilot session is selected. Use /sessions before sending a prompt.'));
-			return;
+			return undefined;
 		}
 		const preference = await this.requestPreferences.consumeForDispatch(identity, selected.item.id);
 		if (preference.kind === 'invalid') {
 			await this.safeSend(identity.chatId, preferenceErrorMessage(preference.error));
-			return;
+			return undefined;
 		}
+		return {
+			session: selected,
+			prompt: {
+				sessionId: selected.item.id,
+				prompt,
+				originRequestId: String(update.update_id),
+				messageThreadId: update.message?.message_thread_id,
+				preference: preference.value,
+			},
+		};
+	}
 
+	private async dispatchCapturedPrompt(identity: TelegramPairedIdentity, selected: AuthorizedSession, captured: TelegramCapturedPrompt): Promise<void> {
 		const previous = this.activeDispatches.get(identity.pairingId);
 		if (previous) {
 			this.host.invalidateRequestCallbacks(previous.sessionId, previous.requestId);
 			await this.activity.completeRequest(identity, previous.sessionId, previous.requestId, 'superseded');
 		}
-		const origin = this.registry.createRequestOrigin('telegram', String(update.update_id), preference.value.mode);
-		const prepared = preference.value.modelId
-			? this.promptDispatcher.prepare(selected.item.id, prompt, origin, { modelId: preference.value.modelId, modelSource: preference.value.modelSource, reasoningEffort: preference.value.reasoningEffort })
-			: this.promptDispatcher.prepare(selected.item.id, prompt, origin);
+		const origin = this.registry.createRequestOrigin('telegram', captured.originRequestId, captured.preference.mode);
+		const prepared = captured.preference.modelId
+			? this.promptDispatcher.prepare(selected.item.id, captured.prompt, origin, { modelId: captured.preference.modelId, modelSource: captured.preference.modelSource, reasoningEffort: captured.preference.reasoningEffort })
+			: this.promptDispatcher.prepare(selected.item.id, captured.prompt, origin);
 		let activity: TelegramRequestActivityStart | undefined;
 		try {
-			activity = await this.activity.beginRequest(identity, selected.item, prepared.correlationId, emptyInlineKeyboard, update.message?.message_thread_id);
+			activity = await this.activity.beginRequest(identity, selected.item, prepared.correlationId, emptyInlineKeyboard, captured.messageThreadId);
 		} catch (error) {
 			throw error;
 		}
@@ -1050,7 +1167,191 @@ export class TelegramCommandRouter extends Disposable {
 		void result.completion.catch(() => active.stopRequested ? undefined : this.finishDispatch(identity, active, 'failed'));
 	}
 
+	private async createPendingPrompt(update: TelegramUpdate, identity: TelegramPairedIdentity, captured: TelegramCapturedPrompt, statusWasRunning: boolean): Promise<void> {
+		const userMessageId = update.message?.message_id;
+		if (userMessageId === undefined) {
+			const selected = await this.getValidSelectedSession(identity);
+			if (selected?.item.id === captured.sessionId) {
+				await this.dispatchCapturedPrompt(identity, selected, captured);
+			}
+			return;
+		}
+
+		const pending: TelegramPendingPrompt = {
+			...captured,
+			id: randomUUID(),
+			pairingId: identity.pairingId,
+			chatId: identity.chatId,
+			userMessageId,
+			createdAt: Date.now(),
+			status: 'pending',
+		};
+		this.pendingPrompts.set(identity.pairingId, pending);
+		pending.replyMarkup = this.registerPendingPromptCallbacks(identity, pending);
+		const message = await this.safeSend(identity.chatId, this.pendingPromptText(pending), {
+			replyMarkup: pending.replyMarkup,
+			replyParameters: { message_id: userMessageId, allow_sending_without_reply: true },
+		});
+		if (!message) {
+			if (this.pendingPrompts.get(identity.pairingId) === pending && pending.status === 'pending') {
+				this.retirePendingPrompt(pending);
+			}
+			return;
+		}
+		pending.statusMessageId = message.message_id;
+		if (pending.status !== 'pending') {
+			await this.renderPendingPrompt(pending);
+			return;
+		}
+		if (pending.failure) {
+			await this.renderPendingPrompt(pending, pending.replyMarkup);
+			return;
+		}
+
+		if (statusWasRunning && !isSessionRunning(this.sessionStatuses.get(captured.sessionId))) {
+			const taken = this.takePendingPrompt(identity, pending.id, 'dispatching');
+			if (taken) {
+				await this.sendPendingPrompt(identity, taken);
+			}
+		}
+	}
+
+	private registerPendingPromptCallbacks(identity: TelegramPairedIdentity, pending: TelegramPendingPrompt): TelegramInlineKeyboardMarkup {
+		const steer = this.host.registerCallback({
+			identity,
+			sessionId: pending.sessionId,
+			requestId: pending.id,
+			action: 'pending.steer',
+			lifetimeMs: pendingPromptCallbackLifetimeMs,
+		});
+		const cancel = this.host.registerCallback({
+			identity,
+			sessionId: pending.sessionId,
+			requestId: pending.id,
+			action: 'pending.cancel',
+			lifetimeMs: pendingPromptCallbackLifetimeMs,
+		});
+		return { inline_keyboard: [[
+			{ text: l10n.t('Steer now'), callback_data: steer.callbackData },
+			{ text: l10n.t('Cancel'), callback_data: cancel.callbackData },
+		]] };
+	}
+
+	private takePendingPrompt(identity: TelegramPairedIdentity, pendingId: string, status: 'dispatching' | 'steering' | 'cancelled'): TelegramPendingPrompt | undefined {
+		const pending = this.pendingPrompts.get(identity.pairingId);
+		if (!pending || pending.id !== pendingId || pending.status !== 'pending') {
+			return undefined;
+		}
+		pending.status = status;
+		pending.failure = undefined;
+		pending.replyMarkup = undefined;
+		this.host.invalidateRequestCallbacks(pending.sessionId, pending.id);
+		return pending;
+	}
+
+	private retirePendingPrompt(pending: TelegramPendingPrompt): void {
+		if (this.pendingPrompts.get(pending.pairingId) === pending) {
+			this.pendingPrompts.delete(pending.pairingId);
+		}
+		this.host.invalidateRequestCallbacks(pending.sessionId, pending.id);
+	}
+
+	private async steerPendingPrompt(identity: TelegramPairedIdentity, pending: TelegramPendingPrompt): Promise<void> {
+		await this.renderPendingPrompt(pending);
+		const selected = await this.getAuthorizedPendingSession(identity, pending);
+		if (!selected) {
+			await this.makePendingPromptUnavailable(pending);
+			return;
+		}
+		try {
+			await this.dispatchCapturedPrompt(identity, selected, pending);
+			pending.status = 'steered';
+			this.retirePendingPrompt(pending);
+			await this.renderPendingPrompt(pending);
+		} catch {
+			await this.restorePendingPrompt(identity, pending, 'steer');
+		}
+	}
+
+	private async sendPendingPrompt(identity: TelegramPairedIdentity, pending: TelegramPendingPrompt): Promise<void> {
+		await this.renderPendingPrompt(pending);
+		const selected = await this.getAuthorizedPendingSession(identity, pending);
+		if (!selected) {
+			await this.makePendingPromptUnavailable(pending);
+			return;
+		}
+		try {
+			await this.dispatchCapturedPrompt(identity, selected, pending);
+			this.retirePendingPrompt(pending);
+		} catch {
+			await this.restorePendingPrompt(identity, pending, 'send');
+		}
+	}
+
+	private async getAuthorizedPendingSession(identity: TelegramPairedIdentity, pending: TelegramPendingPrompt): Promise<AuthorizedSession | undefined> {
+		if (!this.isCurrentAuthorizedIdentity(identity) || this.sessionState.getSelectedSessionId(identity) !== pending.sessionId) {
+			return undefined;
+		}
+		const selected = await this.getValidSelectedSession(identity);
+		return selected?.item.id === pending.sessionId ? selected : undefined;
+	}
+
+	private async restorePendingPrompt(identity: TelegramPairedIdentity, pending: TelegramPendingPrompt, failure: 'send' | 'steer'): Promise<void> {
+		if (!this.isCurrentAuthorizedIdentity(identity) || this.sessionState.getSelectedSessionId(identity) !== pending.sessionId
+			|| this.pendingPrompts.get(identity.pairingId) !== pending) {
+			await this.makePendingPromptUnavailable(pending);
+			return;
+		}
+		pending.status = 'pending';
+		pending.failure = failure;
+		pending.replyMarkup = this.registerPendingPromptCallbacks(identity, pending);
+		await this.renderPendingPrompt(pending, pending.replyMarkup);
+	}
+
+	private async makePendingPromptUnavailable(pending: TelegramPendingPrompt): Promise<void> {
+		pending.status = 'unavailable';
+		pending.failure = undefined;
+		pending.replyMarkup = undefined;
+		this.retirePendingPrompt(pending);
+		await this.renderPendingPrompt(pending);
+	}
+
+	private async renderPendingPrompt(pending: TelegramPendingPrompt, replyMarkup: TelegramInlineKeyboardMarkup = emptyInlineKeyboard): Promise<void> {
+		if (pending.statusMessageId === undefined) {
+			return;
+		}
+		try {
+			await this.host.editMessageText(pending.chatId, pending.statusMessageId, this.pendingPromptText(pending), { replyMarkup });
+		} catch (error) {
+			this.logService.warn(`[TelegramRemote] pending-prompt-edit=failed ${formatTelegramApiFailure(error)}`);
+		}
+	}
+
+	private pendingPromptText(pending: TelegramPendingPrompt): string {
+		switch (pending.status) {
+			case 'pending':
+				if (pending.failure === 'steer') {
+					return l10n.t('⚠ Could not steer the request.\n\nThe prompt is still pending.');
+				}
+				if (pending.failure === 'send') {
+					return l10n.t('⚠ Could not send the pending request.\n\nThe prompt is still pending.');
+				}
+				return l10n.t('⏳ Pending\n\nWaiting for the current Copilot turn.');
+			case 'dispatching':
+				return l10n.t('▶ Sending…');
+			case 'steering':
+				return l10n.t('↪ Steering current request…');
+			case 'steered':
+				return l10n.t('↪ Steered');
+			case 'cancelled':
+				return l10n.t('✕ Pending prompt cancelled');
+			case 'unavailable':
+				return l10n.t('The pending Copilot request is no longer available in the authorized workspace.');
+		}
+	}
+
 	private async stopActiveDispatch(identity: TelegramPairedIdentity): Promise<boolean> {
+		this.explicitSteerSessions.delete(identity.pairingId);
 		const active = this.activeDispatches.get(identity.pairingId);
 		const selected = await this.getValidSelectedSession(identity);
 		const selectedIsRunning = !!selected && isSessionRunning(selected.item.status);
@@ -1099,6 +1400,7 @@ export class TelegramCommandRouter extends Disposable {
 			this.sessionStatuses.set(item.id, item.status);
 			return { item, scope };
 		}
+		await this.retirePendingPromptForIdentity(identity, 'unavailable');
 		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		await this.sessionState.deselect(identity);
@@ -1127,11 +1429,13 @@ export class TelegramCommandRouter extends Disposable {
 		const previous = this.currentIdentity;
 		this.currentIdentity = identity;
 		if (!identity && previous) {
+			this.retirePendingPromptWithoutRendering(previous.pairingId);
 			this.invalidateRoutingState(previous);
 			this.runBackground('clear revoked session selection', this.sessionState.clearIdentity(previous));
 			this.runBackground('clear revoked quick controls', this.controlUiState.clearIdentity(previous));
 			this.visibleControlStates.delete(previous.pairingId);
-		} else if (identity && previous && identity.pairingId !== previous.pairingId) {
+		} else if (identity && previous && (identity.pairingId !== previous.pairingId || identity.userId !== previous.userId || identity.chatId !== previous.chatId)) {
+			this.retirePendingPromptWithoutRendering(previous.pairingId);
 			this.invalidateRoutingState(previous);
 			this.runBackground('clear replaced quick controls', this.controlUiState.clearIdentity(previous));
 			this.visibleControlStates.delete(previous.pairingId);
@@ -1147,13 +1451,38 @@ export class TelegramCommandRouter extends Disposable {
 		if (!await this.sessionState.clearSession(sessionId) || !identity || !wasSelected || !this.host.isAcceptingUpdates) {
 			return;
 		}
+		await this.retirePendingPromptForIdentity(identity, 'unavailable');
 		await this.supersedeActiveDispatch(identity);
 		this.invalidateRoutingState(identity);
 		await this.safeSend(identity.chatId, l10n.t('The remotely selected Copilot session was deleted. Use /sessions to select another session.'));
 	}
 
 	private async handleSessionChanged(item: ICopilotCLISessionItem): Promise<void> {
+		const previousStatus = this.sessionStatuses.get(item.id);
 		this.sessionStatuses.set(item.id, item.status);
+		if (!isSessionRunning(previousStatus) || isSessionRunning(item.status)) {
+			return;
+		}
+		const identity = this.currentIdentity;
+		if (!identity || !this.isCurrentAuthorizedIdentity(identity) || this.sessionState.getSelectedSessionId(identity) !== item.id) {
+			return;
+		}
+		if (this.explicitSteerSessions.get(identity.pairingId) === item.id) {
+			this.explicitSteerSessions.delete(identity.pairingId);
+		}
+		const candidate = this.pendingPrompts.get(identity.pairingId);
+		if (!candidate || candidate.sessionId !== item.id) {
+			return;
+		}
+		const pending = this.takePendingPrompt(identity, candidate.id, 'dispatching');
+		if (!pending) {
+			return;
+		}
+		const active = this.activeDispatches.get(identity.pairingId);
+		if (active?.sessionId === item.id) {
+			await this.finishDispatch(identity, active, item.status === ChatSessionStatus.Failed ? 'failed' : 'completed');
+		}
+		await this.sendPendingPrompt(identity, pending);
 	}
 
 	private enqueueSessionStatusRefresh(item: ICopilotCLISessionItem): void {
@@ -1166,6 +1495,7 @@ export class TelegramCommandRouter extends Disposable {
 		const drainingSessionId = this.activity.closeRemoteConnection();
 		const identity = this.currentIdentity;
 		if (identity) {
+			this.runBackground('cancel pending prompt', this.retirePendingPromptForIdentity(identity, 'cancelled'));
 			this.runBackground('show disconnected quick controls', this.sendControlKeyboardState(identity, 'disconnected', l10n.t('Telegram Remote disconnected. Reconnect from VS Code to continue.')));
 		}
 		this.activePickerRequestIds.clear();
@@ -1196,6 +1526,8 @@ export class TelegramCommandRouter extends Disposable {
 
 	private invalidateRoutingState(identity: TelegramPairedIdentity): void {
 		this.host.invalidateAllCallbacks();
+		this.explicitSteerSessions.delete(identity.pairingId);
+		this.retirePendingPromptWithoutRendering(identity.pairingId);
 		this.activePickerRequestIds.delete(identity.pairingId);
 		this.activeModelRequestIds.delete(identity.pairingId);
 		this.activeModeRequestIds.delete(identity.pairingId);
@@ -1209,6 +1541,25 @@ export class TelegramCommandRouter extends Disposable {
 		this.pendingNewSessionRoots.delete(identity.pairingId);
 		this.selectionRevisionIds.delete(identity.pairingId);
 		this.activeDispatches.delete(identity.pairingId);
+	}
+
+	private async retirePendingPromptForIdentity(identity: TelegramPairedIdentity, status: 'cancelled' | 'unavailable'): Promise<void> {
+		const pending = this.pendingPrompts.get(identity.pairingId);
+		if (!pending) {
+			return;
+		}
+		pending.status = status;
+		pending.failure = undefined;
+		pending.replyMarkup = undefined;
+		this.retirePendingPrompt(pending);
+		await this.renderPendingPrompt(pending);
+	}
+
+	private retirePendingPromptWithoutRendering(pairingId: string): void {
+		const pending = this.pendingPrompts.get(pairingId);
+		if (pending) {
+			this.retirePendingPrompt(pending);
+		}
 	}
 
 	private rotateSelectionRevision(identity: TelegramPairedIdentity): string {
@@ -1311,6 +1662,14 @@ export class TelegramCommandRouter extends Disposable {
 
 	private runBackground(operation: string, promise: Promise<unknown>): void {
 		void promise.catch(() => this.logService.error(`[TelegramRemote] Failed to ${operation}; details were suppressed.`));
+	}
+
+	public override dispose(): void {
+		for (const pending of [...this.pendingPrompts.values()]) {
+			this.retirePendingPrompt(pending);
+		}
+		this.explicitSteerSessions.clear();
+		super.dispose();
 	}
 }
 
