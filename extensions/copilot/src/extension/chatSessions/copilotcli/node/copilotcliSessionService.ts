@@ -76,6 +76,14 @@ export interface ICopilotCLISessionItem {
 	readonly status?: ChatSessionStatus;
 	readonly workingDirectory?: Uri;
 }
+
+export interface ICopilotCLIRemoteSessionItem extends ICopilotCLISessionItem {
+	readonly source: 'extensionHost' | 'agentHost';
+}
+
+export type CopilotCLIAgentHostForkResult =
+	| { readonly kind: 'forked'; readonly sessionId: string }
+	| { readonly kind: 'inUse' | 'unavailable' };
 export type ExtendedChatRequest = ChatRequest & { prompt: string };
 export type ISessionOptions = {
 	model?: string;
@@ -108,6 +116,8 @@ export interface ICopilotCLISessionService {
 	getSessionItem(sessionId: string, token: CancellationToken): Promise<ICopilotCLISessionItem | undefined>;
 	getSessionTitle(sessionId: string, token: CancellationToken): Promise<string>;
 	getAllSessions(token: CancellationToken): Promise<readonly ICopilotCLISessionItem[]>;
+	getRemoteControlSessions(token: CancellationToken): Promise<readonly ICopilotCLIRemoteSessionItem[]>;
+	getRemoteControlSessionItem(sessionId: string, token: CancellationToken): Promise<ICopilotCLIRemoteSessionItem | undefined>;
 	getSelectedModelId(sessionId: string, token: CancellationToken): Promise<string | undefined>;
 
 	// SDK session management
@@ -124,6 +134,7 @@ export interface ICopilotCLISessionService {
 	createSession(options: ICreateSessionOptions, token: CancellationToken): Promise<IReference<ICopilotCLISession>>;
 	getChatHistory(options: { sessionId: string; workspace: IWorkspaceInfo }, token: CancellationToken): Promise<(ChatRequestTurn2 | ChatResponseTurn2)[]>;
 	forkSession(options: { sessionId: string; requestId: string | undefined; workspace: IWorkspaceInfo }, token: CancellationToken): Promise<string>;
+	forkAgentHostSession(sessionId: string, token: CancellationToken): Promise<CopilotCLIAgentHostForkResult>;
 	tryGetPartialSessionHistory(sessionId: string): Promise<readonly (ChatRequestTurn2 | ChatResponseTurn2)[] | undefined>;
 }
 
@@ -344,7 +355,7 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 		if (!metadata || token.isCancellationRequested) {
 			return;
 		}
-		if (metadata.clientName === AGENT_HOST_COPILOT_CLIENT_NAME) {
+		if (metadata.clientName === AGENT_HOST_COPILOT_CLIENT_NAME && !await this._isExtensionHostFork(sessionId)) {
 			return;
 		}
 		await this._sessionTracker.initialize();
@@ -444,6 +455,65 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 		}
 	}
 
+	private _isAgentHostOwnedSession(metadata: LocalSessionMetadata, agentHostOwnedSessionIds: ReadonlySet<string>): boolean {
+		const sanitizedSessionId = metadata.sessionId.replace(/[^a-zA-Z0-9_.-]/g, '-');
+		return metadata.clientName === AGENT_HOST_COPILOT_CLIENT_NAME || agentHostOwnedSessionIds.has(sanitizedSessionId);
+	}
+
+	private async _isExtensionHostFork(sessionId: string): Promise<boolean> {
+		if (this._vscodeOriginSessionIds.has(sessionId)) {
+			return true;
+		}
+		return (await this._chatSessionMetadataStore.getSessionParentId(sessionId))?.kind === 'forked';
+	}
+
+	private async _constructRemoteControlSessionItem(metadata: LocalSessionMetadata, token: CancellationToken): Promise<ICopilotCLIRemoteSessionItem | undefined> {
+		const workingDirectory = metadata.context?.cwd ? URI.file(metadata.context.cwd) : undefined;
+		if (!workingDirectory) {
+			return undefined;
+		}
+		const label = await this.getSessionTitleImpl(metadata.sessionId, metadata, token) || metadata.name || labelFromPrompt(metadata.summary ?? '') || metadata.sessionId;
+		const startTime = metadata.startTime.getTime();
+		return {
+			id: metadata.sessionId,
+			label,
+			timing: { created: startTime, startTime, endTime: metadata.modifiedTime.getTime() },
+			workingDirectory,
+			source: 'agentHost',
+		};
+	}
+
+	public async getRemoteControlSessions(token: CancellationToken): Promise<readonly ICopilotCLIRemoteSessionItem[]> {
+		const extensionHostSessions = await this.getAllSessions(token);
+		const result: ICopilotCLIRemoteSessionItem[] = extensionHostSessions.map(item => ({ ...item, source: 'extensionHost' }));
+		const knownSessionIds = new Set(result.map(item => item.id));
+		const sessionManager = await raceCancellationError(this.getSessionManager(), token);
+		const metadataList = await raceCancellationError(sessionManager.listSessions(), token);
+		const agentHostOwnedSessionIds = await this._getAgentHostOwnedSessionIds(this._getAgentHostSessionDataDir());
+		const limiter = new Limiter<ICopilotCLIRemoteSessionItem | undefined>(SESSION_LIST_MAX_PARALLELISM);
+		const agentHostSessions = coalesce(await Promise.all(metadataList.map(metadata => limiter.queue(async () => {
+			if (knownSessionIds.has(metadata.sessionId) || !this._isAgentHostOwnedSession(metadata, agentHostOwnedSessionIds)) {
+				return undefined;
+			}
+			return this._constructRemoteControlSessionItem(metadata, token);
+		}))));
+		return result.concat(agentHostSessions);
+	}
+
+	public async getRemoteControlSessionItem(sessionId: string, token: CancellationToken): Promise<ICopilotCLIRemoteSessionItem | undefined> {
+		const sessionManager = await raceCancellation(this.getSessionManager(), token);
+		const metadata = sessionManager ? await raceCancellationError(sessionManager.getSessionMetadata({ sessionId }), token) : undefined;
+		if (!metadata || token.isCancellationRequested) {
+			return undefined;
+		}
+		const agentHostOwnedSessionIds = await this._getAgentHostOwnedSessionIds(this._getAgentHostSessionDataDir());
+		if (this._isAgentHostOwnedSession(metadata, agentHostOwnedSessionIds) && !await this._isExtensionHostFork(sessionId)) {
+			return this._constructRemoteControlSessionItem(metadata, token);
+		}
+		const extensionHostItem = await this.getSessionItem(sessionId, token);
+		return extensionHostItem ? { ...extensionHostItem, source: 'extensionHost' } : undefined;
+	}
+
 	async _getAllSessions(token: CancellationToken): Promise<readonly ICopilotCLISessionItem[]> {
 		this._isGettingSessions++;
 		try {
@@ -463,8 +533,7 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 			const limiter = new Limiter<ICopilotCLISessionItem | undefined>(SESSION_LIST_MAX_PARALLELISM);
 			const diskSessions: ICopilotCLISessionItem[] = coalesce(await Promise.all(
 				sessionMetadataList.map(metadata => limiter.queue(async (): Promise<ICopilotCLISessionItem | undefined> => {
-					const sanitizedSessionId = metadata.sessionId.replace(/[^a-zA-Z0-9_.-]/g, '-');
-					if (metadata.clientName === AGENT_HOST_COPILOT_CLIENT_NAME || agentHostOwnedSessionIds.has(sanitizedSessionId)) {
+					if (this._isAgentHostOwnedSession(metadata, agentHostOwnedSessionIds) && !await this._isExtensionHostFork(metadata.sessionId)) {
 						return;
 					}
 					const workingDirectory = metadata.context?.cwd ? URI.file(metadata.context.cwd) : undefined;
@@ -1117,6 +1186,33 @@ export class CopilotCLISessionService extends Disposable implements ICopilotCLIS
 
 		return newSessionId;
 	}
+
+	public async forkAgentHostSession(sessionId: string, token: CancellationToken): Promise<CopilotCLIAgentHostForkResult> {
+		const sessionManager = await raceCancellationError(this.getSessionManager(), token);
+		const metadata = await raceCancellationError(sessionManager.getSessionMetadata({ sessionId }), token);
+		if (!metadata?.context?.cwd) {
+			return { kind: 'unavailable' };
+		}
+		const agentHostOwnedSessionIds = await this._getAgentHostOwnedSessionIds(this._getAgentHostSessionDataDir());
+		if (!this._isAgentHostOwnedSession(metadata, agentHostOwnedSessionIds) || await this._isExtensionHostFork(sessionId)) {
+			return { kind: 'unavailable' };
+		}
+
+		const alreadyInUse = await raceCancellationError(sessionManager.registerSessionInUse(sessionId), token);
+		try {
+			if (alreadyInUse) {
+				return { kind: 'inUse' };
+			}
+			const workspace = { ...emptyWorkspaceInfo(), folder: URI.file(metadata.context.cwd) };
+			const forkedSessionId = await this.forkSession({ sessionId, requestId: undefined, workspace }, token);
+			return { kind: 'forked', sessionId: forkedSessionId };
+		} finally {
+			await sessionManager.releaseSessionLock(sessionId).catch(error => {
+				this.logService.warn(`[CopilotCLISession] Failed to release source session lock ${sessionId} after remote-control fork: ${error}`);
+			});
+		}
+	}
+
 	public async tryGetPartialSessionHistory(sessionId: string): Promise<readonly (ChatRequestTurn2 | ChatResponseTurn2)[] | undefined> {
 		const cached = this._partialSessionHistories.get(sessionId);
 		if (cached) {
