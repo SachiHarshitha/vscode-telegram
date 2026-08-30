@@ -11,7 +11,7 @@ import type { Event } from '../../../util/vs/base/common/event';
 import { Disposable, IDisposable } from '../../../util/vs/base/common/lifecycle';
 import { basename } from '../../../util/vs/base/common/resources';
 import { ChatSessionStatus } from '../../../vscodeTypes';
-import type { ICopilotCLISessionItem, ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
+import type { ICopilotCLIRemoteSessionItem, ICopilotCLISessionItem, ICopilotCLISessionService } from '../../chatSessions/copilotcli/node/copilotcliSessionService';
 import type { IRemoteControlRegistry, RemoteNonElevatingMode, RemoteRequestOrigin } from '../../remoteControl/common/remoteControlTypes';
 import type { TelegramModelSource } from '../common/telegramLanguageModelBridgeTypes';
 import type { TelegramWorkspaceFileBrowser } from '../common/telegramFileBrowser';
@@ -159,6 +159,11 @@ interface TelegramPendingPrompt extends TelegramCapturedPrompt {
 
 interface AuthorizedSession {
 	readonly item: ICopilotCLISessionItem;
+	readonly scope: TelegramAuthorizedSessionScope;
+}
+
+interface AuthorizedRemoteSession {
+	readonly item: ICopilotCLIRemoteSessionItem;
 	readonly scope: TelegramAuthorizedSessionScope;
 }
 
@@ -450,6 +455,12 @@ export class TelegramCommandRouter extends Disposable {
 			if (selection) {
 				const selected = await this.selectSession(identity, selection.sessionId);
 				await this.safeAnswer(callback.id, { text: selected ? l10n.t('Session selected.') : l10n.t('That session is outside the authorized workspace.'), showAlert: !selected });
+				return;
+			}
+			const fork = this.host.consumeCallback(update, { requestId: pickerRequestId, action: 'session.fork' });
+			if (fork) {
+				await this.safeAnswer(callback.id, { text: l10n.t('Preparing a Remote Pilot session…') });
+				await this.forkAndSelectAgentHostSession(identity, fork.sessionId);
 				return;
 			}
 		}
@@ -1018,9 +1029,12 @@ export class TelegramCommandRouter extends Disposable {
 	}
 
 	private async sendSessionPicker(identity: TelegramPairedIdentity): Promise<void> {
-		const sessions = [...await this.sessionService.getAllSessions(CancellationToken.None)]
+		const remoteSessions = typeof this.sessionService.getRemoteControlSessions === 'function'
+			? await this.sessionService.getRemoteControlSessions(CancellationToken.None)
+			: (await this.sessionService.getAllSessions(CancellationToken.None)).map(item => ({ ...item, source: 'extensionHost' as const }));
+		const sessions = [...remoteSessions]
 			.map(item => ({ item, scope: this.sessionScopePolicy.authorizeSession(item) }))
-			.filter((candidate): candidate is AuthorizedSession => !!candidate.scope)
+			.filter((candidate): candidate is AuthorizedRemoteSession => !!candidate.scope)
 			.sort((left, right) => left.item.label.localeCompare(right.item.label));
 		if (sessions.length === 0) {
 			await this.sendStatusMessage(identity, l10n.t('No Copilot sessions are available in the authorized workspace.'));
@@ -1031,18 +1045,47 @@ export class TelegramCommandRouter extends Disposable {
 		this.activePickerRequestIds.set(identity.pairingId, requestId);
 		const selectedSessionId = this.sessionState.getSelectedSessionId(identity);
 		const rows = sessions.slice(0, maximumSessionButtons).map(session => {
-			const callback = this.host.registerCallback({ identity, sessionId: session.item.id, requestId, action: 'session.select' });
-			const prefix = session.item.id === selectedSessionId ? '✓ ' : '';
+			const callback = this.host.registerCallback({
+				identity,
+				sessionId: session.item.id,
+				requestId,
+				action: session.item.source === 'agentHost' ? 'session.fork' : 'session.select',
+			});
+			const prefix = session.item.id === selectedSessionId ? '✓ ' : session.item.source === 'agentHost' ? '↪ ' : '';
 			return [{ text: truncate(`${prefix}${formatSessionButton(session.item)}`, maximumButtonLabelLength), callback_data: callback.callbackData }];
 		});
 		const omitted = sessions.length - rows.length;
+		const hasAgentHostSessions = sessions.some(session => session.item.source === 'agentHost');
 		const text = [
 			formatSystemTitle('🧭', l10n.t('Select a Copilot session')),
 			formatSystemField(l10n.t('Workstation'), this.environment.workstationLabel),
 			formatSystemField(l10n.t('Workspace'), this.environment.workspaceLabel),
+			hasAgentHostSessions ? escapeTelegramHtml(l10n.t('Sessions marked ↪ will continue as a new Remote Pilot session.')) : undefined,
 			omitted > 0 ? escapeTelegramHtml(l10n.t('{0} additional sessions are not shown.', omitted)) : undefined,
 		].filter((line): line is string => !!line).join('\n');
 		await this.sendStatusMessage(identity, text, { parseMode: 'HTML', replyMarkup: { inline_keyboard: rows } });
+	}
+
+	private async forkAndSelectAgentHostSession(identity: TelegramPairedIdentity, sessionId: string): Promise<void> {
+		try {
+			const source = await this.sessionService.getRemoteControlSessionItem(sessionId, CancellationToken.None);
+			const scope = source && this.sessionScopePolicy.authorizeSession(source);
+			if (!source || source.source !== 'agentHost' || !scope) {
+				await this.sendStatusMessage(identity, l10n.t('That Copilot session is unavailable in the authorized workspace. Run /sessions to refresh the list.'));
+				return;
+			}
+			const result = await this.sessionService.forkAgentHostSession(sessionId, CancellationToken.None);
+			if (result.kind === 'inUse') {
+				await this.sendStatusMessage(identity, l10n.t('That Copilot session is still in use by VS Code. Close it locally, then run /sessions and try again.'));
+				return;
+			}
+			if (result.kind === 'unavailable' || !await this.selectSession(identity, result.sessionId)) {
+				await this.sendStatusMessage(identity, l10n.t('The Copilot session could not be continued in Remote Pilot. Run /sessions to refresh the list.'));
+			}
+		} catch (error) {
+			this.logService.error(error, `[TelegramRemote] Failed to fork Agent Host session ${sessionId}`);
+			await this.sendStatusMessage(identity, l10n.t('The Copilot session could not be continued in Remote Pilot. Run /sessions and try again.'));
+		}
 	}
 
 	private async selectSession(identity: TelegramPairedIdentity, sessionId: string): Promise<boolean> {
