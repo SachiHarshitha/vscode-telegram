@@ -1,0 +1,46 @@
+{
+  "extensionId": "Emagin8.remote-pilot",
+  "publisherDisplayName": "Emagin8 UG",
+  "manifest": {
+    "name": "remote-pilot",
+    "displayName": "Remote Pilot",
+    "publisher": "Emagin8",
+    "engines": {
+      "vscode": "^1.135.0",
+      "npm": ">=9.0.0",
+      "node": ">=22.14.0"
+    },
+    "author": {
+      "name": "Emagin8 UG"
+    },
+    "description": "GitHub Copilot with secure Telegram remote control for local Copilot CLI sessions.",
+    "homepage": "https://github.com/SachiHarshitha/vscode-telegram/tree/telegram-release/extensions/copilot/docs/telegram-remote",
+    "repository": {
+      "type": "git",
+      "url": "https://github.com/SachiHarshitha/vscode-telegram.git"
+    },
+    "bugs": {
+      "url": "https://github.com/SachiHarshitha/vscode-telegram/issues"
+    }
+  },
+  "removeManifestProperties": [
+    "icon"
+  ],
+  "appendKeywords": [
+    "telegram",
+    "remote-control",
+    "remote-pilot"
+  ],
+  "authentication": {
+    "signInCommand": "emagin8.remotePilot.signIn",
+    "signInCommandTitle": "Sign In to GitHub",
+    "signInCommandCategory": "Remote Pilot",
+    "exposeSignInCommand": true,
+    "disableWorkbenchCopilotSignInGate": true
+  },
+  "readme": {
+    "preamblePath": "REMOTE_PILOT_README.md",
+    "remoteConfigurationUrl": "https://github.com/SachiHarshitha/vscode-telegram/blob/telegram-release/extensions/copilot/docs/telegram-remote/README.md",
+    "stripUpstreamImages": true
+  }
+}
