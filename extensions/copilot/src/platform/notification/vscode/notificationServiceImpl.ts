@@ -11,6 +11,8 @@ export class NotificationService implements INotificationService {
 
 	declare readonly _serviceBrand: undefined;
 
+	constructor(private readonly noAuthSignInCommand: string) { }
+
 	async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined>;
 	async showInformationMessage<T extends string>(message: string, options: MessageOptions, ...items: T[]): Promise<T | undefined>;
 	async showInformationMessage(message: string, optionsOrItem?: any, ...items: any[]): Promise<any> {
@@ -32,6 +34,9 @@ export class NotificationService implements INotificationService {
 	}
 
 	async showQuotaExceededDialog(options: { isNoAuthUser: boolean }): Promise<unknown> {
-		return commands.executeCommand(options.isNoAuthUser ? 'workbench.action.chat.triggerSetup' : 'workbench.action.chat.openQuotaExceededDialog');
+		const command = options.isNoAuthUser
+			? this.noAuthSignInCommand
+			: 'workbench.action.chat.openQuotaExceededDialog';
+		return commands.executeCommand(command);
 	}
 }

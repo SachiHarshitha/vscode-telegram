@@ -88,6 +88,7 @@ import { IWorkspaceService } from '../../../platform/workspace/common/workspaceS
 import { ExtensionTextDocumentManager } from '../../../platform/workspace/vscode/workspaceServiceImpl';
 import { IInstantiationServiceBuilder } from '../../../util/common/services';
 import { SyncDescriptor } from '../../../util/vs/platform/instantiation/common/descriptors';
+import { EXTENSION_ID, REMOTE_PILOT_SIGN_IN_COMMAND } from '../../common/constants';
 import { IMergeConflictService } from '../../git/common/mergeConflictService';
 import { MergeConflictServiceImpl } from '../../git/vscode/mergeConflictServiceImpl';
 import { ILaunchConfigService } from '../../onboardDebug/common/launchConfigService';
@@ -125,7 +126,9 @@ export function registerServices(builder: IInstantiationServiceBuilder, extensio
 	builder.define(ITerminalService, new SyncDescriptor(TerminalServiceImpl));
 	builder.define(ITestProvider, new SyncDescriptor(TestProvider));
 	builder.define(IUrlOpener, isTestMode && !isScenarioAutomation ? new NullUrlOpener() : new RealUrlOpener());
-	builder.define(INotificationService, isTestMode && !isScenarioAutomation ? new NullNotificationService() : new NotificationService());
+	const isDefaultChatExtension = extensionContext.extension.id.toLowerCase() === EXTENSION_ID.toLowerCase();
+	const noAuthSignInCommand = isDefaultChatExtension ? 'workbench.action.chat.triggerSetup' : REMOTE_PILOT_SIGN_IN_COMMAND;
+	builder.define(INotificationService, isTestMode && !isScenarioAutomation ? new NullNotificationService() : new NotificationService(noAuthSignInCommand));
 	builder.define(IVSCodeExtensionContext, <any>/*force _serviceBrand*/extensionContext);
 	builder.define(IWorkbenchService, new WorkbenchServiceImpl());
 	builder.define(IConversationOptions, {

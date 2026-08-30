@@ -82,3 +82,4 @@ export function getAgentForIntent(intentId: Intent, location: ChatLocation): { a
 }
 
 export const EXTENSION_ID = 'GitHub.copilot-chat';
+export const REMOTE_PILOT_SIGN_IN_COMMAND = 'emagin8.remotePilot.signIn';

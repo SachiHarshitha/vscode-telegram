@@ -10,6 +10,7 @@ import { ILogService } from '../../../platform/log/common/logService';
 import { Event } from '../../../util/vs/base/common/event';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
+import { EXTENSION_ID, REMOTE_PILOT_SIGN_IN_COMMAND } from '../../common/constants';
 
 /**
  * The main entry point for the authentication contribution.
@@ -38,9 +39,13 @@ class AuthUpgradeAsk extends Disposable {
 		@IAuthenticationChatUpgradeService private readonly _authenticationChatUpgradeService: IAuthenticationChatUpgradeService,
 	) {
 		super();
-		this._register(commands.registerCommand('github.copilot.chat.triggerPermissiveSignIn', async () => {
+		const signIn = async () => {
 			await this._authenticationChatUpgradeService.showPermissiveSessionModal(true);
-		}));
+		};
+		this._register(commands.registerCommand('github.copilot.chat.triggerPermissiveSignIn', signIn));
+		if (this._extensionContext.extension.id.toLowerCase() !== EXTENSION_ID.toLowerCase()) {
+			this._register(commands.registerCommand(REMOTE_PILOT_SIGN_IN_COMMAND, signIn));
+		}
 	}
 
 	async run() {
