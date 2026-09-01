@@ -1,57 +1,157 @@
-# Phase 8 release-candidate acceptance
+# Release-Candidate Acceptance
 
-Phase 8 implementation is automated, but a release candidate is not approved until this checklist is performed against a clean bundled build. Do not paste tokens, callback payloads, prompts, answers, or private workspace paths into the report.
+> **Status:** Current manual release gate
+> **Scope:** `copilot-telegram` downstream branch
+> **Last reviewed:** 2026-09-01
+>
+> Automated tests are necessary but do not approve a release candidate by themselves. This checklist is performed against a clean build/profile. Do not paste bot tokens, prompts, callback payloads, answers or private workspace paths into the signoff report.
 
-The remote-control seam is an internal framework in this bundled fork. It is not a stable public VS Code extension API or a Marketplace-compatible standalone extension point.
+The remote-control seam remains an internal framework in this downstream fork. The current Agent Host integration is **session discovery + fork handover**, not direct AHP control.
 
 ## 1. Automated gate
 
-Close every development Extension Host before packaging so generated runtime files are not locked. From `extensions/copilot`:
+Close development Extension Hosts that may lock generated runtime files, then from `extensions/copilot` run the current release suite:
 
 ```powershell
 .\script\telegram-remote\test-phase8.ps1
 .\script\telegram-remote\generate-release-report.ps1 -TestStatus passed -ArtifactPath <artifact-path>
 ```
 
-The first command includes extension typecheck, generic/Telegram tests, focused native regressions, lint, packaging, and the focused core workbench test. Release metadata generation requires a clean worktree unless `-AllowDirty` is used for a non-release engineering preview.
+Confirm:
 
-## 2. Clean-profile bundled launch
+- [ ] build/typecheck passes
+- [ ] generic remote-control tests pass
+- [ ] Telegram tests pass
+- [ ] focused Copilot CLI/native-dispatch tests pass
+- [ ] Agent Host discovery/handover tests pass
+- [ ] packaging succeeds
+- [ ] compatibility/license/checksum report is generated from a clean tree
+- [ ] generated metadata contains no secret-shaped/user-content data
 
-- [ ] Launch the built fork with a new empty profile and extension directory.
-- [ ] Confirm the controller marker contains `phase=8`, `patch=18`, `remote-control-framework=generic`, `telegram-native-menu=ready`, `telegram-activity=live-draft`, `telegram-native-stop=ready`, `telegram-diagnostics=redacted`, and `telegram-rate-limits=bounded`.
-- [ ] With Telegram never configured, confirm there is no Telegram request, poller lease, listener, or status item.
-- [ ] Confirm **Telegram Remote: Copy Diagnostics** contains versions/states but no credentials, prompts, answers, callback payloads, or workspace paths.
+## 2. Clean-profile launch
 
-## 3. Telegram lifecycle and control
+- [ ] Launch the matching downstream build with a new profile.
+- [ ] Confirm Copilot functions normally before Telegram is configured.
+- [ ] Confirm Telegram performs no poll/network activity before explicit enablement.
+- [ ] Confirm diagnostics expose versions/lifecycle state but no token, prompt, answer, callback payload or private path.
 
-- [ ] Complete confidentiality consent, token validation, private-chat pairing, and exact-workspace authorization.
-- [ ] Confirm Telegram's native Menu shows the exact nine registered commands and no setup message is pinned in the conversation.
-- [ ] Confirm `/controls` shows literal slash-command buttons, every button triggers its command, and `/controls_off` removes it; active-run Stop is presented by the native live draft rather than a replacement keyboard message.
-- [ ] Send a prompt and confirm one animated `<tg-thinking>` live draft reuses the same draft ID, remains visible beyond 30 seconds through its heartbeat, and is replaced by the final answer without persistent Prompt accepted, Copilot started, reasoning, or idle messages.
-- [ ] Press the live draft's native Stop control and confirm `stopped_message_generation` cancels only the mapped selected run and produces at most one short stopped confirmation; verify `/stop` remains usable as fallback.
-- [ ] Start a turn locally in the selected VS Code session; confirm Telegram creates the same semantic live-draft UI without persistent Running/Idle messages and without selecting an out-of-scope session.
-- [ ] Confirm `/stop`, the legacy `■ Stop` payload, and native draft Stop reach the same registry abort seam; explicitly stop one selected locally started task, and confirm stale/foreign controls cannot affect another request.
-- [ ] Browse an authorized workspace through `/files`; confirm folders/files use opaque inline callbacks, previews are bounded/read-only, and navigation edits the existing menu message.
-- [ ] Select/create a session and send a prompt; confirm one activity sequence and one final answer.
-- [ ] Steer an active turn by replying to its Telegram activity.
-- [ ] Resolve an approve-once/deny permission request and confirm a stale/replayed callback cannot win.
-- [ ] Answer a choice and a freeform user question.
-- [ ] Exit plan mode interactively/exit-only and confirm Telegram cannot select autopilot or change the permission policy.
-- [ ] Stop an active request explicitly and confirm abort targets only the selected attached session.
-- [ ] Enable VS Code Allow All/autopilot locally and confirm tool activity is still projected without duplicate reasoning or a false permission result.
-- [ ] Select a model, disable/reconnect/reload, and confirm the exact authorized session restores that model.
-- [ ] Disable during a turn and confirm remote dispatch blocks immediately while the local task may finish and deliver its correlated terminal update.
-- [ ] Change workspaces and confirm the paired identity/token are reused only after local consent; old-workspace commands remain blocked.
-- [ ] Forget Configuration and confirm token, consent, pairing, configured marker, poller, callbacks, and attachments are removed.
+## 3. Setup and authorization
 
-## 4. Coexistence and competing hosts
+- [ ] Complete the local confidentiality/security disclosure.
+- [ ] Validate a dedicated test bot token.
+- [ ] Pair one private Telegram identity.
+- [ ] Authorize the current test workspace.
+- [ ] Verify an unpaired user cannot retrieve session metadata.
+- [ ] Verify switching to another workspace blocks previous remote selection until locally authorized.
 
-- [ ] Attach Mission Control and Telegram to the same session; confirm each SDK event appears once per transport.
-- [ ] Race local, Mission Control, and Telegram permission/question/plan responses; confirm exactly one valid response reaches the SDK and losing controls are cancelled.
-- [ ] Start a second host with the same bot token; automatic startup must fail visibly without a second healthy poller.
-- [ ] Use explicit **Reconnect** and confirm nonce-checked lease handoff stops the previous owner before the new poller becomes authoritative.
-- [ ] Disable/reload/enable and verify configuration and singleton lease behavior are preserved.
+## 4. Session discovery and ownership
 
-## 5. Signoff evidence
+### Extension-host session
 
-Record the generated compatibility report and checksums, artifact identity, clean-profile location, test date, tester, Bot API smoke result, Mission Control coexistence result, and any provider/model matrix actually exercised. Do not mark an untested backend compatible.
+- [ ] Create/open an extension-host Copilot CLI-backed session in the authorized workspace.
+- [ ] `/sessions` lists it normally.
+- [ ] Selecting it attaches/selects directly without creating a duplicate remote mirror session.
+
+### Agent Host session
+
+- [ ] Create/open a current Agent Host-owned session in the authorized workspace.
+- [ ] `/sessions` shows it with the `↪` handover marker/explanation.
+- [ ] While the source is still in use locally, selecting it is rejected with the expected “close locally and retry” behavior.
+- [ ] After the source becomes available, selecting it creates a **new Remote Pilot session** and selects that new session.
+- [ ] Verify subsequent Telegram activity belongs to the forked Remote Pilot session, not the original Agent Host session.
+- [ ] Return to VS Code and confirm the source/history relationship is understandable and no source-session lock is left stuck.
+
+## 5. Prompt and steering
+
+- [ ] Send a prompt from Telegram and confirm it appears through the native VS Code Copilot chat/session path.
+- [ ] Confirm Telegram acknowledges without waiting for the whole turn.
+- [ ] Start a longer task and steer it mid-turn from Telegram.
+- [ ] Reply to a steerable activity message and confirm the same selected session is steered.
+- [ ] Reply to a stale/completed activity message and confirm no dispatch occurs.
+
+## 6. Activity presentation
+
+- [ ] Confirm the live activity surface updates while the task runs.
+- [ ] Confirm tool/interaction events are semantically grouped rather than emitted as raw event spam.
+- [ ] Confirm final assistant output is delivered once.
+- [ ] Confirm only SDK-visible reasoning/intent summaries are shown; no hidden chain-of-thought claim is made.
+- [ ] Confirm completed/replayed historical events are not presented as fresh current work when attaching to an existing session.
+
+## 7. Permission/question/plan controls
+
+- [ ] Trigger a permission request and verify Telegram offers only **Approve once** and **Deny**.
+- [ ] Let local VS Code win once and confirm the Telegram control becomes stale.
+- [ ] Let Telegram win once and confirm only one SDK resolution occurs.
+- [ ] Answer a choice question remotely.
+- [ ] Answer a correlated freeform question remotely.
+- [ ] Complete a plan review through `interactive`/`exit_only`/reject/feedback as applicable.
+- [ ] Confirm no Telegram surface can select autopilot/autopilot-fleet or persistent auto-approval.
+- [ ] With Mission Control active, confirm Telegram requests do not inherit Mission Control elevation.
+
+## 8. Stop/abort
+
+- [ ] Stop a Telegram-started turn using the current native/live control.
+- [ ] Repeat with `/stop`.
+- [ ] Stop a selected locally started extension-host/Remote Pilot turn where supported.
+- [ ] Confirm stale/wrong-session Stop controls cannot cancel another request.
+- [ ] Confirm terminal state clears active Stop controls.
+
+## 9. Model and file UX
+
+- [ ] Open the model picker and verify the merged/current catalogue is navigable.
+- [ ] Select a supported model and reasoning effort where applicable.
+- [ ] Verify `/status` reports actual selected state rather than a stale preference.
+- [ ] Browse the authorized workspace with `/files`.
+- [ ] Confirm traversal/out-of-root paths and binary/oversized previews are rejected.
+- [ ] Confirm file browsing remains read-only.
+
+## 10. Lifecycle and competing hosts
+
+- [ ] Disable Telegram during/after normal use and confirm new remote dispatch is blocked immediately.
+- [ ] Re-enable using valid stored state without unnecessary token re-entry.
+- [ ] Exercise reconnect after a recoverable transport failure.
+- [ ] Start a second host using the same bot token and confirm automatic second ownership fails visibly.
+- [ ] Exercise explicit reconnect/takeover and confirm the displaced poller stops before the replacement becomes authoritative.
+- [ ] Forget configuration and confirm token, pairing, consent, selection, callbacks and poller ownership are removed.
+
+## 11. Mission Control coexistence
+
+- [ ] Attach/use Mission Control and Telegram on the same extension-host/Remote Pilot session where supported.
+- [ ] Confirm each remote transport receives one logical event stream rather than duplicate SDK-event fan-out.
+- [ ] Race local/Mission Control/Telegram permission/question/plan responses and confirm exactly one valid response wins.
+- [ ] Confirm Mission Control behavior remains usable after the generic registry refactor.
+
+## 12. Signoff evidence
+
+Record only non-sensitive evidence:
+
+```text
+candidate artifact/build identity
+exact downstream commit
+recorded upstream/base relationship
+VS Code/Copilot/SDK versions
+OS/test environment
+release-report/checksum reference
+Bot API smoke result
+Agent Host handover result
+Mission Control coexistence result
+models/providers actually exercised
+known limitations
+reviewer/test date
+```
+
+Do not mark an untested provider/deployment architecture as compatible.
+
+## 13. Release decision
+
+A candidate should not be promoted if any of these remain unresolved:
+
+- cross-workspace/session authorization failure,
+- stale callback/reply dispatch,
+- remote permission elevation,
+- Agent Host source-lock or ownership ambiguity,
+- duplicate bot poller ownership,
+- native prompt path mismatch,
+- token/content leakage in diagnostics/artifacts,
+- inaccurate documentation claiming direct Agent Host/AHP control,
+- missing license/compatibility metadata.
