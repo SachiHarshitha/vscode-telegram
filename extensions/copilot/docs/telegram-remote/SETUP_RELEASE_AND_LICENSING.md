@@ -1,449 +1,279 @@
 # Setup, Release and Licensing
 
-> This document records engineering/release constraints and is not legal advice.
+> **Status:** Current engineering/release reference
+> **Scope:** `copilot-telegram` downstream branch
+> **Last reviewed:** 2026-09-01
+> **Legal note:** This records engineering observations and release constraints; it is not legal advice.
 
-## 1. Two distinct packaging architectures
+## 1. Current distribution architecture
 
-### Current implementation target: bundled fork
+The implemented project runs inside the downstream VS Code source fork:
 
 ```text
 VS Code source fork
-  -> bundled, modified Copilot extension
-  -> RemoteControlRegistry
-  -> Mission Control + Telegram transports
+    -> bundled modified Copilot implementation
+        -> RemoteControlRegistry
+            -> Mission Control transport
+            -> Telegram transport
 ```
 
-This is the architecture described by the implementation plan. It can change `CopilotCLISession`, use the existing product/service composition and route remote prompts through the native chat request path. V1 does not add a separate third-party extension: it runs inside the built-in Copilot extension, whose manifest declares the proposed APIs it uses. Validate those APIs in the built product. Normal users of this build should not be asked to edit `argv.json` merely to enable the bundled Copilot code.
+This architecture can use the same internal session objects, native chat request lifecycle and proposed APIs as the bundled Copilot code.
 
-Initial deliverables are therefore development builds of the VS Code fork (or explicitly internal packages produced by that fork), with exact source compatibility metadata.
+It is **not** equivalent to a normal third-party Marketplace extension.
 
-### Future possibility: own-ID companion extension
+See [ADR-0004](./adr/0004-bundled-fork-before-standalone-extension.md).
 
-```text
-V2 option A: custom VS Code fork
-  -> product-registered, own-ID companion extension
-  -> supported Copilot remote-control seam (not available today)
+## 2. Why a separate custom-ID extension is different
 
-V2 option B: stock VS Code/private development host
-  -> separately installed own-ID extension/VSIX
-  -> runtime proposal enablement
-  -> supported Copilot remote-control API (not available today)
-```
+A separate extension identity can use stable VS Code APIs and can be granted proposed APIs in development/private environments, but that does not automatically provide:
 
-The small public export of the installed `GitHub.copilot-chat` extension does not expose the session control required here. An independent Marketplace extension is therefore not just a repackaging exercise: it requires a stable upstream remote-control extension point or a substantial redesign with reduced functionality.
+- ownership of the official Copilot session provider,
+- access to internal `CopilotCLISessionService` instances,
+- the same product-level assumptions as the bundled Copilot implementation,
+- visibility/control of all sessions surfaced by the official provider.
 
-The product-registration and `argv.json` guidance below applies only to experiments with these future V2 paths.
+Therefore proposal enablement is only one part of the problem.
 
-## 2. Proposed APIs by packaging mode
+### Research path: fork-bundled own-ID companion
 
-VS Code's proposed-API enforcement is extension-ID based.
+A companion bundled into a custom VS Code product would require exact build-time proposal registration for its own extension ID.
 
-A non-builtin extension that declares proposed APIs but is not product-allowlisted or runtime-enabled has those proposal declarations removed at runtime. V1 avoids that case because the modified Copilot extension is built in and already declares its proposals in `package.json`. The built product must still verify that those APIs remain available.
+### Research path: private standalone own-ID VSIX
 
-### V2 fork-bundled companion registration
+A private development build may enable proposed APIs for its ID through the supported development/runtime mechanism. This remains an experiment and does not create a public Copilot session-control API.
 
-If V2 introduces a separate own-ID companion bundled into the custom VS Code product, register it at build time:
+The current branch does not require either path for normal development.
 
-```jsonc
-{
-  "extensionEnabledApiProposals": {
-    "our.publisher.extension": [
-      "<exact-proposal-required-by-the-final-v2-design>"
-    ]
-  }
-}
-```
+## 3. Agent Host compatibility
 
-The exact extension ID must match the companion manifest, and the product proposal list must match `package.json#enabledApiProposals`. In VS Code's proposal resolver, a product entry overrides the manifest declaration; an incomplete product list can therefore remove proposals the extension requested.
+The current release architecture now has a limited bridge to modern Agent Host-owned history:
 
-This is product build configuration, not extension initialization. VS Code resolves it before activating the extension. The V2 activation preflight may diagnose missing or mismatched registration, but it MUST NOT attempt to edit `product.json`.
+- Telegram `/sessions` can discover Agent Host-owned local session metadata,
+- sessions are still workspace-authorized before display,
+- an idle Agent Host session can be forked into a new extension-host **Remote Pilot** session,
+- a source session still in use by VS Code is rejected,
+- Telegram does not directly attach to the live Agent Host/AHP session.
 
-Product registration grants only the listed VS Code API proposals. It does not expose Copilot's internal session service to another extension.
+Direct AHP client operation is a future architecture investigation, not a current packaging promise.
 
-### V2 private standalone runtime enablement
+## 4. Development launcher
 
-Official guidance:
-
-https://code.visualstudio.com/api/advanced-topics/using-proposed-api
-
-For a private standalone development/own-ID extension, a persistent development configuration may use `argv.json`:
-
-```json
-{
-  "enable-proposed-api": [
-    "our.publisher.extension"
-  ]
-}
-```
-
-The official documentation describes proposed APIs as unstable and unsuitable for normal Marketplace publication. Treat own-ID proposal enablement as a **developer/private experiment**, not the release mechanism for the current fork.
-
-## 3. Future private standalone own-ID first-run setup design
-
-A future private standalone build should start with a minimal preflight before initializing code that requires proposed APIs. A fork-bundled V2 companion uses the same preflight only as verification and directs configuration failures back to the product build. Neither path solves the missing public Copilot session-control API by itself.
-
-### User flow
-
-```text
-Install VSIX
-  -> extension activation/preflight
-  -> proposed APIs unavailable
-  -> explain why they are required
-  -> user explicitly chooses Enable
-  -> safely update argv.json
-  -> require full VS Code restart
-  -> next activation verifies availability
-  -> continue Telegram setup
-```
-
-### Consent copy requirements
-
-The setup UI should tell the user:
-
-- the exact extension ID being added,
-- that experimental/proposed VS Code APIs are being enabled for that extension,
-- that VS Code must be fully restarted,
-- how to reverse the change.
-
-Do not silently modify runtime arguments.
-
-## 4. Future private standalone own-ID `argv.json` update requirements
-
-The helper MUST:
-
-- locate the correct VS Code runtime arguments file for the active product/profile,
-- support JSONC/comments,
-- preserve unrelated keys and formatting as far as practical,
-- preserve other extension IDs in `enable-proposed-api`,
-- avoid duplicate entries,
-- write atomically where practical,
-- create a backup before the first modification,
-- expose a command to open the file for inspection,
-- expose a command to remove this extension ID again.
-
-Example transformation:
-
-```jsonc
-// Before
-{
-  "disable-hardware-acceleration": true,
-  "enable-proposed-api": ["other.extension"]
-}
-```
-
-```jsonc
-// After
-{
-  "disable-hardware-acceleration": true,
-  "enable-proposed-api": [
-    "other.extension",
-    "our.publisher.extension"
-  ]
-}
-```
-
-## 5. Future private standalone own-ID restart behavior
-
-A normal **Reload Window** is not the required setup path. Runtime arguments are consumed by the VS Code application/main-process startup path.
-
-The extension should display:
-
-> Setup complete. Close all VS Code windows and reopen VS Code to enable the required APIs.
-
-Do not make the core flow depend on undocumented internal relaunch services.
-
-## 6. Telegram setup
-
-### Persistent Code OSS development launcher
-
-The current bundled-fork implementation can be exercised as a real extension-development instance. From the repository root, run:
+From the repository root:
 
 ```powershell
 .\extensions\copilot\script\telegram-remote\launch-dev.ps1
 ```
 
-The launcher prepares the source runtime, compiles Code OSS and the Copilot extension, and opens the repository with `extensions/copilot` as the extension development path. The manifest's `onStartupFinished` event activates the extension; V1 does not need a separate Telegram extension ID or an `argv.json` edit.
+The development launcher prepares/builds the source runtime and opens the repository with the modified Copilot code under the downstream development environment.
 
-By default, reusable state is isolated under `%LOCALAPPDATA%\vscode-telegram\dev-profile`:
-
-```text
-user-data/   settings, account/session metadata, workspace trust, global storage and encrypted SecretStorage
-extensions/  extensions installed only for this development environment
-```
-
-Sign into GitHub/Copilot and complete Telegram setup in the opened Code OSS window once. Later launches with the same profile reuse that configuration. Credentials are never passed to or stored in the script. SecretStorage values remain tied to the current Windows user/machine and should not be copied as a portable credential bundle.
-
-Useful options:
+Useful options include:
 
 ```powershell
-# Reuse the compiled output for a faster launch.
+# Reuse current build output.
 .\extensions\copilot\script\telegram-remote\launch-dev.ps1 -SkipBuild
 
-# Open another test repository while retaining the same login/configuration.
-.\extensions\copilot\script\telegram-remote\launch-dev.ps1 -WorkspacePath C:\path\to\test-repository
+# Open a different test repository using the same dev profile.
+.\extensions\copilot\script\telegram-remote\launch-dev.ps1 -WorkspacePath C:\path\to\repo
 
-# Use a separate clean or disposable profile.
-.\extensions\copilot\script\telegram-remote\launch-dev.ps1 -ProfilePath C:\path\to\clean-profile
+# Use an isolated/disposable profile.
+.\extensions\copilot\script\telegram-remote\launch-dev.ps1 -ProfilePath C:\path\to\profile
 ```
 
-Close any Code OSS development window using this profile before relaunching after a rebuild. If it remains open, Code OSS may route the new window to the existing application process and keep the previously loaded extension host. Do not add `--use-inmemory-secretstorage`; that test-only option deliberately prevents credential persistence.
+The reusable development profile is intentionally separated from the user's normal VS Code profile. Credentials are not passed through launcher arguments.
 
-If the normal browser callback cannot return to the unpackaged source build, enable `github-authentication.preferDeviceCodeFlow` in this development profile and retry GitHub sign-in.
+If source-build GitHub authentication cannot complete through the normal browser callback, the development profile can use GitHub device-code authentication where supported.
 
-On Windows, normal extension testing does not require every optional Code OSS native integration to be available. The launcher initializes only missing `telemetry.machineId`, `telemetry.sqmId` and `telemetry.devDeviceId` values in its isolated profile, matching the source-workbench test launcher. This prevents a missing telemetry-identity module from becoming a fatal first-run lookup and does not copy or create credentials. Other unavailable optional integrations can still write nonfatal warnings to the development logs.
+## 5. Telegram setup flow
 
-For a full-native runtime check, pass `-RequireNativeRuntime`. That mode verifies and rebuilds the startup-critical native modules. If it reports missing Spectre libraries, use Visual Studio Installer to add the VS 2022 x64/x86 Spectre-mitigated MSVC, ATL and MFC components listed in the official [VS Code source prerequisites](https://github.com/microsoft/vscode/wiki/How-to-Contribute#prerequisites), restart PowerShell and rerun the launcher.
-
-Recommended sequence:
-
-1. Verify the bundled fork's Copilot/session-controller integration is active.
-2. Display the confidentiality warning: Telegram bot chats are not end-to-end encrypted and selected development content will transit Telegram infrastructure.
-3. Enter Telegram bot token locally.
-4. Validate token with Telegram `getMe`.
-5. Save token to protected secret storage.
-6. Acquire the singleton poller lease.
-7. Start pairing.
-8. Generate short-lived pairing challenge.
-9. User messages the bot with the challenge.
-10. Store authorized Telegram numeric user ID.
-11. Show connection/session status.
-
-No Tailscale or inbound firewall configuration is required for the default long-polling mode.
-
-Current Phase 6 behavior is deliberately conservative:
-
-- only sessions whose valid file-URI working directory is inside a root of the currently consented window are shown or controllable;
-- an empty window, missing working directory or foreign/sibling workspace fails closed; cross-workspace local approval is not implemented yet;
-- permission prompts expose only per-request **Approve once** and **Deny** controls; Telegram cannot change the permission policy;
-- plan review exposes only **Implement Plan**, **Approve Plan Only**, **Reject Plan**, and reply-bound feedback; remote clients cannot select autopilot modes;
-- SDK-visible activity is converted into bounded, redacted semantic rounds; no hidden model chain-of-thought is exposed;
-- each meaningful round is one expandable Telegram Rich Message, and running tool rounds are edited in place.
-
-Lifecycle controls:
-
-- **Disable Remote Access** blocks dispatch synchronously and stops polling but retains the protected token, consent, pairing and non-secret configured marker;
-- **Enable Remote Access** reconnects without token entry only when that stored state matches the exact current machine/workspace scope;
-- **Reconnect** appears for retryable connection failures or an unexpectedly stopped enabled lifecycle;
-- authentication/configuration failures use **Set Up Again**;
-- **Forget Configuration** disables access and removes token, consent, pairing and the configured marker;
-- a previously configured disabled instance shows muted `Telegram: Off` when the status-bar visibility setting is enabled, while the Enable command always remains available in the Command Palette.
-
-Changing the bot token, paired identity, consent schema, workspace roots or selected session working directory invalidates the prior selection. Reopen the intended repository in the development window and select its session again; never work around rejection by broadening a path setting.
-
-### Phase 5.1 deterministic regression test
-
-From the Copilot extension directory:
-
-```powershell
-cd extensions/copilot
-.\script\telegram-remote\test-phase5.1.ps1
-```
-
-This runner currently covers 25 files / 232 tests using only fake credentials and in-memory Telegram hosts. It does not read `.env` or contact the real Bot API. Real-bot verification remains a separate human checklist in [TEST_STRATEGY.md](./TEST_STRATEGY.md#13-manual-smoke-test-script).
-
-### Phase 6 deterministic regression test
-
-From the Copilot extension directory:
-
-```powershell
-cd extensions/copilot
-.\script\telegram-remote\test-phase6.ps1
-```
-
-This current runner covers 27 Telegram Remote files / 169 tests plus 14 focused Copilot CLI plan-response tests. It uses no persistent token and makes no Telegram or Mission Control network request.
-
-### Configured Agent Chat models
-
-Models configured through the Agent Chat picker are read from VS Code's active language-model registry (the profile resource is `chatLanguageModels.json`). A chat debug `models.json` snapshot is diagnostic output, not the configuration source. Restart or reload the development window after changing provider configuration, then use `/models`; the Telegram picker paginates the complete merged native/configured catalogue.
-
-Configured model credentials remain owned by their VS Code provider. Telegram Remote retains only the opaque selected model identity and routes inference through the local authenticated bridge; it does not read or copy provider API keys.
-
-### Phase 2 developer smoke test
-
-The development harness does not store the token in VS Code and is not the product setup flow. Copy `extensions/copilot/.env.sample` to `extensions/copilot/.env`, fill `TELEGRAM_BOT_TOKEN`, then run:
-
-```powershell
-cd extensions/copilot
-.\script\telegram-remote\test-phase2.ps1 -RealBot
-```
-
-By default the real test calls only `getMe` and a short `getUpdates`. Sending a test message additionally requires `TELEGRAM_TEST_CHAT_ID` and `TELEGRAM_REAL_TEST_SEND_MESSAGE=true`. The `.env` file is ignored and the runner never prints loaded values. Phase 3 replaces this development-only injection with consented VS Code SecretStorage.
-
-## 7. Packaging
-
-For the current architecture, development artifacts should be built through the VS Code fork's product/build tooling so the modified built-in extension, its proposal declarations and integration source remain aligned. If V2 adds a fork-bundled own-ID companion, its product proposal registration becomes part of that build contract. If an internal standalone VSIX is also produced for targeted testing, document that it is not equivalent to the complete bundled-fork distribution and record the required host configuration.
-
-Every release artifact should include or be accompanied by:
+The current product flow is:
 
 ```text
-VS Code fork build and/or explicitly scoped internal VSIX
-SHA256 checksum
-release notes
-LICENSE / applicable license notices
-ThirdPartyNotices or dependency license inventory
-UPSTREAM_VERSION metadata
+local enable/setup
+    -> confidentiality/security disclosure
+    -> enter bot token locally
+    -> validate with Telegram getMe
+    -> store token in SecretStorage
+    -> acquire singleton poller lease
+    -> create short-lived pairing challenge
+    -> pair private Telegram identity
+    -> authorize current VS Code workspace scope
+    -> allow session discovery/control within that scope
 ```
 
-Phase 8 generates the machine-readable subset with:
+Default Telegram operation needs no webhook, inbound port, public IP or Tailscale.
+
+## 6. Stored-state lifecycle
+
+### Disable Remote Access
+
+- blocks new remote dispatch immediately,
+- stops/releases polling,
+- preserves protected configuration for later re-enable where safe.
+
+### Enable Remote Access
+
+Reuses stored state only when token, pairing and current workspace consent are still valid.
+
+### Reconnect
+
+Used for recoverable connection/ownership failures. It may perform the implemented poller ownership handoff.
+
+### Forget Configuration
+
+Removes saved token, consent, pairing and configured marker after disabling access.
+
+Workspace/pairing/token changes invalidate stale session selection rather than silently widening scope.
+
+## 7. Development and release tests
+
+Use the current script set under:
+
+```text
+extensions/copilot/script/telegram-remote/
+```
+
+The important distinction is:
+
+- deterministic/unit/integration suites should use fake credentials and no Telegram network access,
+- explicit real-bot smoke tests remain opt-in,
+- release-candidate acceptance includes clean-profile and coexistence testing.
+
+The release gate is documented in [TEST_STRATEGY.md](./TEST_STRATEGY.md) and [PHASE8_ACCEPTANCE.md](./PHASE8_ACCEPTANCE.md).
+
+## 8. Real-bot development smoke test
+
+The development smoke harness is separate from product SecretStorage setup.
+
+Where the current script supports it, copy the sample environment file to a local ignored `.env`, supply a dedicated test bot token and run the explicit real-bot option.
+
+Do not:
+
+- commit the `.env`,
+- print loaded secrets,
+- use production/private repository content for a transport smoke test,
+- confuse the smoke-test token injection with the product setup architecture.
+
+## 9. Packaging requirements
+
+A distributable development/release artifact should be produced through the fork's build/package tooling so the modified Copilot implementation and the matching VS Code source stay aligned.
+
+Accompany artifacts with at least:
+
+```text
+exact source/upstream commit metadata
+matching VS Code/Copilot versions
+resolved Copilot SDK/runtime version where available
+patch/revision identity
+artifact checksum
+applicable license files/notices
+release notes / known limitations
+```
+
+The current release-report script is the preferred machine-readable source when available:
 
 ```powershell
 cd extensions/copilot
 .\script\telegram-remote\generate-release-report.ps1 -TestStatus passed -ArtifactPath <artifact-path>
 ```
 
-The script requires a clean worktree for release output, records the exact source and available upstream merge-base commits, writes the extension/runtime/proposal/platform/patch compatibility report, inventories lockfile dependency licenses, copies the applicable VS Code and extension licenses, and creates SHA-256 checksums. It rejects secret-shaped data in generated metadata. `-AllowDirty` is only for local engineering previews.
+Use dirty-worktree overrides only for explicitly non-release engineering previews.
 
-Suggested downstream version metadata:
+## 10. Public artifact positioning
 
-```text
-Upstream VS Code commit: 0984c920744f2013d0ad2bc5e826fa45a64069ab
-Upstream Copilot extension: 0.63.0
-Telegram patch version: 0.1.0
-Distribution: bundled fork development build
-```
+A public artifact from this branch should be described as an **experimental downstream fork/prototype**, not as an official GitHub Copilot distribution.
 
-## 8. Marketplace restrictions
+Recommended disclosure:
 
-VS Code explicitly advises that extensions using proposed APIs should not be published to the Visual Studio Marketplace.
+> This is an unofficial experimental project and is not affiliated with or endorsed by GitHub or Microsoft. It modifies open-source VS Code/Copilot integration code to explore transport-neutral remote control, with Telegram as the first remote client.
 
-Therefore V1 MUST NOT claim that the current bundled-fork implementation is a Marketplace-installable extension.
+Do not present a separately distributed artifact as though its publisher were GitHub/Microsoft.
 
-A future Marketplace release requires one of:
+## 11. Marketplace boundary
 
-- required proposals become stable VS Code APIs,
-- Microsoft/GitHub expose a stable remote-session/transport extension point,
-- the project is redesigned to avoid proposed APIs and source-level Copilot internals and accepts the resulting feature loss.
+The current architecture depends on source-level Copilot integration and proposal-sensitive surfaces. It should not be presented as a normal Marketplace-installable third-party extension with equivalent functionality.
 
-## 9. Extension identity
+A future Marketplace-compatible product would require one of:
 
-### Official upstream identity
+- stable upstream APIs for the needed session/control surfaces,
+- an upstream-supported remote-client/Agent Host integration path,
+- a redesign that accepts reduced functionality and avoids internal/proposed dependencies.
 
-Upstream Copilot uses the GitHub publisher/extension identity and receives product-level privileges/allowlists in VS Code.
+## 12. Source licensing
 
-A public downstream project does not own that publisher identity and must not impersonate it.
+The VS Code/Copilot source in this repository is distributed under its applicable MIT license notices. Downstream modifications must retain upstream copyright/license notices where required.
 
-### Independent downstream identity
-
-Any future independently published artifact should use an identity controlled by the project owner, for example:
-
-```text
-<owned-publisher>.<owned-extension-name>
-```
-
-For private proposed-API experiments, that identity is the one enabled by the runtime/development setup.
-
-V1 must record that Telegram runs inside the bundled Copilot identity and does not introduce another extension ID. A V2 companion must use an owned identity and record its exact `extensionEnabledApiProposals` product entry. Do not impersonate the official publisher in a separately distributed Marketplace package.
-
-## 10. Source licensing
-
-### VS Code Copilot extension source
-
-The `extensions/copilot` source in this repository is MIT-licensed. The license allows use, modification and redistribution subject to preserving the copyright/license notice.
-
-Repository license file:
+Repository license reference:
 
 [`../../LICENSE.txt`](../../LICENSE.txt)
 
-### Copilot SDK
+The public Copilot SDK is also MIT-licensed; verify the exact dependency/version license in the release artifact rather than relying only on this document.
 
-The public Copilot SDK is MIT-licensed.
+## 13. Copilot CLI/runtime licensing
 
-Reference:
-
-https://github.com/github/copilot-sdk/blob/main/LICENSE
-
-The downstream Telegram code may therefore use an independent open-source license such as MIT, subject to preserving upstream notices for copied/modified upstream code.
-
-## 11. Copilot CLI runtime licensing
-
-The `@github/copilot`/Copilot CLI runtime is not governed solely by the SDK's MIT license.
-
-Current GitHub Copilot CLI license permits redistribution of **unmodified** copies only when all listed conditions are met, including that the CLI is part of an application/service providing material functionality beyond the CLI, is not distributed standalone/primary, and retains applicable license/copyright/trademark notices.
-
-Reference:
-
-https://github.com/github/copilot-cli/blob/main/LICENSE.md
+The Copilot CLI/runtime dependency has its own license/terms and should not be assumed to inherit the SDK's MIT terms.
 
 Engineering rule:
 
-> Do not patch or redistribute a modified Copilot CLI runtime. Modify the VS Code integration/Telegram layer only and keep the runtime dependency unmodified.
+> Keep the third-party Copilot CLI/runtime dependency unmodified. Modify the VS Code integration/remote-control layer instead.
 
-Before any public binary release, perform an exact dependency-license audit of the packaged artifact.
+Before public binary distribution, audit the exact packaged dependencies and include required notices/licenses.
 
-## 12. Trademarks and branding
+## 14. Trademarks and branding
 
 Open-source copyright permission does not automatically grant trademark rights.
 
 Public releases should:
 
-- use their own project/product name and icon,
+- use a project-controlled name/icon/publisher identity,
 - state that the project is unofficial,
-- use GitHub Copilot / VS Code names descriptively only when explaining compatibility,
-- avoid a name/icon/publisher presentation that implies endorsement by GitHub or Microsoft,
-- retain required third-party notices.
+- use “GitHub Copilot” and “VS Code” descriptively when explaining compatibility/origin,
+- avoid visual/identity choices that imply GitHub or Microsoft sponsorship,
+- preserve required third-party notices.
 
-Suggested README disclaimer:
+## 15. Authentication and service entitlement
 
-> This is an unofficial project and is not affiliated with or endorsed by GitHub or Microsoft. It contains and/or derives from open-source components distributed under their respective licenses.
+Source licensing is separate from entitlement to GitHub-hosted Copilot services.
 
-## 13. GitHub service authentication and entitlement
+The project should use the end user's own supported authentication/entitlement path and must not proxy unrelated users through a developer's personal Copilot credentials.
 
-Source/software licensing is separate from entitlement to GitHub-hosted Copilot services.
+Hosted authentication behavior for self-built distributions should be treated as a runtime compatibility result and recorded empirically; do not infer that open-source licensing alone guarantees hosted-service entitlement.
 
-The project should use the end user's own supported authentication/entitlement path. It must not proxy multiple unrelated users through a developer's personal Copilot token/subscription.
+## 16. Release CI
 
-BYOK/local-provider use follows the current Copilot SDK/CLI provider configuration and applicable provider terms.
-
-The source review performed for this design did not establish whether a self-built VS Code/Copilot fork can reuse every hosted Copilot authentication flow, nor whether any failure would be caused by signing, product identity or another entitlement check. Treat hosted authentication as an explicit implementation spike and record observed behavior; do not state a definitive signing limitation without source/runtime evidence.
-
-## 14. Release CI
-
-`.github/workflows/telegram-remote-rebase.yml` now performs the compatibility workflow in an ephemeral Windows checkout:
+The downstream compatibility workflow should remain non-destructive:
 
 ```text
-checkout downstream branch
-verify recorded upstream commit
-install/build dependencies
-compile Copilot extension
-run upstream relevant tests
-run Telegram tests
-build/package the selected bundled-fork artifact (and optional scoped internal VSIX)
-scan/package licenses
-calculate SHA256
-attach artifact + compatibility metadata
+checkout downstream source
+    -> compare/sync against recorded upstream
+    -> build/typecheck
+    -> run focused Copilot + Telegram tests
+    -> package selected artifact
+    -> inventory licenses/notices
+    -> calculate checksum
+    -> produce compatibility report
 ```
 
-The workflow is scheduled and manually dispatchable. It does not push the rebased branch or publish a product; any rebase/build/test failure stops metadata production. The Phase 8 runner is:
+A scheduled compatibility job should report failure rather than silently publishing or pushing a conflicted rebase.
 
-```powershell
-cd extensions/copilot
-.\script\telegram-remote\test-phase8.ps1
-```
+## 17. Public release checklist
 
-For a complete release-candidate run, close live development Extension Hosts first because they can lock generated extension runtime files. Human clean-profile, real-bot, Mission Control coexistence, and competing-host acceptance remains mandatory in [PHASE8_ACCEPTANCE.md](./PHASE8_ACCEPTANCE.md).
+Before publishing an artifact outside the development environment:
 
-## 15. Public release checklist
-
-Before publishing any bundled-fork build or independent artifact outside the development team:
-
-- [ ] distribution mode identified as V1 bundled fork, V2 fork-bundled companion or V2 private standalone extension
-- [ ] V1 bundled Copilot identity/manifest proposal access recorded and tested
-- [ ] V2 fork-bundled companion ID and `extensionEnabledApiProposals` entry synchronized and tested, if produced
-- [ ] V2 standalone own-ID proposal setup/rollback tested only if shipping a private VSIX
-- [ ] exact supported VS Code version documented
-- [ ] Telegram token never stored in settings/logs
-- [ ] non-E2E Telegram confidentiality warning shown during setup
-- [ ] dependency licenses audited
-- [ ] upstream MIT notices retained
-- [ ] Copilot CLI runtime unmodified
-- [ ] Copilot CLI license included if redistributed in artifact
-- [ ] third-party notices generated/reviewed
+- [ ] distribution mode clearly identified as bundled downstream fork/prototype
+- [ ] exact tested VS Code/Copilot/source revision recorded
+- [ ] Agent Host behavior described as discovery + fork handover, not direct AHP control
+- [ ] known custom-ID/session-provider limitations disclosed where relevant
+- [ ] Telegram token absent from settings/logs/artifacts
+- [ ] non-E2E Telegram disclosure present
+- [ ] dependency licenses/notices audited
+- [ ] upstream notices retained
+- [ ] Copilot CLI/runtime unmodified
 - [ ] unofficial/non-endorsement disclaimer present
-- [ ] checksums published
+- [ ] checksums produced
 - [ ] automated tests pass
-- [ ] release notes identify upstream commit
+- [ ] clean-profile/manual acceptance completed for a release candidate
 
-## 16. References
+## 18. References
 
 - VS Code proposed API: https://code.visualstudio.com/api/advanced-topics/using-proposed-api
 - VS Code extension publishing: https://code.visualstudio.com/api/working-with-extensions/publishing-extension
