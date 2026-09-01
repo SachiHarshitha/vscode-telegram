@@ -1,538 +1,392 @@
 # Call Flows
 
-This document captures the intended runtime call paths. Names are architectural and may be adjusted to match final implementation types.
+> **Status:** Current runtime reference
+> **Scope:** `copilot-telegram` downstream branch
+> **Last reviewed:** 2026-09-01
+>
+> These diagrams describe the implemented control paths. Historical phase sequencing is intentionally omitted.
 
-## 1. Extension activation
+## 1. Activation and transport registration
 
 ```mermaid
 sequenceDiagram
     participant VS as VS Code
-    participant EXT as Copilot extension activation
-    participant PRE as ProposedApiSetup
     participant CSC as ChatSessionsContrib
     participant REG as RemoteControlRegistry
     participant MC as MissionControlTransport
-    participant TR as TelegramRemoteContrib
+    participant TR as TelegramRemoteContribution
 
-    VS->>EXT: activate()
-    EXT->>CSC: register controller-path Copilot services
-    CSC->>REG: create shared remote-control registry
+    VS->>CSC: create Copilot CLI services
+    CSC->>REG: create shared registry
     CSC->>MC: register Mission Control transport
-    CSC->>TR: instantiate contribution using same service container
-    TR->>REG: register Telegram transport
-    TR->>TR: when enabled, verify stored readiness then acquire singleton poller lease
-
-    Note over PRE,VS: ProposedApiSetup is V2-only; V1 adds no third-party extension ID
+    CSC->>TR: create Telegram contribution in same service container
+    TR->>REG: register Telegram transport + capabilities
+    TR->>TR: if enabled, validate stored state and start one poller
 ```
 
-## 2. Telegram long-poll lifecycle
+The generic registry is shared. Telegram does not create an independent Copilot SDK/session manager.
 
-```mermaid
-sequenceDiagram
-    participant TR as TelegramService
-    participant API as Telegram Bot API
-    participant R as TelegramCommandRouter
-
-    loop while enabled
-        TR->>API: getUpdates(offset, timeout)
-        API-->>TR: Update[]
-        TR->>TR: advance confirmed offset
-        TR->>R: dispatch normalized update
-        R-->>TR: response actions
-        TR->>API: sendMessage/editMessageText/answerCallbackQuery
-    end
-```
-
-Requirements:
-
-- offset advances only after an update is safely accepted for processing,
-- duplicate update IDs are ignored,
-- retry uses bounded backoff,
-- only one poller may consume a configured bot token,
-- a second extension host/process must acquire a cross-process lease or fail explicitly rather than compete for updates.
-
-### 2.1 Enable, reconnect and synchronous disable
+## 2. Telegram connection lifecycle
 
 ```mermaid
 sequenceDiagram
     participant U as Local user
-    participant W as TelegramSetupWizard
+    participant W as Setup/Lifecycle UI
     participant C as TelegramRemoteContribution
-    participant S as Secret/consent/pairing state
+    participant S as Secret/pairing/consent state
     participant T as TelegramService
 
-    U->>W: Enable Remote Access
-    W->>S: classify token + token-bound pairing + exact-scope consent
-    alt all current
-        W->>C: resumeStoredConnection(scope)
-        C->>T: start(token) / acquire singleton lease
-        T-->>C: validated bot
-        C-->>W: authorized connection
-        Note over C,W: router restores selection only after identity + session-scope checks
-    else workspace consent required
-        W-->>U: local consent dialog only
-        W->>S: save current scope; reuse token + paired user
-        W->>C: resumeStoredConnection(scope)
+    U->>W: Set Up / Enable / Reconnect
+    W->>S: classify readiness
+    alt token + pairing + workspace consent current
+        W->>C: resume stored connection
+        C->>T: acquire singleton lease and start
+    else workspace consent stale/missing
+        W-->>U: local workspace authorization
+        W->>C: resume with stored token/pairing
     else pairing missing
-        W-->>U: local consent + saved-token pairing flow
-    else token missing
-        W-->>U: full consent/token/pairing setup flow
+        W-->>U: pair with stored token
+    else token missing/invalid
+        W-->>U: full setup
     end
 
-    opt retryable failed or unexpectedly stopped
-        U->>W: Reconnect
-        W->>C: deduplicated resume using same stored readiness checks
-    end
-
-    U->>W: Disable Remote Access
-    W->>C: cancel lifecycle generation
-    C->>C: synchronously block updates/callbacks and suspend routing
-    C->>T: abort poll and release lease
-    opt correlated local turn remains active
-        C->>T: retain outbound-only client
-        Note over C,T: SDK terminal event updates activity/final answer, then detaches
-    end
-    W->>W: persist enabled=false; keep configured marker
+    U->>W: Disable
+    W->>C: block dispatch synchronously
+    C->>T: stop poll + release lease
 ```
 
-Setup, Enable and Reconnect share one in-flight operation. Concurrent commands cannot start a second poller. Automatic Enable remains conservative when another healthy owner exists; explicit Reconnect transfers the token-fingerprinted lease, gives the former owner one heartbeat window to abort, and only then starts the new poll. Disable invokes the contribution before its first asynchronous wait, so dispatch is blocked even if network cleanup stalls; any later completion from the cancelled generation cannot revive access. A configured disabled state exposes only Enable in the status menu. Workspace-consent recovery is amber and local-only, without token entry or pairing. Authentication/API failures use Set Up Again, while retryable failures and unexpected stopped state expose Reconnect.
-
-During pairing, the contribution is `pairing-only`: all commands, callbacks, and prompts are ignored except the exact pending `/pair` command. It becomes `authorized` only after token validation, paired identity persistence, and current workspace consent are all active.
+Only one healthy `getUpdates` consumer is allowed per bot token. Automatic competing owners fail visibly; explicit reconnect may perform the implemented ownership handoff.
 
 ## 3. Pairing
 
 ```mermaid
 sequenceDiagram
     participant U as Local user
-    participant P as PairingService
-    participant T as Telegram
+    participant P as Pairing service
+    participant TG as Telegram
 
-    U->>P: Start pairing
-    P->>P: generate expiring random challenge
-    P-->>U: display /pair <challenge>
-    U->>T: /pair <challenge>
-    T->>P: update(userId, challenge)
-    P->>P: validate challenge + expiration
-    P->>P: persist authorized numeric Telegram user ID
-    P-->>T: pairing successful
+    U->>P: start pairing
+    P->>P: create expiring single-use challenge
+    P-->>U: show /pair <challenge>
+    U->>TG: /pair <challenge>
+    TG->>P: update(from.id, chat.id, challenge)
+    P->>P: validate private chat + challenge + expiry
+    P->>P: persist numeric Telegram identity
+    P-->>TG: paired
 ```
 
-Security properties:
+Authorization uses numeric identity, not username/display name.
 
-- pairing code is single-use,
-- code expires quickly,
-- authorization is bound to Telegram numeric user ID, not username,
-- bot token alone does not authorize a Telegram user.
+## 4. Session list
 
-## 4. Session list and selection
-
-```mermaid
-sequenceDiagram
-    participant T as Telegram user
-    participant R as CommandRouter
-    participant A as WorkspaceScopePolicy
-    participant S as ICopilotCLISessionService
-
-    T->>R: Sessions
-    R->>S: getAllSessions(token)
-    S-->>R: session items
-    loop every item before metadata is sent
-        R->>A: authorize workingDirectory against current consented roots
-        A-->>R: authorized scope or reject
-    end
-    R-->>T: inline session picker
-    T->>R: callback(select sessionId)
-    R->>S: getSessionItem(sessionId)
-    S-->>R: current session metadata
-    R->>A: reauthorize callback target
-    A-->>R: authorized scope fingerprint
-    R->>R: persist versioned selection
-    R-->>T: edit picker into status card
-```
-
-Listing and selecting sessions do not acquire a live wrapper reference and never expose metadata for rejected sessions. Empty windows, missing/invalid working directories, foreign roots and stale consent/session-scope fingerprints fail closed. Prompt, steering, stop, restoration, activity edits and final answers repeat the authorization check rather than trusting the picker-time decision.
-
-## 5. Normal prompt to idle session
+Telegram now lists two local ownership domains.
 
 ```mermaid
 sequenceDiagram
     participant T as Telegram
-    participant R as TelegramTransport
-    participant A as WorkspaceScopePolicy
-    participant REG as RemoteControlRegistry
-    participant X as PendingRequestContext
-    participant VS as VS Code chat command
-    participant P as Copilot chat participant
-    participant S as CopilotCLISession
-    participant SDK as Copilot SDK Session
-
-    T->>R: text prompt
-    R->>A: authorize selected session now
-    A-->>R: current authorized scope
-    R->>REG: submitPrompt(sessionId, text, updateId)
-    REG->>REG: create typed telegram origin
-    REG->>X: set pending context(prompt, origin)
-    REG->>VS: dispatch openSessionWithPrompt.copilotcli (do not await)
-    REG-->>R: accepted / dispatching
-    R-->>T: send initial Rich progress round + request-bound Stop
-    VS->>P: real ChatRequest + toolInvocationToken
-    P->>X: take pending request context
-    P->>S: handleRequest(...)
-    S->>SDK: send(prompt, agentMode)
-    SDK-->>S: events
-    S-->>REG: publish session events
-    REG-->>R: projected remote events
-    R->>A: reauthorize before publish/flush
-    R->>R: ActivityAggregator -> semantic ActivityRounds
-    R-->>T: one Rich Message per round
-    R-->>T: edit running rounds in place
-```
-
-`executeCommand()` remains pending until `responseCompletePromise` settles, so the transport does not await it. It attaches a rejection handler and reports progress/completion through registry events. If dispatch later fails, clear only the correlated pending context and return an explicit Telegram error. Direct SDK `send()` is not a fallback because it bypasses the VS Code request lifecycle and cannot supply the required `ChatParticipantToolToken`.
-
-## 6. Mid-turn steering
-
-Upstream Copilot already treats a request received while the session is busy as steering and sends the SDK request with `mode: 'immediate'`.
-
-```mermaid
-sequenceDiagram
-    participant T as Telegram
-    participant R as TelegramTransport
-    participant REG as RemoteControlRegistry
-    participant VS as VS Code chat command
-    participant S as CopilotCLISession
-    participant SDK as Copilot SDK Session
-
-    Note over S,SDK: Existing agent turn is running
-    T->>R: "Do not change the DB layer"
-    R->>REG: submitPrompt(sessionId, text, updateId)
-    REG->>REG: create typed telegram origin
-    REG->>VS: pending context + dispatch command without awaiting turn
-    REG-->>R: steering dispatch accepted
-    R-->>T: send current request progress round + Stop
-    VS->>S: handleRequest(real ChatRequest)
-    S->>SDK: send({ prompt, mode: "immediate" })
-    SDK-->>S: steering accepted / continued events
-    S-->>REG: publish activity events
-    REG-->>R: normalized remote events
-    R-->>T: append semantic Rich Message rounds
-```
-
-Reference: https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/steering-and-queueing
-
-### Reply to a specific activity bubble
-
-```mermaid
-sequenceDiagram
-    participant T as Telegram user
-    participant TL as TelegramActivityTimeline
     participant R as TelegramCommandRouter
-    participant D as RemotePromptDispatcher
-    participant VS as Native VS Code chat path
-    participant S as CopilotCLISession
+    participant S as CopilotCLISessionService
+    participant A as WorkspaceScopePolicy
 
-    T->>TL: reply to bot message_id with steering text
-    TL->>TL: resolve chat/message correlation
-    TL-->>R: sessionId + requestId + activityRoundId
-    R->>R: revalidate paired identity, selected session and workspace scope
-    R->>D: dispatch same session + typed Telegram origin
-    D->>VS: pending context + openSessionWithPrompt.copilotcli
-    VS->>S: real ChatRequest/tool token
-    S->>S: busy session -> SDK immediate steering
+    T->>R: /sessions
+    R->>S: getRemoteControlSessions()
+    S-->>R: extensionHost + agentHost session metadata
+    loop every item
+        R->>A: authorize workingDirectory
+        A-->>R: allow / reject
+    end
+    R-->>T: picker
 ```
 
-If the activity generation is complete, replaced, expired, deleted from correlation state or no longer steerable, the router returns an explicit stale-activity response and does not dispatch.
+Extension-host sessions are directly selectable. Agent Host-owned sessions are marked `↪` and require handover.
 
-## 7. Tool execution activity
+## 5. Select an extension-host session
 
 ```mermaid
 sequenceDiagram
-    participant SDK as SDK Session
-    participant S as CopilotCLISession
-    participant C as RemoteControlRegistry
-    participant A as ActivityAggregator
-    participant TL as TelegramActivityTimeline
     participant T as Telegram
+    participant R as Router
+    participant S as Session service
+    participant A as Scope policy
 
-    SDK-->>S: tool.execution_start
-    S-->>C: publish SDK event
-    C->>A: projected tool start
-    A-->>TL: new command/edit/read/search round
-    TL-->>T: sendRichMessage(details block when useful)
-    SDK-->>S: tool.execution_progress / partial result
-    S-->>C: publish SDK event
-    C->>A: projected tool progress
-    A-->>TL: update same round by toolCallId
-    TL-->>T: throttled editMessageText(rich_message)
-    SDK-->>S: tool.execution_complete
-    S-->>C: publish SDK event
-    C->>A: projected tool completion
-    A-->>TL: complete same round
-    TL-->>T: edit original Rich Message
+    T->>R: select session
+    R->>S: getSessionItem(id)
+    S-->>R: metadata
+    R->>A: reauthorize
+    A-->>R: scope fingerprint
+    R->>R: persist selected session metadata
+    R-->>T: status
 ```
 
-Consecutive read/search tools share a semantic inspection round until a reasoning, progress, command, edit, subagent, interaction or terminal boundary. Consecutive SDK-visible intent/reasoning events append to one **Thinking…** Rich Message until one of those non-reasoning boundaries occurs. Commands and file edits remain separate rounds. An edit failure falls back to a new Rich Message linked to the former one with `ReplyParameters`.
+Selection does not acquire and retain an `IReference<ICopilotCLISession>`.
 
-## 8. Permission request
-
-Telegram is an attached registry responder for a concrete pending permission request. The existing first-valid-response-wins race remains authoritative.
+## 6. Agent Host session handover
 
 ```mermaid
 sequenceDiagram
-    participant SDK as SDK Session
-    participant S as CopilotCLISession
-    participant VS as VS Code local approval
+    participant T as Telegram
+    participant R as Router
+    participant S as CopilotCLISessionService
+    participant AH as Agent Host session
+    participant EH as New Remote Pilot session
+
+    T->>R: select ↪ session
+    R->>S: getRemoteControlSessionItem(id)
+    S-->>R: source=agentHost
+    R->>S: forkAgentHostSession(id)
+    S->>AH: registerSessionInUse(id)
+    alt already in use
+        S-->>R: inUse
+        R-->>T: close locally and retry
+    else available
+        S->>S: forkSession(...)
+        S-->>R: forked(newId)
+        R->>R: select newId
+        R-->>T: new Remote Pilot session selected
+    end
+```
+
+This is a controlled **fork/handover**, not direct control of the live Agent Host session and not an AHP client connection.
+
+## 7. Prompt to selected session
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram
+    participant R as Router
+    participant A as Scope policy
     participant REG as RemoteControlRegistry
-    participant MC as MissionControlTransport
-    participant TG as TelegramTransport
-
-    SDK-->>S: permission.requested(requestId)
-    par Local response
-        S->>VS: show local permission UI
-        VS-->>S: local response
-    and Remote response
-        S->>REG: waitForPermission(request)
-        REG-->>MC: request permission response
-        REG-->>TG: request permission response
-        MC-->>REG: optional remote response
-        TG-->>REG: approve-once or deny
-        REG-->>S: first valid remote response
-    end
-    S->>S: accept first valid resolution
-    S->>SDK: respondToPermission(requestId, response)
-    S-->>VS: invalidate/resolve remaining prompt
-    S-->>TG: invalidate buttons / show result
-```
-
-Stale Telegram callbacks MUST NOT be allowed to resolve a later permission request.
-
-Telegram cannot set the session permission level and cannot return an `autoApprove`/`autopilot` escalation. The only V1 results are approve-once and deny.
-
-## 9. Agent user question
-
-```mermaid
-sequenceDiagram
-    participant SDK as SDK Session
+    participant D as RemotePromptDispatcher
+    participant VS as VS Code chat command
     participant S as CopilotCLISession
-    participant VS as VS Code local question UI
-    participant C as RemoteControlRegistry
-    participant M as MissionControlTransport
-    participant T as TelegramTransport
+    participant SDK as Copilot SDK
 
-    SDK-->>S: user_input.requested(requestId, question, choices)
-    par Local response
-        S->>VS: show question carousel
-        VS-->>S: local answer
-    and Remote responses
-        S->>C: waitForUserInput(request)
-        C-->>M: publish question
-        C-->>T: render question + choices
-        M-->>C: optional remote answer
-        T-->>C: choice or bound free-form answer
-        C-->>S: first valid remote response
-    end
-    S->>S: accept first valid resolution
-    S->>SDK: respondToUserInput(requestId, response)
-    S-->>T: invalidate/resolve question
+    T->>R: prompt
+    R->>A: authorize selected session now
+    A-->>R: allowed
+    R->>REG: createRequestOrigin(telegram,...)
+    R->>D: dispatch(sessionId,prompt,origin,options)
+    D->>D: setPendingCopilotCLIRequestContext(...)
+    D->>VS: openSessionWithPrompt.copilotcli
+    D-->>R: accepted + completion promise
+    R-->>T: acknowledge/start activity
+    VS->>S: real ChatRequest + tool token
+    S->>SDK: send
+    SDK-->>S: events
+    S-->>REG: session events
+    REG-->>R: remote activity
+    R-->>T: live/persistent presentation
 ```
 
-## 10. Plan exit approval
+Telegram does not await the whole VS Code command before acknowledging the user. The command may remain pending for the full agent turn.
 
-`CopilotCLISession` owns the only SDK response call. Local VS Code, Mission Control and Telegram race through the same registry; cancellation retires every losing control.
+## 8. Mid-turn steering
 
-```mermaid
-sequenceDiagram
-    participant SDK as SDK Session
-    participant S as CopilotCLISession
-    participant VS as VS Code plan review
-    participant C as RemoteControlRegistry
-    participant M as MissionControlTransport
-    participant T as TelegramPlanBridge
-
-    SDK-->>S: exit_plan_mode.requested(requestId, actions)
-    S->>S: filter remote actions to interactive / exit_only
-    par Local response
-        S->>VS: review plan
-        VS-->>S: local decision
-    and Remote responses
-        S->>C: requestExitPlanMode(session, request)
-        C-->>M: correlated request
-        C-->>T: correlated request
-        M-->>C: safe action / deny / feedback
-        T-->>C: safe callback or bound reply feedback
-        C-->>S: first valid remote response
-    end
-    S->>S: cancel losing responders
-    S->>SDK: respondToExitPlanMode(requestId, response) once
-```
-
-Remote transports never receive or return `autopilot`, `autopilot_fleet` or `autoApproveEdits`. A locally running autopilot request is resolved only by the existing local handler and is not offered to remote responders.
-
-## 11. Abort
-
-```mermaid
-sequenceDiagram
-    participant T as Telegram user
-    participant TT as TelegramTransport
-    participant C as RemoteControlRegistry
-    participant S as registered session control
-    participant SDK as SDK Session
-
-    T->>TT: Stop callback
-    TT->>TT: validate user + selected session + callback nonce
-    TT->>C: abort(sessionId)
-    C->>S: abort()
-    S->>SDK: abort()
-    SDK-->>S: cancellation/session events
-    S-->>C: idle/error/end state
-    C-->>TT: stopped
-    TT-->>T: stopped
-```
-
-## 12. Model selection
+The same native path is used while a session is busy.
 
 ```mermaid
 sequenceDiagram
     participant T as Telegram
-    participant C as TelegramCommandRouter
-    participant P as TelegramRequestPreferences
-    participant M as Combined model bridge
-    participant LM as VS Code LM registry
+    participant R as Router
     participant D as RemotePromptDispatcher
-    participant VS as Native ChatRequest path
+    participant VS as Native chat path
     participant S as CopilotCLISession
+    participant SDK as Copilot SDK
 
-    T->>C: Open model picker
-    C->>M: get available models
-    M->>LM: selectChatModels()
-    M-->>C: native + configured metadata
-    C-->>T: paginated inline model picker
-    T->>C: select modelId + supported effort
-    C->>P: validate and store next-request preference
-    P->>M: resolveModel + getModels
-    M-->>P: exact catalogue match / error
-    P-->>C: validated preference
-    T->>C: next prompt
-    C->>P: validate again and consume once
-    C->>D: prompt + model/effort + safe mode
-    alt Native CLI model
-        D->>VS: userSelectedModelId + model configuration
-    else Configured VS Code model
-        D->>VS: private configured-model selection
-        VS->>M: resolve exact LM + loopback registry
-        M-->>VS: provider-qualified SDK model + registry
-    end
-    VS->>S: handleRequest(real ChatRequest)
-    S->>S: register additive model if needed, then updateModel
-    S->>SDK: setSelectedModel(modelId, effort)
-    C->>S: later read actual selected model
-    C-->>T: actual model in /status
+    Note over S,SDK: current turn running
+    T->>R: steering instruction
+    R->>D: dispatch same selected session
+    D->>VS: native request path
+    VS->>S: real ChatRequest
+    S->>SDK: send(... mode=immediate)
+    SDK-->>S: continued events
 ```
 
-The Telegram preference is not durable and is consumed for one prompt. A later native selection therefore supersedes it and `/status` reports the SDK-selected value. For a configured model, the SDK calls an authenticated loopback Responses adapter that invokes the exact VS Code `LanguageModelChat`; provider credentials remain inside VS Code. Catalogue presence alone is not a compatibility claim.
+Reply-to-activity steering first resolves bounded message correlation and revalidates identity, selected session and workspace scope.
 
-## 13. Session event projection
+## 9. Event projection
 
 ```mermaid
 flowchart LR
-    A[SDK SessionEvent] --> B[Session-lifetime publication hook]
-    B --> C[RemoteControlRegistry]
-    C --> N[RemoteAgentEvent projector]
-    N --> D[ActivityAggregator]
-    D --> E[Semantic ActivityRounds]
-    E --> F[TelegramRichRenderer]
-    F --> G[One focused Rich Message bubble per round]
-    G --> H[sendRichMessage / editMessageText rich_message]
-    C --> I[Permission/question request race]
-    I --> E
+    SDK[SDK SessionEvent]
+    SES[CopilotCLISession bridge]
+    REG[RemoteControlRegistry]
+    PROJ[Remote event projection]
+    AGG[ActivityAggregator]
+    UI[Telegram activity UI]
+
+    SDK --> SES --> REG --> PROJ --> AGG --> UI
 ```
 
-Persisted SDK events may be replayed when attaching Telegram to an existing session. Ephemeral deltas should not be expected to exist after the fact. Replay seeds bounded internal correlation/state only and is never presented as new current activity or a new answer.
+The remote feed is session-lifetime state, not a reuse of request-scoped native rendering listeners.
 
-Phase 5.3 marks replay delivery explicitly and ignores replay for current UI output. Each current request can have multiple chronological semantic bubbles, but not one bubble per microscopic event. Bubbles with useful round-local detail are independently expandable; short status/progress bubbles remain compact, while the final assistant answer is directly visible and formatted. Running rounds update no faster than the configured 750 ms minimum edit interval; new/waiting/failed/terminal rounds flush immediately. Every send/edit revalidates the paired identity, selected session and current workspace scope. Permission and user-input requests are individual correlated rounds, not generic activity output.
+Replay of persisted events seeds internal state only. It is not presented as new activity.
 
-The session-lifetime hook is distinct from native request-scoped listeners, which are disposed after each request. Its disposable belongs to the registry session binding.
-
-Attach/replay order:
-
-```text
-install live listener into temporary buffer
-  -> call sdkSession.getEvents()
-  -> filter supported persisted event types
-  -> replay in event order while recording event IDs
-  -> flush unseen buffered live events
-  -> switch to direct live publication
-```
-
-Remote forwarding has exactly one publication point. Request-scoped native rendering may still observe the same SDK events, but it MUST NOT also publish them to the registry. Duplicate IDs are suppressed and no forwarded event may reference its own ID as `parentId`.
-
-Reference: https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events
-
-## 14. Future own-ID extension proposal authorization
-
-### 13.1 Fork-bundled V2 companion
+## 10. Tool activity
 
 ```mermaid
 sequenceDiagram
-    participant B as Product build
-    participant M as Companion package.json
-    participant P as product.json
-    participant VS as VS Code startup
-    participant E as Own-ID companion activation
+    participant SDK as SDK
+    participant REG as Registry
+    participant A as ActivityAggregator
+    participant T as Telegram
 
-    B->>M: read extension ID + enabledApiProposals
-    B->>P: validate matching extensionEnabledApiProposals entry
-    B-->>B: fail build on missing ID or proposal mismatch
-    VS->>P: resolve proposed-API authorization before activation
-    VS->>E: activate companion
-    E->>E: preflight required APIs
-    alt APIs available
-        E->>E: continue initialization
-    else APIs unavailable
-        E-->>VS: fail closed with product-registration diagnostic
+    SDK-->>REG: tool start
+    REG->>A: projected event
+    A-->>T: create semantic tool round
+    SDK-->>REG: progress
+    REG->>A: same toolCallId
+    A-->>T: update running round
+    SDK-->>REG: complete/fail
+    REG->>A: same toolCallId
+    A-->>T: finalize round
+```
+
+Read/search bursts may aggregate. Commands, edits and interactive requests remain distinct where that improves steerability and reviewability.
+
+## 11. Permission request
+
+```mermaid
+sequenceDiagram
+    participant SDK as SDK
+    participant S as CopilotCLISession
+    participant L as Local VS Code UI
+    participant REG as Registry
+    participant MC as Mission Control
+    participant TG as Telegram
+
+    SDK-->>S: permission requested
+    par local
+        S->>L: show permission UI
+        L-->>S: response
+    and remote
+        S->>REG: requestPermission(...)
+        REG-->>MC: request
+        REG-->>TG: request
+        MC-->>REG: optional response
+        TG-->>REG: approve-once / deny
+        REG-->>S: first valid remote response
     end
+    S->>S: first valid result wins
+    S->>SDK: respondToPermission once
 ```
 
-Activation never edits `product.json`. This path is not needed by V1, which runs inside the bundled Copilot extension.
+Telegram cannot change the session-wide permission policy.
 
-### 13.2 Private standalone V2 experiment
+## 12. User question
 
 ```mermaid
 sequenceDiagram
-    participant E as Extension
-    participant P as ProposedApiSetup
-    participant U as User
-    participant A as argv.json
+    participant SDK as SDK
+    participant S as CopilotCLISession
+    participant REG as Registry
+    participant TG as Telegram
 
-    E->>P: preflight()
-    P-->>E: required proposed APIs unavailable
-    E-->>U: explain requirement + request consent
-    U->>E: Enable
-    E->>P: enableForExtensionId()
-    P->>A: read existing JSONC
-    P->>P: create backup / preserve existing keys
-    P->>A: add ID to enable-proposed-api array
-    P-->>U: full restart required
+    SDK-->>S: user_input requested
+    S->>REG: requestUserInput(...)
+    REG-->>TG: choices + correlated freeform route
+    TG-->>REG: answer
+    REG-->>S: first valid response
+    S->>SDK: respondToUserInput once
 ```
 
-A simple window reload is not considered sufficient because startup arguments are read by the VS Code main process.
+## 13. Plan exit/approval
 
-This `argv.json` flow does not run for V1 or for a correctly registered fork-bundled V2 companion.
+```mermaid
+sequenceDiagram
+    participant SDK as SDK
+    participant S as CopilotCLISession
+    participant REG as Registry
+    participant TG as TelegramPlanBridge
 
-Reference: https://code.visualstudio.com/api/advanced-topics/using-proposed-api
+    SDK-->>S: exit_plan_mode requested
+    S->>REG: requestExitPlanMode(safe actions)
+    REG-->>TG: interactive / exit_only / reject / feedback
+    TG-->>REG: correlated response
+    REG-->>S: first valid response
+    S->>SDK: respondToExitPlanMode once
+```
 
-## 15. Error handling flow
+Remote types cannot represent autopilot/autopilot-fleet/autoApproveEdits.
+
+## 14. Stop/abort
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram
+    participant R as Router
+    participant REG as Registry
+    participant S as Bound session
+    participant SDK as SDK
+
+    T->>R: native Stop or /stop
+    R->>R: validate identity/session/request
+    R->>REG: abort(sessionId, telegram)
+    REG->>S: abort()
+    S->>SDK: abort()
+    SDK-->>S: terminal/state events
+    S-->>REG: activity
+    REG-->>R: terminal state
+    R-->>T: stopped/final update
+```
+
+## 15. Model selection
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram
+    participant R as Router
+    participant M as Combined model bridge
+    participant D as RemotePromptDispatcher
+    participant VS as Native request path
+    participant S as CopilotCLISession
+
+    T->>R: /model
+    R->>M: native + VS Code LM catalogue
+    M-->>R: provider-qualified choices
+    R-->>T: picker
+    T->>R: choose model/effort
+    T->>R: next prompt
+    R->>D: validated model preference
+    D->>VS: selected model configuration
+    VS->>S: real request
+    S->>S: apply/update selected model
+```
+
+Catalogue visibility does not by itself prove backend compatibility.
+
+## 16. Workspace file browsing
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram
+    participant R as Router
+    participant A as Scope policy
+    participant F as WorkspaceFileBrowser
+
+    T->>R: /files
+    R->>A: authorize selected session
+    A-->>R: workspace root
+    R->>F: list root/subpath
+    F->>F: containment + traversal/symlink/binary checks
+    F-->>R: bounded entries/preview
+    R-->>T: inline picker or read-only preview
+```
+
+File browsing is presentation-only in the current implementation; editing from Telegram is not implied.
+
+## 17. Error handling
 
 ```mermaid
 flowchart TD
-    I[Incoming Telegram action] --> A{Authorized?}
-    A -->|no| X[Reject without session data]
-    A -->|yes| S{Selected session valid?}
-    S -->|no| Y[Ask user to select session]
-    S -->|yes| D[Dispatch]
-    D --> R{Succeeded?}
-    R -->|yes| OK[Acknowledge / render result]
-    R -->|no| ER[Render explicit error + preserve safe state]
+    I[Incoming Telegram action] --> A{Paired and current?}
+    A -->|no| X[Reject without session metadata]
+    A -->|yes| W{Workspace/session authorized?}
+    W -->|no| Y[Reject / refresh selection]
+    W -->|yes| D[Dispatch]
+    D --> R{Accepted?}
+    R -->|yes| OK[Acknowledge and stream state]
+    R -->|no| ER[Explicit error; preserve safe state]
 ```
 
-No accepted Telegram action should disappear silently.
+No accepted remote action should disappear silently.
