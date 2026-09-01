@@ -1,14 +1,16 @@
 # Upstream Sync Strategy
 
-The project is a thin downstream patch over the actively maintained VS Code Copilot source. Upstream compatibility is therefore a first-class engineering requirement.
+> **Status:** Current maintenance reference
+> **Scope:** `copilot-telegram` downstream branch
+> **Last reviewed:** 2026-09-01
 
-## 1. Goal
+The project is a downstream patch over actively changing VS Code/Copilot code. Upstream compatibility is a first-class engineering requirement.
 
-Keep the Telegram feature isolated enough that new upstream VS Code/Copilot changes can be adopted with minimal manual conflict.
+## 1. Maintenance principle
 
-Primary rule:
+> Keep remote-control behavior isolated in downstream modules and maintain the smallest deliberate set of integration seams into upstream Copilot session code.
 
-> Prefer downstream files plus two deliberate, narrow integration points: service composition and the transport-neutral session hook. Avoid Telegram-specific changes in upstream Copilot code.
+The project should absorb upstream behavior changes first, then re-apply the downstream remote-control contract on top.
 
 ## 2. Repository model
 
@@ -19,62 +21,47 @@ origin   -> SachiHarshitha/vscode-telegram
 upstream -> microsoft/vscode
 ```
 
-Downstream development branch:
+Development branch:
 
 ```text
 copilot-telegram
 ```
 
-The branch was created from upstream-equivalent commit:
+Do not assume the branch's original base commit is the compatibility target forever. Release metadata should record the exact tested source/upstream relationship for each artifact.
+
+## 3. Downstream-owned source
+
+Prefer changes under:
 
 ```text
-0984c920744f2013d0ad2bc5e826fa45a64069ab
-```
-
-## 3. Patch layout
-
-Prefer a commit stack like:
-
-```text
-upstream/main
-   |
-   +-- T1 docs/specification
-   +-- T2 remote-control registry + Mission Control migration
-   +-- T3 Mission Control regression + in-memory second-transport tests
-   +-- T4 Telegram transport + auth
-   +-- T5 Telegram renderer/commands
-   +-- T6 setup/release tooling
-   +-- T7 tests
-```
-
-Do not squash every downstream concern into one giant commit. Small thematic commits make upstream rebases, `git range-diff`, conflict review and cherry-picking easier.
-
-## 4. Source-touch policy
-
-### Preferred: downstream-only files
-
-```text
+extensions/copilot/src/extension/remoteControl/**
 extensions/copilot/src/extension/telegramRemote/**
 extensions/copilot/docs/telegram-remote/**
+extensions/copilot/script/telegram-remote/**
 ```
 
-### Expected narrow upstream edits
+These areas should contain almost all Telegram-specific behavior.
 
-Potential examples:
+## 4. Deliberate upstream seams
 
-- `chatSessions.ts` — instantiate/register `TelegramRemoteContrib` using the existing Copilot CLI service container.
-- `copilotcliSession.ts` — publish session events to the registry, race registry permission/question results with local UI, and attach safe controls. This is required because the current interface and request-scoped listeners are insufficient.
-- new transport-neutral files beside the Copilot CLI integration — registry contracts, registry implementation and Mission Control adapter.
-- a session/service interface — expose only the minimum additional lifecycle/action types if needed.
-- `package.json` — downstream configuration/commands/settings/proposed API declarations if required.
+Current compatibility-sensitive edits include or depend on:
 
-### Avoid
+- Copilot CLI service composition in `chatSessions.ts`,
+- session-lifetime remote binding/event/interactive hooks in `copilotcliSession.ts`,
+- remote-control session discovery/handover additions in `copilotcliSessionService.ts`,
+- pending request context and native chat dispatch plumbing,
+- model-selection/initializer paths used by the VS Code-LM bridge,
+- native session-provider/UI refresh hooks where remote attachment is shown.
 
-- Telegram types/branches or broad rewrites in `copilotcliSession.ts`,
-- copying the session service into a Telegram-specific version,
-- replacing upstream Mission Control behavior,
-- modifying tool implementations for Telegram-only reasons,
-- forking SDK runtime code.
+Keep these edits narrow and transport-neutral where possible.
+
+Avoid:
+
+- Telegram-specific branches in core agent/tool/worktree logic,
+- copying the entire session service into a Telegram implementation,
+- maintaining a second authoritative conversation/session state,
+- patching the third-party Copilot CLI runtime,
+- UI scraping as a compatibility workaround.
 
 ## 5. Sync procedure
 
@@ -86,31 +73,32 @@ git checkout copilot-telegram
 git rebase upstream/main
 ```
 
-If the project chooses a release-tag-based policy instead of tracking `main`, rebase onto the selected upstream release commit/tag and record it in compatibility metadata.
+For a release-based policy, replace `upstream/main` with the selected upstream tag/commit and record it.
 
-After rebase:
+After rebase, inspect how the downstream patch moved:
 
 ```bash
-# inspect downstream patch movement
 git range-diff <old-upstream>..<old-downstream> <new-upstream>..HEAD
 ```
 
-Then run the compatibility test suite before accepting the rebase.
+A clean textual rebase is not sufficient evidence of compatibility.
 
-## 6. Conflict priority
+## 6. Conflict resolution order
 
-When conflicts occur:
+When an upstream conflict occurs:
 
-1. understand the upstream behavior change first,
+1. understand the upstream architectural/behavioral change,
 2. preserve the new upstream behavior,
-3. re-apply the smallest Telegram integration on top,
-4. do not blindly choose the downstream side,
-5. update docs/API mapping if an integration seam changed,
-6. add a regression test for the changed seam.
+3. decide whether the downstream seam is still necessary,
+4. re-apply the smallest compatible remote-control change,
+5. update the API/architecture docs if the ownership model changed,
+6. add/adjust a focused regression test.
 
-## 7. High-risk upstream files
+Never resolve a session or permission conflict by blindly keeping the downstream side.
 
-Monitor changes to:
+## 7. High-risk files and areas
+
+Monitor at least:
 
 ```text
 extensions/copilot/package.json
@@ -119,119 +107,140 @@ extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSession.
 extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotcliSessionService.ts
 extensions/copilot/src/extension/chatSessions/copilotcli/node/copilotCli.ts
 extensions/copilot/src/extension/chatSessions/copilotcli/node/mcpHandler.ts
-src/vs/workbench/services/extensions/common/extensionsProposedApi.ts
-src/vs/platform/environment/common/argv.ts
+extensions/copilot/src/extension/chatSessions/copilotcli/common/pendingRequestContext.ts
 ```
 
-Also monitor changes to:
+Also watch:
 
-- `enabledApiProposals` in Copilot `package.json`,
-- VS Code product proposal allowlists,
-- Copilot SDK dependency version,
-- Telegram-related Node/runtime dependency restrictions,
-- session event names/types.
+- Copilot SDK/runtime dependency versions,
+- SDK event names/shapes,
+- permission/user-input/plan response types,
+- native `workbench.action.chat.openSessionWithPrompt.copilotcli` behavior,
+- proposed chat-session APIs,
+- Agent Host ownership/session storage behavior,
+- local session metadata such as `clientName`,
+- model configuration plumbing,
+- Mission Control remote-session changes,
+- Telegram Bot API behavior used by the adapter.
 
-`copilotcliSession.ts` is an intentional high-risk patch point. The registry reduces repeated conflicts by replacing Mission Control-only branches with one transport-neutral hook; keep the hook compact and covered by focused source-level tests.
+## 8. Agent Host-specific compatibility checks
 
-## 8. Compatibility metadata
+The current branch discovers Agent Host-owned sessions and performs a controlled fork handover.
 
-Add a generated or maintained file in a later implementation phase, for example:
+On every relevant upstream update verify:
+
+- Agent Host-owned sessions can still be identified reliably,
+- Agent Host session-data location/format assumptions are still valid,
+- extension-host forks are not later misclassified as Agent Host-owned,
+- `registerSessionInUse()` semantics still prevent unsafe concurrent handover,
+- source locks are released on every exit/error path,
+- `forkSession()` still produces a normal controllable extension-host session,
+- Telegram does not accidentally begin treating a live Agent Host session as registry-bound,
+- any new official AHP/public-client path is evaluated before adding more ownership heuristics.
+
+If upstream changes session ownership substantially, revisit [ADR-0003](./adr/0003-agent-host-session-handover.md) rather than layering another heuristic blindly.
+
+## 9. Native prompt seam checks
+
+For every upstream update verify:
+
+- pending request context still carries the data needed by remote dispatch,
+- the native session command still creates the real request/tool token path,
+- argument names/queue semantics remain valid,
+- command completion behavior is understood,
+- rejection cleanup cannot clear a newer request,
+- busy-session steering semantics remain compatible.
+
+If this seam disappears, make an explicit architecture decision before replacing it with direct SDK send.
+
+## 10. Remote-control registry checks
+
+Verify that:
+
+- each SDK event reaches each attached transport once,
+- replay/live deduplication remains valid,
+- session binding/disposal still matches wrapper lifetime,
+- transport capability defaults remain fail-closed,
+- typed provenance remains the authority for remote mode,
+- Mission Control and Telegram interaction races still resolve once,
+- removed/suspended transports cannot win pending responses,
+- Telegram cannot gain an elevating mode after upstream mode changes.
+
+## 11. Reference ownership checks
+
+`getSession()`/`createSession()` return reference-counted session wrappers.
+
+On upstream changes verify:
+
+- the acquire/dispose contract is unchanged,
+- Telegram list/select/status/file/activity paths still avoid pinning wrappers unnecessarily,
+- any new temporary inspection opens/closes deterministically,
+- Agent Host handover does not leak the source lock or resulting session reference.
+
+## 12. Test gate
+
+Before accepting an upstream update:
+
+- typecheck/build the Copilot extension,
+- run remote-control registry tests,
+- run Telegram authorization/routing/activity tests,
+- run focused upstream Copilot session tests touched by the patch,
+- exercise Agent Host discovery/handover tests,
+- exercise native prompt dispatch tests,
+- run packaging/release-report checks for a release candidate.
+
+See [TEST_STRATEGY.md](./TEST_STRATEGY.md).
+
+## 13. Compatibility metadata
+
+Every release candidate should record:
 
 ```text
-extensions/copilot/telegram-upstream.json
+exact downstream commit
+upstream/base or merge-base commit
+VS Code version/build identity
+Copilot extension version
+resolved Copilot SDK/runtime version
+Telegram remote patch/revision
+required proposal set
+artifact checksum
 ```
 
-Suggested shape:
+Generated compatibility metadata is preferred over hand-maintained version examples in documentation.
 
-```json
-{
-  "vscodeCommit": "0984c920744f2013d0ad2bc5e826fa45a64069ab",
-  "copilotExtensionVersion": "0.63.0",
-  "telegramPatchVersion": "0.1.0",
-  "testedVSCodeVersion": "matching build",
-  "distribution": "vsix"
-}
-```
+## 14. Automated upstream watch
 
-The release workflow should fail if this metadata is obviously stale relative to the checked-out upstream source.
-
-## 9. Automated upstream watch
-
-P1 CI automation:
+A scheduled/manual CI workflow should be non-destructive:
 
 ```mermaid
 flowchart TD
-    A[Scheduled job] --> B[Fetch microsoft/vscode upstream]
-    B --> C{New upstream commit/release?}
-    C -->|no| Z[Exit]
-    C -->|yes| D[Create temporary rebase/update branch]
-    D --> E{Rebase clean?}
-    E -->|no| F[Open/update maintenance issue]
-    E -->|yes| G[Build]
-    G --> H[Run upstream + Telegram tests]
-    H --> I{Pass?}
-    I -->|no| F
-    I -->|yes| J[Produce compatibility report / optional PR]
+    A[Fetch upstream] --> B{Relevant change?}
+    B -->|no| Z[Exit]
+    B -->|yes| C[Ephemeral rebase/update]
+    C --> D{Rebase clean?}
+    D -->|no| F[Report maintenance failure]
+    D -->|yes| E[Build + focused tests]
+    E --> G{Pass?}
+    G -->|no| F
+    G -->|yes| H[Produce compatibility report/artifact]
 ```
 
-Do not automatically move the production/release branch without review.
+Do not automatically move/publish the release branch solely because an unattended rebase passed.
 
-## 10. API-change checklist
+## 15. Long-term exit from the fork
 
-For each upstream update verify:
+The desired future state is a stable client/control surface that eliminates source-level Copilot patching.
 
-- [ ] session service methods still exist or migration understood
-- [ ] session events required by Telegram still exist
-- [ ] request-scoped versus session-lifetime listener ownership still understood
-- [ ] overlapping Mission Control observers cannot export the same SDK event twice
-- [ ] forwarded event IDs/parent IDs remain valid and no event is its own parent
-- [ ] steering semantics unchanged
-- [ ] pending request context and `workbench.action.chat.openSessionWithPrompt.copilotcli` still create a real request for both controller paths
-- [ ] native command still awaits response completion and remote dispatch remains deliberately non-blocking
-- [ ] `sdkSession.getEvents()` replay types/order and replay/live deduplication remain valid
-- [ ] typed origin—not `SendOptions.source` prefix—controls Mission Control mode inheritance
-- [ ] permission request/response shapes unchanged
-- [ ] user-input request/response shapes unchanged
-- [ ] model selection API still valid
-- [ ] session status states still map correctly
-- [ ] proposed API names still exist
-- [ ] VS Code runtime argument behavior unchanged
-- [ ] Mission Control changes reviewed for reusable improvements
-- [ ] Mission Control command/control semantics unchanged behind the registry while duplicate event export remains eliminated
-- [ ] `IReference<ICopilotCLISession>` acquire/dispose contract unchanged
-- [ ] singleton Telegram poller lease still prevents competing consumers
-- [ ] Copilot SDK/CLI license/dependency changes reviewed
-
-## 11. Shared remote-control refactoring
-
-The transport-neutral abstraction is required before Telegram is added because the current Mission Control state is hard-coded into permission and question flows.
-
-Example candidate:
-
-```ts
-interface IRemoteControlTransport {
-    readonly id: string;
-    readonly onDidReceiveCommand: Event<RemoteCommand>;
-    publish(sessionId: string, event: RemoteAgentEvent): void;
-    requestPermission?(...): Promise<PermissionRequestResult | undefined>;
-    requestUserInput?(...): Promise<UserInputResponse | undefined>;
-}
-```
-
-Preserve Mission Control's protocol-specific API client, buffering and polling inside its adapter. The shared change should be limited to transport registration, typed origin, exactly-once event publication/replay, response arbitration and safe session actions. Prove it first with Mission Control plus an in-memory transport, then add Telegram.
-
-## 12. Long-term exit from fork
-
-The ideal future state is a stable upstream extension point such as a public remote-session/transport provider API.
-
-If Microsoft/GitHub exposes such an API:
+Possible future forms include:
 
 ```text
-Official Copilot extension
-       |
-       +-- stable remote-control API
-                 |
-                 +-- independent Telegram extension
+Official Copilot / Agent Host
+        |
+        +-- stable remote-client/session API or AHP endpoint
+                |
+                +-- independent Emagin8/Telegram client
 ```
 
-At that point the project should migrate away from source-level Copilot internals and reduce the fork to zero or near-zero patches.
+If an upstream-supported multi-client Agent Host/AHP path becomes available and covers the required IDE/session behavior, prefer migrating toward it over expanding the current ownership/fork bridge.
+
+The fork is an implementation vehicle, not a permanent architectural goal.
