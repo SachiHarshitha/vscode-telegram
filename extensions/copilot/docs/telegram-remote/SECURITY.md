@@ -1,411 +1,311 @@
 # Security Model
 
-Remote control of a coding agent is a privileged capability. Telegram messages can indirectly cause file writes, shell commands, network access and Git operations, so the Telegram transport must be treated as a security boundary rather than a convenience UI.
+> **Status:** Current security reference
+> **Scope:** `copilot-telegram` downstream branch
+> **Last reviewed:** 2026-09-01
+>
+> Remote control of a coding agent is a privileged capability. Telegram input can indirectly cause file writes, shell commands, network access and Git operations. The Telegram path is therefore a security boundary, not a convenience UI.
 
-> **Confidentiality warning:** Telegram bot conversations are not end-to-end encrypted Secret Chats. Prompts, code excerpts, file paths, commands, diffs, tool output and repository metadata sent to the bot transit Telegram infrastructure and are available to the bot endpoint. Do not enable this transport for content whose policy forbids that disclosure.
+> **Confidentiality warning:** Telegram bot conversations are not end-to-end encrypted Secret Chats. Prompts, assistant output, file paths, tool summaries and other content intentionally projected to the bot transit Telegram infrastructure. Do not enable the transport for content whose policy forbids that disclosure.
 
 ## 1. Security objectives
 
-The system MUST:
+The implementation must:
 
-- reject all unpaired Telegram users,
-- prevent stale/replayed callbacks from authorizing a different action,
+- reject unpaired or stale identities,
+- disclose no session metadata before authorization,
+- bind every action to the current authorized workspace/session,
+- prevent callback/reply replay and cross-request confusion,
 - preserve upstream Copilot permission semantics,
-- prevent every Telegram action from raising the session permission level to `autoApprove` or `autopilot`,
-- keep secrets off Telegram,
-- prevent accidental cross-session/workspace control,
-- make destructive actions explicit,
-- fail closed when state is ambiguous,
-- provide a local emergency disable mechanism.
+- prevent Telegram from raising the session permission policy,
+- keep provider/bot credentials out of Telegram and model context,
+- make remote attachment and disablement locally visible,
+- fail closed when ownership or state is ambiguous.
 
 ## 2. Trust boundaries
 
 ```mermaid
 flowchart LR
-    U[Telegram user] -->|untrusted network input| TG[Telegram Bot API]
-    TG -->|Updates| TA[Telegram transport]
-    TA --> AUTH[Pairing / authorization]
-    AUTH --> ROUTE[Command router]
-    ROUTE --> RC[Remote control coordinator]
-    RC --> CS[Copilot session]
-    CS --> FS[Workspace / shell / Git / network tools]
+    U[Telegram user]
+    TG[Telegram Bot API]
+    TA[Telegram transport]
+    AUTH[Pairing + authorization]
+    ROUTE[Command/router state]
+    REG[RemoteControlRegistry]
+    SES[Copilot session]
+    TOOLS[Workspace / shell / Git / network tools]
+    SEC[VS Code SecretStorage]
 
-    SEC[VS Code SecretStorage] --> TA
+    U --> TG --> TA --> AUTH --> ROUTE --> REG --> SES --> TOOLS
+    SEC --> TA
 ```
 
-Trust levels:
+Telegram is an external transport. Pairing identifies an allowed operator; it does not make Telegram a confidential channel and does not bypass upstream tool permissions.
 
-- Telegram Bot API is an external transport.
-- Incoming update content is untrusted until authorized and validated.
-- A paired Telegram user is trusted to request operations, but upstream permission policy still governs sensitive tool execution.
-- The Copilot session/runtime remains the authority for tool permissions and agent state.
-- Telegram is not a trusted confidential storage boundary; authorization prevents other bot users from controlling the workstation but does not provide end-to-end encryption against the transport provider.
+## 3. Pairing and identity
 
-## 3. Pairing
+Current pairing is initiated locally and uses a cryptographically random, short-lived, single-use challenge.
 
-V1 pairing flow:
+The accepted remote identity is based on Telegram's numeric user/chat identity, not username/display name.
 
-1. Local user starts pairing from VS Code.
-2. Extension generates a cryptographically random, single-use challenge.
-3. Challenge has a short expiration.
-4. User sends `/pair <challenge>` to the configured bot.
-5. Extension validates the challenge and captures Telegram's numeric `from.id`.
-6. Numeric user ID is stored as authorized.
-7. Challenge is destroyed immediately.
+Rules:
 
-Requirements:
+- the bot token alone is not user authorization,
+- pairing attempts are bounded,
+- pairing-only state accepts only the exact pending pairing action,
+- normal commands/callbacks/prompts remain blocked until the identity and workspace consent are current.
 
-- Never authorize by Telegram username/display name.
-- Never make the bot token itself sufficient for user authorization.
-- Pairing challenge attempts are rate-limited.
-- Pairing responses do not expose workstation/session data until successful.
+## 4. Secret handling
 
-## 4. Bot token handling
+The bot token is stored through VS Code protected secret storage and must never be placed in:
 
-The bot token is a secret with full control over the bot.
+- settings JSON,
+- repository files,
+- Telegram messages,
+- model prompts,
+- diagnostics/log output.
 
-Requirements:
-
-- store through VS Code `SecretStorage` where available,
-- never place the token in `settings.json`, logs, telemetry, Telegram messages or repository files,
-- redact URLs/headers that may contain the token,
-- provide a local command to forget/revoke the configured token,
-- never send the bot token to Copilot/model context.
+Configured model/provider credentials remain owned by the corresponding VS Code/provider implementation. The downstream VS Code-LM bridge must not copy raw provider credentials into Telegram state or Copilot SDK provider configuration.
 
 ## 5. Authorization pipeline
 
-Every incoming update follows:
+Every incoming action follows the same conceptual pipeline:
 
 ```text
-Update received
-  -> validate Bot API shape
+validate update shape
   -> deduplicate update_id
-  -> identify numeric Telegram user ID
-  -> check pairing/allowlist
-  -> validate callback/request token if applicable
+  -> identify numeric Telegram identity
+  -> require current pairing
+  -> validate callback/reply correlation when applicable
   -> resolve selected session
-  -> authorize session workingDirectory against current consented workspace roots
-  -> check action allowed in current state
+  -> authorize session workingDirectory against current consented roots
+  -> validate current lifecycle/action state
   -> dispatch
 ```
 
-No session metadata should be returned to unauthorized users.
+No callback, message ID, keyboard visibility or session ID is authorization by itself.
 
-## 6. Session and workspace isolation
+## 6. Workspace and session isolation
 
-Every remote action is bound to a selected session ID.
+The session service can discover sessions outside the current window. Therefore session discovery and authorization are deliberately separate.
 
-Destructive callbacks should additionally bind:
+`CurrentWorkspaceTelegramSessionScopePolicy` permits a session only when its valid file-URI working directory is equal to or below a currently consented workspace root according to VS Code resource identity.
+
+The following fail closed:
+
+- empty/no-root window,
+- missing/invalid/non-file working directory,
+- foreign URI authority,
+- sibling/out-of-scope repository,
+- changed workspace roots,
+- stale selection schema/fingerprint.
+
+Scope is revalidated at important boundaries such as listing, selection, restoration, prompt/steering, stop and output publication. A previous successful picker action is not permanent authorization.
+
+## 7. Agent Host handover boundary
+
+Agent Host-owned sessions are discoverable in the current branch, but they are not remotely controlled in place.
+
+Security-relevant behavior:
+
+- Agent Host metadata is still workspace-authorized before display,
+- a `↪` selection explicitly requests handover,
+- `forkAgentHostSession()` first attempts to register the source session as in-use,
+- if the source is already in use, Telegram control is rejected,
+- when available, a **new extension-host Remote Pilot session** is created and selected,
+- the original live Agent Host session is not treated as a registry-bound Telegram session.
+
+This avoids pretending that two runtime owners safely mutate one live session without a validated shared-client protocol.
+
+Direct AHP client attachment has a separate security model and is not implemented here.
+
+## 8. Trusted request provenance
+
+Remote mode/authority is based on a registry-created `RemoteRequestOrigin`, not on Telegram payload data or SDK `source` prefixes.
+
+Rules:
+
+- transports cannot supply or override their trusted registry identity,
+- structurally copying the visible fields of an origin object does not recreate trust,
+- SDK `SendOptions.source` is correlation/telemetry metadata only,
+- Mission Control and Telegram modes remain isolated,
+- Telegram remains non-elevated even when Mission Control is operating in an elevated mode.
+
+## 9. Permission ceiling
+
+Telegram can answer a concrete pending permission request only with:
+
+- **Approve once**
+- **Deny**
+
+Telegram cannot:
+
+- enable `autoApprove`,
+- select `autopilot`/`autopilot_fleet`,
+- create persistent allow rules,
+- mutate the global/session permission policy.
+
+A Telegram approval is a UI response to one upstream SDK permission request, not authority to execute arbitrary future operations.
+
+Local VS Code, Mission Control and Telegram use first-valid-response-wins behavior. Losing/stale controls are invalidated.
+
+## 10. Plan and user-input safety
+
+User-question replies are accepted only when correlated to the active request/question.
+
+Plan-exit responses use a separate non-elevating type that can represent only:
+
+- `interactive`,
+- `exit_only`,
+- denial,
+- bounded feedback.
+
+The remote response type cannot encode autopilot/autopilot-fleet/autoApproveEdits, and runtime validation rejects forged/unoffered values.
+
+## 11. Callback and reply correlation
+
+Interactive Telegram state is opaque and server-side.
+
+Callbacks/replies should bind enough current state to prevent reuse, including as applicable:
 
 ```text
-telegramUserId
-sessionId
-requestId/toolCallId where applicable
+paired identity
+chat/message ID
+session ID
+request/tool-call/activity ID
+generation/revision
 nonce
 expiry
 ```
 
-If the active selection changes, old callbacks should be rejected.
+A callback/reply that is stale, wrong-session, wrong-user, replaced-generation or already resolved returns a harmless explicit failure and does not dispatch.
 
-The session service is global enough to return metadata for sessions outside the current window. Therefore a session ID is necessary but not sufficient authorization. `CurrentWorkspaceTelegramSessionScopePolicy` evaluates the current environment on every boundary and permits only a valid file-URI `workingDirectory` that VS Code resource identity considers equal to or below a root of the currently consented window. It does not use string-prefix path comparison.
-
-The following fail closed before session metadata is disclosed or an action is dispatched:
-
-- an empty window or no current workspace roots,
-- a missing, invalid or non-file working directory,
-- a sibling/foreign workspace or different URI authority,
-- a consent fingerprint, root set or session working directory that changed after selection,
-- a selection persisted with an older schema.
-
-The check is repeated for listing, selection callbacks, restoration, status, prompt, steering, stop, activity publication/flush and final-answer publication. The durable v2 selection binds the consent scope to the normalized authorized session URI; it stores metadata only and never a live session reference.
-
-Telegram status messages should show enough context to prevent operator mistakes:
-
-```text
-Session: <title>
-Workspace: <folder/repo>
-Branch: <branch when available>
-Model: <model>
-```
-
-## 7. Permissions
-
-Telegram must not bypass upstream permission handling.
-
-**Current implementation:** Telegram registers a permission-response capability backed by the transport-neutral registry. Each Telegram control is bound to one live session/request/tool call and the exact bot message that presents it. The callback nonce is one-shot. Local VS Code, Mission Control and Telegram still use the same first-valid-response-wins race.
-
-A Telegram approval is a user-interface response to an existing SDK permission request, not a blanket permission to execute arbitrary actions.
-
-V1 response choices are deliberately limited to:
-
-- Approve once
-- Deny
-
-Telegram MUST NOT expose session-wide approval, persistent allow rules, `setPermissionLevel()`, `autoApprove` or `autopilot`. A remote mode change that would implicitly raise permission is rejected. Any future expansion requires a new security review and a locally configured ceiling that remote input cannot increase.
-
-Phase 6 applies the same ceiling to plan exit. Telegram and Mission Control may approve only an action already offered as `interactive` or `exit_only`, reject, or provide bounded feedback. Their transport-neutral response type cannot represent `autopilot`, `autopilot_fleet` or `autoApproveEdits`, and the registry rejects forged or unoffered values at runtime. Telegram plan callbacks additionally bind the paired numeric identity, session ID, SDK request ID, optional tool-call ID and exact message ID; one-shot expiry, replay, workspace-scope change and local/competing response all fail closed.
-
-### Transport-origin isolation
-
-The current upstream code recognizes Mission Control through a string prefix (`source.startsWith('command-')`) and may apply the shared Mission Control mode to that request. The multi-transport implementation MUST NOT use that string as an authorization or permission signal.
-
-Requirements:
-
-- the registry constructs a discriminated internal origin for each accepted remote command,
-- Telegram updates/callback payloads cannot provide or override `transportId`, origin kind or effective mode,
-- only a `missionControl` origin may consume Mission Control mode,
-- a Telegram-origin prompt remains non-elevated even when the same session has active Mission Control state in `autopilot`,
-- SDK `SendOptions.source` is correlation/telemetry metadata only,
-- Telegram source strings use a distinct namespace and never start with `command-`, as defense in depth.
-
-### First-valid-response semantics
-
-If local VS Code and Telegram both display the same permission, only one resolution may win. The losing UI is invalidated.
-
-### Stale callbacks
-
-A callback is accepted only if its request is still pending and all correlation fields match. Otherwise the bot returns a harmless "request expired/already resolved" response.
-
-## 8. User-input requests
-
-Freeform responses to an agent question must be explicitly bound to the pending question state. An arbitrary new Telegram message must not be interpreted as an answer to a sensitive question unless the router is in a known pending-input state or the user explicitly replies/selects the prompt.
-
-## 9. Command injection and callback payloads
+## 12. Command injection and formatting
 
 Telegram callback data is untrusted.
 
-Requirements:
+Never:
 
-- do not embed shell commands or file paths as blindly executable callback payloads,
-- use opaque action IDs/nonces that map to server-side pending state,
-- validate lengths and expected action types,
-- never `eval` callback content,
-- do not construct shell commands through string concatenation from Telegram data.
+- execute callback payload text as a shell command,
+- embed blindly executable file paths in callbacks,
+- `eval` callback content,
+- construct shell commands through unsanitized string concatenation.
 
-## 10. Telegram formatting safety
+Agent/tool output is rendered through a bounded Telegram-safe presentation layer. Unsupported/raw markup must not be allowed to inject buttons, links or control state.
 
-Agent/tool output may contain Markdown/HTML characters.
+## 13. Workspace file browser
 
-The current renderer converts supported Markdown to a strict Telegram-safe HTML subset. It escapes raw HTML and dynamic text, neutralizes images, accepts only HTTP/HTTPS links, degrades unsupported structures to escaped text, and emits independently balanced chunks no longer than 4,096 characters. Activity cards are a single bounded message; only final answers may use multiple chunks.
+The current Telegram file browser is read-only.
 
-Do not allow tool output to inject unintended links/buttons or alter callback routing.
+Security properties include:
 
-## 11. Secret and data leakage controls
+- selected authorized workspace only,
+- containment checks on every navigation/preview,
+- traversal rejection,
+- symlink-sensitive entry handling,
+- binary rejection,
+- bounded preview size,
+- opaque callbacks.
 
-Agent tool output can contain credentials, environment variables, repository secrets or private code.
+The browser does not imply arbitrary file write capability from Telegram.
 
-V1 controls:
+## 14. Data minimization and redaction
 
-- prefer summaries for verbose tool results,
-- do not forward environment dumps by default,
-- redact known credential/token formats where practical,
-- truncate oversized outputs,
-- allow debug verbosity only as an explicit setting,
-- log locally with redaction,
-- document that Telegram transport sends selected agent/session content through Telegram infrastructure.
+Remote presentation should prefer useful bounded summaries over raw dumps.
 
-The renderer should show a one-time local disclosure before Telegram is enabled and the setup guide should repeat it. Pairing is authorization, not encryption.
+Controls include:
 
-A future enterprise mode may require stronger configurable redaction/DLP controls.
+- bounded event projection,
+- bounded tool detail/output,
+- redaction of known credential-shaped data where practical,
+- no environment dumps by default,
+- content-free lifecycle diagnostics,
+- no bot/provider credentials in logs.
 
-## 12. Files and attachments
+Pairing is authorization, not encryption.
 
-P1 attachment rules:
+## 15. Network model
 
-- download only after authorization,
-- place files in a controlled temporary directory first,
-- sanitize filenames and never trust remote paths,
-- enforce size limits,
-- do not overwrite repository files implicitly,
-- require explicit user/agent action to move an attachment into the workspace,
-- delete temporary files according to a retention policy.
+The Telegram transport uses outbound HTTPS long polling.
 
-## 13. Git and shell
+Default V1 requires no public inbound service, webhook server, port forwarding or Tailscale.
 
-Telegram does not receive direct shell or Git credentials.
+The configured-model adapter is a loopback-only boundary. It binds locally, authenticates requests with a strong nonce and is not intended as a public server.
 
-Sensitive operations follow the same local tool/permission system as native Copilot.
+Any future public dashboard/tunnel architecture requires its own threat model.
 
-Recommended defaults:
+## 16. Singleton poller and lifecycle races
 
-| Operation | Default remote policy |
-| --- | --- |
-| Read workspace file | follow upstream policy |
-| Write workspace file | follow upstream permission/sandbox policy |
-| Shell command | follow upstream permission/sandbox policy |
-| Delete file | explicit permission |
-| Commit | explicit permission if exposed remotely |
-| Push | explicit permission; P2 |
-| Force push / destructive Git | deny by default |
+Only one active `getUpdates` consumer may own a bot token.
 
-## 14. Network model
+- automatic competing consumers fail visibly,
+- explicit reconnect may transfer the lease through the implemented nonce/heartbeat handoff,
+- lifecycle generations prevent late async startup from reviving disabled access,
+- disable blocks new remote dispatch before awaiting network cleanup.
 
-Long polling requires outbound HTTPS only. This reduces attack surface compared with running a public webhook endpoint.
+A silent second poller is a correctness and security defect because it can lose/reorder control messages.
 
-V1 MUST NOT automatically expose a local HTTP server to the public Internet.
+## 17. Local visibility and kill switches
 
-The configured-model adapter is a private loopback boundary, not a public endpoint. It binds to `127.0.0.1` on an ephemeral port, requires a 256-bit bearer nonce, accepts only the Responses route, bounds request bodies, cancels in-flight LM requests on disconnect/disposal, and logs neither prompt content nor provider credentials. VS Code provider secrets remain owned by the registered LM provider; they are not copied into the adapter or the Copilot SDK registry.
+The local VS Code user remains authoritative over remote enablement.
 
-Tailscale is not required. If a later dashboard uses Tailscale, it receives a separate threat model.
+Required controls include:
 
-## 15. Local kill switches
+- disable remote access,
+- unpair user,
+- forget configuration/token,
+- stop selected remote-controlled work.
 
-Required local controls:
+Remote attachment/state must remain locally discoverable through the implemented status/indicator surfaces. A remotely controllable session with no meaningful local indication is considered a security defect.
 
-- Disable Telegram remote control immediately.
-- Unpair/revoke Telegram user.
-- Forget bot token.
-- Stop active remote-controlled task.
+## 18. Consent requirements
 
-The local VS Code UI is authoritative over remote enablement.
+Initial enablement is blocked on explicit local acknowledgement.
 
-## 16. Logging and audit
+The disclosure should clearly state that:
 
-Logs SHOULD include:
+1. a paired user can trigger an agent that may write files, run commands, access the network and perform Git operations;
+2. Telegram may answer individual allowed permission requests but cannot elevate the permission policy;
+3. bot chats are not end-to-end encrypted;
+4. compromise of the bot token or paired Telegram account is security-relevant;
+5. the current workstation/workspace scope is being exposed;
+6. local disablement remains available.
 
-- Telegram update ID (not secret token),
-- authorized user ID in a privacy-conscious form,
-- action type,
-- selected session ID,
-- permission request/result,
-- errors,
-- connection/retry state.
-
-Logs MUST NOT include bot tokens, provider API keys or unredacted credential-bearing headers.
-
-P1 should add an audit record such as:
-
-```text
-timestamp | user | session | action | request | outcome
-```
-
-## 17. Denial of service and rate limits
-
-Implement bounded limits for:
-
-- update processing queue,
-- pairing attempts,
-- Telegram message edits,
-- status refreshes,
-- attachment size,
-- pending permission/question registry,
-- output length.
-
-High-frequency SDK events must be aggregated into semantic rounds before Bot API calls. Running-round edits are throttled; read/search bursts share one round until an explicit semantic boundary.
-
-Only one `getUpdates` consumer may hold the poller lease for a bot token. Automatic competing VS Code windows/processes fail closed with a visible diagnostic. Explicit local **Reconnect** is a deliberate takeover: ownership changes atomically, the displaced lease detects the nonce change and aborts its poll, and the replacement waits for that heartbeat handoff before calling `getUpdates`. Silent competing pollers can lose or reorder control messages and remain forbidden.
-
-## 18. Future V2 own-ID proposed API setup security
-
-A fork-bundled V2 companion receives its proposal authorization from build-time product configuration. It may diagnose missing registration during activation, but it must never edit `product.json` at runtime. A private standalone V2 experiment may offer to modify VS Code `argv.json` after explicit consent. V1 does neither because Telegram runs inside the built-in Copilot extension.
-
-Rules:
-
-- show the exact extension ID being enabled,
-- read/parse existing JSONC safely,
-- preserve unrelated runtime arguments,
-- create a backup before modifying,
-- never enable proposed APIs globally when enabling only this extension is sufficient,
-- never silently change `argv.json`,
-- explain that a full restart is required.
+Do not use minimizing language or imply GitHub/Microsoft endorsement.
 
 ## 19. Threat table
 
-| Threat | Mitigation |
+| Threat | Primary mitigation |
 | --- | --- |
-| Stranger messages the bot | Numeric-ID allowlist; no metadata before pairing |
-| Pairing code guessed | Cryptographic random code, short expiry, attempt throttling |
-| Old Allow button reused | Opaque one-shot callback nonce + session/request/tool-call/message validation; replay fails closed |
-| Wrong session/workspace receives prompt | Versioned selected-session state + URI-identity containment in current consented roots, revalidated at every dispatch and publication boundary |
-| Telegram output leaks secret | Bounded event projection, separate redaction, per-round detail limits and Rich Message rendering |
-| Bot token leaked in logs | SecretStorage + structured redaction |
-| Update replay | Track Telegram `update_id` |
-| Telegram flood | Queue/rate limits |
-| Remote user bypasses Copilot permission | Telegram can resolve only a real registry-correlated pending SDK request; stale/wrong/replayed controls fail closed |
-| Remote user escalates session to auto-approval/autopilot | Telegram responses are limited to approve-once/deny and never mutate session/global permission policy |
-| Reply steers the wrong turn | Bounded `(chatId,messageId)` correlation includes session/request/round/generation; current identity, selection, scope and steerability are revalidated |
-| Telegram request is misclassified as Mission Control | Registry-created typed origin; mode derived from origin kind, never from a transport-supplied `source` prefix |
-| User assumes bot chat is E2E encrypted | Prominent setup/runtime disclosure; minimize/redact projected content |
-| Two extension hosts poll the same bot | Singleton poller lease; second consumer fails visibly |
-| Extension disabled remotely by attacker | Local enablement/disable state remains authoritative |
-| Disable races an in-flight Enable/Setup | Disable blocks dispatch synchronously, advances the lifecycle generation and awaits cleanup; late startup cannot revive access |
-| Stored credentials reconnect in a different scope | Reconnect requires valid token, exact current consent, token-bound pairing and current session authorization before selection restoration |
-| Pairing-pending user invokes normal commands | `pairing-only` admission accepts only the exact pending `/pair`; commands, callbacks and prompts are ignored |
-| Disable leaves a local task running | Routing/UI attachment is suspended synchronously; only correlated terminal-event delivery remains, with no remote input or permission path |
-| Public inbound service exposed | Long polling; no inbound listener in V1 |
+| Stranger messages bot | Numeric pairing + no metadata before authorization |
+| Pairing code guessed/reused | Random short-lived single-use challenge + rate limit |
+| Old approval button reused | One-shot callback state + request/session/message correlation |
+| Wrong workspace/session receives command | Current URI-based workspace authorization on every control boundary |
+| Telegram prompt misclassified as Mission Control | Registry-issued trusted origin, never `source` prefix inference |
+| Telegram escalates permission policy | Non-elevating modes + approve-once/deny-only permission surface |
+| Reply steers wrong turn | Bounded message/activity/generation correlation + revalidation |
+| Agent Host session concurrently controlled | Source lock check; in-use source is rejected before fork handover |
+| Bot token appears in diagnostics | SecretStorage + content-free/redacted diagnostics |
+| Two VS Code windows poll same bot | Singleton lease + explicit takeover flow |
+| Disable races startup | Synchronous admission block + lifecycle generation invalidation |
+| Telegram flood | Bounded update/callback/outbound queues and retry policy |
+| User assumes E2E confidentiality | Prominent disclosure and data minimization |
 
-## 20. Consent, disclosure and local visibility
+## 20. Security acceptance criteria
 
-Remote control is opt-in, must be understood before it is enabled, and must remain visible while it is active. Pairing proves *who* is connected; it does not make the transport safe or private.
+Before distributing a build as a release candidate, verify at minimum:
 
-### 20.1 Enable-time consent gate
+- unauthorized user receives no session metadata,
+- pairing expiry/replay tests pass,
+- callback/reply wrong-user/session/request/generation tests pass,
+- out-of-scope/missing/foreign workspace tests pass,
+- Agent Host in-use handover is rejected,
+- Agent Host fork selects only the new authorized Remote Pilot session,
+- Telegram cannot produce an elevating permission/mode response,
+- Telegram-origin requests cannot inherit Mission Control elevation,
+- duplicate update handling and poller ownership tests pass,
+- disable prevents new remote dispatch immediately,
+- tokens/provider secrets do not appear in diagnostics/test logs,
+- confidentiality disclosure is shown before enablement.
 
-Enabling the transport for the first time (and again after the token is changed) requires an explicit modal acknowledgement. Default action is cancel.
-
-The modal MUST state, in plain language:
-
-1. A paired Telegram user can send prompts that cause this machine to **write files, run shell commands, access the network and perform Git operations**.
-2. A paired Telegram user may answer an individual permission request with **Approve once** or **Deny**. Telegram cannot enable auto-approval/autopilot or increase the permission policy.
-3. Telegram bot chats are **not end-to-end encrypted**. Prompts, final answers, file paths and any locally enabled activity detail transit Telegram infrastructure.
-4. Anyone who obtains the **bot token** can impersonate the bot; anyone who obtains the paired **Telegram account** gains this control.
-5. Exactly which workstation and workspace will be exposed.
-6. How to turn it off (status bar item → *Disable remote access*).
-
-The implementation MUST ensure:
-
-- enabling the transport without passing the modal consent gate is not possible from any entry point, including the setting,
-- an attached session always renders a local indicator in the session list and status bar,
-- the kill switch is reachable in one click from the status bar item.
-
-Wording rules:
-
-- No minimizing language ("just", "simply", "safe").
-- Do not imply GitHub or Microsoft endorsement.
-- The `Enable` button is never the pre-selected default.
-- Declining initial setup persists nothing — no token, no pairing, no enabled flag. Declining workspace recovery preserves the existing token and paired identity but leaves the current workspace unauthorized and disabled.
-
-### 20.2 Settings disclosure
-
-`github.copilot.chat.cli.telegram.enabled` uses a `markdownDescription` carrying an abbreviated form of the same warning, so the risk is visible to anyone who finds the setting without running the wizard. Toggling the setting on directly still routes through the consent gate; the setting alone must not activate the transport.
-
-### 20.3 Continuous local visibility
-
-A remotely attached session MUST be identifiable without opening a chat:
-
-- session list entry carries a remote indicator and tooltip,
-- the status bar shows an attached-state item with a warning background,
-- a one-time in-chat notice is emitted when a transport attaches during a live request.
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) section 16 for the implementation. **A session that is remotely controllable with no local indicator is a security defect, not a cosmetic one**, and is covered by the architecture quality gate.
-
-After a previously configured integration is disabled, the visible status (when enabled by the local status-bar setting) becomes a muted `Telegram: Off` item whose menu exposes Enable but not inapplicable Unpair/Disable actions. The Command Palette Enable command remains available when the status item is hidden. A changed workspace is a separate amber authorization state: remote commands are blocked, and authorizing it reuses the SecretStorage token and token-bound paired identity after a new local disclosure. Missing pairing reuses the token but requires a new challenge; missing token requires full setup. Recovery never deletes configuration. Explicit *Forget Configuration* is the only lifecycle command that removes all saved authorization state.
-
-### 20.4 Telegram-side context
-
-The bot must not let an operator forget what it is driving. `/start`, `/status`, the edited session picker/status message and destructive callbacks state the authorized session and workspace context. Permission/question bubbles are tied to a live session/request, and activity replies are accepted only when their message correlation still resolves to the current steerable generation.
-
-### 20.5 Non-goals of consent
-
-Acknowledgement is not a substitute for the technical controls. Consent does not permit relaxing pairing, permission-escalation prevention, redaction or the singleton poller lease.
-
-## 21. Security acceptance criteria
-
-Before V1 release:
-
-- unauthorized-user tests pass,
-- expired/replayed callback tests pass,
-- wrong-session callback tests pass,
-- empty-window, missing-working-directory, sibling/foreign-workspace and changed-scope tests pass,
-- duplicate Telegram update tests pass,
-- bot token never appears in test logs,
-- capability copy advertises Telegram permission responses only when the registered transport exposes them; the response race is deterministic and first-valid-response-wins,
-- permission callbacks are correlated and one-shot; replay, wrong message, wrong user, wrong session and stale request fail closed,
-- replies to activity bubbles steer only the correlated active generation through the native request path; stale replies do not dispatch,
-- Telegram cannot raise permission level directly or through a mode change,
-- Telegram-origin requests do not inherit Mission Control mode when `_mcState.mcMode` is `autopilot`,
-- a Telegram payload containing `command-*` cannot alter its typed origin or effective permission level,
-- long-poll retry cannot spawn duplicate consumers,
-- a competing process/window cannot acquire a second poller lease,
-- setup displays and records acknowledgement of the non-E2E confidentiality warning,
-- if a V2 fork-bundled companion is built, activation never attempts to edit `product.json`,
-- if the optional standalone V2 setup is built, it never overwrites unrelated `argv.json` entries.
+See [TEST_STRATEGY.md](./TEST_STRATEGY.md) and [PHASE8_ACCEPTANCE.md](./PHASE8_ACCEPTANCE.md).
