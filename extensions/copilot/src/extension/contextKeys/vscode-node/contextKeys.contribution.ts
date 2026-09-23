@@ -16,7 +16,7 @@ import { TelemetryData } from '../../../platform/telemetry/common/telemetryData'
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { autorun } from '../../../util/vs/base/common/observableInternal';
 import { GHPR_EXTENSION_ID } from '../../chatSessions/vscode/chatSessionsUriHandler';
-import { isClientBYOKAllowed } from '../../byok/common/byokProvider';
+import { ClientBYOKAccess, getClientBYOKAccess, localBYOKPolicy } from '../../byok/common/byokProvider';
 import { EXTENSION_ID } from '../../common/constants';
 
 const welcomeViewContextKeys = {
@@ -40,6 +40,7 @@ const previewFeaturesDisabledContextKey = 'github.copilot.previewFeaturesDisable
 const blackbirdExternalIndexingDisabledContextKey = 'github.copilot.blackbirdExternalIndexingDisabled';
 
 const clientByokEnabledContextKey = 'github.copilot.clientByokEnabled';
+const byokCustomEndpointOnlyContextKey = 'github.copilot.byok.customEndpointOnly';
 
 const debugContextKey = 'github.copilot.chat.debug';
 
@@ -225,12 +226,15 @@ export class ContextKeysContribution extends Disposable {
 
 	private async _updateClientByokEnabledContext() {
 		const hasGitHubSession = !!this._authenticationService.anyGitHubSession;
+		let access: ClientBYOKAccess;
 		try {
 			const copilotToken = await this._authenticationService.getCopilotToken();
-			commands.executeCommand('setContext', clientByokEnabledContextKey, isClientBYOKAllowed(hasGitHubSession, copilotToken));
+			access = getClientBYOKAccess(hasGitHubSession, copilotToken, localBYOKPolicy);
 		} catch (e) {
-			commands.executeCommand('setContext', clientByokEnabledContextKey, isClientBYOKAllowed(hasGitHubSession, undefined));
+			access = getClientBYOKAccess(hasGitHubSession, undefined, localBYOKPolicy);
 		}
+		commands.executeCommand('setContext', clientByokEnabledContextKey, access !== ClientBYOKAccess.None);
+		commands.executeCommand('setContext', byokCustomEndpointOnlyContextKey, access === ClientBYOKAccess.CustomEndpointOnly);
 	}
 
 	private _updateShowLogViewContext() {

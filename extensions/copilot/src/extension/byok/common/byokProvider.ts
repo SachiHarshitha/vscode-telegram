@@ -5,6 +5,7 @@
 import type { Disposable, LanguageModelChatInformation, LanguageModelDataPart, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, LanguageModelToolResultPart } from 'vscode';
 import { CopilotToken } from '../../../platform/authentication/common/copilotToken';
 import { EndpointEditToolName, IChatModelInformation, IChatModelRequestOptions, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
+import { packageJson } from '../../../platform/env/common/packagejson';
 import { TokenizerType } from '../../../util/common/tokenizer';
 
 export const enum BYOKAuthType {
@@ -228,6 +229,78 @@ export function isClientBYOKAllowed(hasGitHubSession: boolean, copilotToken: Omi
 		return false;
 	}
 	return copilotToken.isInternal || copilotToken.isIndividual || copilotToken.isClientBYOKEnabled();
+}
+
+/**
+ * Build-time policy of a locally packaged build that allows BYOK for managed Copilot seats
+ * (see `scripts/package-local-copilot.ps1`). It is read from the `localByok` field of the
+ * bundled `package.json` and is disabled in stock builds.
+ */
+export interface ILocalBYOKPolicy {
+	readonly enabled: boolean;
+	/**
+	 * Host patterns that Custom Endpoint requests may target: `*` (any host), an exact
+	 * host name (`vllm.corp.internal`) or a subdomain wildcard (`*.corp.internal`).
+	 */
+	readonly allowedHosts: readonly string[];
+}
+
+export const disabledLocalBYOKPolicy: ILocalBYOKPolicy = { enabled: false, allowedHosts: [] };
+
+/**
+ * Normalizes the raw `localByok` package.json field into an {@link ILocalBYOKPolicy}.
+ */
+export function readLocalBYOKPolicy(raw: { enabled?: boolean; allowedHosts?: string[] } | undefined): ILocalBYOKPolicy {
+	if (!raw?.enabled) {
+		return disabledLocalBYOKPolicy;
+	}
+	const allowedHosts = Array.isArray(raw.allowedHosts)
+		? raw.allowedHosts.filter(host => typeof host === 'string' && host.trim().length > 0).map(host => host.trim().toLowerCase())
+		: ['*'];
+	return { enabled: true, allowedHosts };
+}
+
+export const localBYOKPolicy: ILocalBYOKPolicy = readLocalBYOKPolicy(packageJson.localByok);
+
+/**
+ * Which BYOK providers may be registered.
+ */
+export const enum ClientBYOKAccess {
+	/** No BYOK providers. */
+	None = 'none',
+	/** All BYOK providers. */
+	All = 'all',
+	/** Only the Custom Endpoint provider, restricted to {@link ILocalBYOKPolicy.allowedHosts}. */
+	CustomEndpointOnly = 'customEndpointOnly',
+}
+
+/**
+ * Resolves the BYOK access level. Seats that are allowed BYOK by {@link isClientBYOKAllowed} keep
+ * full access; everyone else falls back to Custom Endpoint only when the local policy is enabled.
+ */
+export function getClientBYOKAccess(hasGitHubSession: boolean, copilotToken: Omit<CopilotToken, 'token'> | undefined, policy: ILocalBYOKPolicy): ClientBYOKAccess {
+	if (isClientBYOKAllowed(hasGitHubSession, copilotToken)) {
+		return ClientBYOKAccess.All;
+	}
+	return policy.enabled ? ClientBYOKAccess.CustomEndpointOnly : ClientBYOKAccess.None;
+}
+
+/**
+ * Returns whether the local BYOK policy permits requests to `url`. Always true when the policy is disabled.
+ */
+export function isUrlAllowedByLocalBYOKPolicy(url: string, policy: ILocalBYOKPolicy): boolean {
+	if (!policy.enabled || policy.allowedHosts.includes('*')) {
+		return true;
+	}
+	let host: string;
+	try {
+		host = new URL(url).hostname.toLowerCase();
+	} catch {
+		return false;
+	}
+	return policy.allowedHosts.some(pattern => pattern.startsWith('*.')
+		? host.endsWith(pattern.slice(1))
+		: host === pattern);
 }
 
 /**

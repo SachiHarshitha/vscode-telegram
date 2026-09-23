@@ -15,6 +15,9 @@ import { IChatModelInformation, ModelSupportedEndpoint } from '../../../../platf
 import { CustomDataPartMimeTypes } from '../../../../platform/endpoint/common/endpointTypes';
 import { ExtensionContributedChatEndpoint } from '../../../../platform/endpoint/vscode-node/extChatEndpoint';
 import type { IChatEndpoint, IEndpointBody } from '../../../../platform/networking/common/networking';
+import { ILogService } from '../../../../platform/log/common/logService';
+import type { FetchOptions, IFetcherService } from '../../../../platform/networking/common/fetcherService';
+import { IExperimentationService } from '../../../../platform/telemetry/common/nullExperimentationService';
 import { ITestingServicesAccessor } from '../../../../platform/test/node/services';
 import { TokenizerType } from '../../../../util/common/tokenizer';
 import { Event } from '../../../../util/vs/base/common/event';
@@ -24,7 +27,7 @@ import { IInstantiationService } from '../../../../util/vs/platform/instantiatio
 import { createExtensionUnitTestingServices } from '../../../test/node/services';
 import type { OpenAICompatibleLanguageModelChatInformation } from '../abstractLanguageModelChatProvider';
 import type { IBYOKStorageService } from '../byokStorageService';
-import { CustomEndpointBYOKModelProvider, type CustomEndpointModelConfig, type CustomEndpointModelProviderConfig, CustomEndpointOAIEndpoint, hasExplicitApiPath, resolveCustomEndpointUrl } from '../customEndpointProvider';
+import { CustomEndpointBYOKModelProvider, type CustomEndpointModelConfig, type CustomEndpointModelProviderConfig, CustomEndpointOAIEndpoint, hasExplicitApiPath, resolveCustomEndpointModelsUrl, resolveCustomEndpointUrl, resolveDiscoveredModelCapabilities } from '../customEndpointProvider';
 
 const customResponsesModelId = 'custom-responses-model';
 const customResponsesMarker = 'resp_custom_previous';
@@ -154,6 +157,70 @@ describe('CustomEndpointBYOKModelProvider', () => {
 
 		it('honors apiType=responses for URL ending in /v1', () => {
 			expect(resolveCustomEndpointUrl('m', 'https://api.example.com/v1', 'responses')).toBe('https://api.example.com/v1/responses');
+		});
+	});
+
+	describe('resolveCustomEndpointModelsUrl', () => {
+		it('adds /v1 only when the base URL has no version segment', () => {
+			expect([
+				resolveCustomEndpointModelsUrl('http://vllm:8000'),
+				resolveCustomEndpointModelsUrl('http://vllm:8000/'),
+				resolveCustomEndpointModelsUrl('http://vllm:8000/v1'),
+				resolveCustomEndpointModelsUrl('http://vllm:8000/v1/'),
+			]).toEqual([
+				'http://vllm:8000/v1/models',
+				'http://vllm:8000/v1/models',
+				'http://vllm:8000/v1/models',
+				'http://vllm:8000/v1/models',
+			]);
+		});
+	});
+
+	describe('resolveDiscoveredModelCapabilities', () => {
+		it('derives capabilities from vLLM max_model_len and context_length, and skips models without a context length', () => {
+			expect([
+				resolveDiscoveredModelCapabilities({ id: 'Qwen/Qwen2.5-Coder-32B-Instruct', object: 'model', max_model_len: 32768 }),
+				resolveDiscoveredModelCapabilities({ id: 'small', context_length: 8192 }),
+				resolveDiscoveredModelCapabilities({ id: 'unknown' }),
+				resolveDiscoveredModelCapabilities({ max_model_len: 32768 }),
+				resolveDiscoveredModelCapabilities(undefined),
+			]).toEqual([
+				{ name: 'Qwen/Qwen2.5-Coder-32B-Instruct', contextWindow: 32768, maxInputTokens: 24576, maxOutputTokens: 8192, toolCalling: true, vision: false },
+				{ name: 'small', contextWindow: 8192, maxInputTokens: 6144, maxOutputTokens: 2048, toolCalling: true, vision: false },
+				undefined,
+				undefined,
+				undefined,
+			]);
+		});
+	});
+
+	describe('model discovery', () => {
+		it('discovers vLLM models from a base URL without an API key', async () => {
+			const requests: { url: string; headers: FetchOptions['headers'] }[] = [];
+			const fetcherService = {
+				fetch: async (url: string, options: FetchOptions) => {
+					requests.push({ url, headers: options.headers });
+					return { json: async () => ({ object: 'list', data: [{ id: 'qwen-coder', object: 'model', max_model_len: 65536 }] }) };
+				}
+			} as unknown as IFetcherService;
+			const provider = new CustomEndpointBYOKModelProvider(
+				createStorageService(),
+				accessor.get(ILogService),
+				fetcherService,
+				instaService,
+				accessor.get(IConfigurationService),
+				accessor.get(IExperimentationService),
+			);
+
+			const models = await provider.provideLanguageModelChatInformation({ silent: true, configuration: { url: 'http://vllm:8000' } }, disposables.add(new vscode.CancellationTokenSource()).token);
+
+			expect({
+				requests,
+				models: models.map(model => ({ id: model.id, url: model.url, maxInputTokens: model.maxInputTokens, maxOutputTokens: model.maxOutputTokens, toolCalling: model.capabilities.toolCalling })),
+			}).toEqual({
+				requests: [{ url: 'http://vllm:8000/v1/models', headers: { 'Content-Type': 'application/json' } }],
+				models: [{ id: 'qwen-coder', url: 'http://vllm:8000', maxInputTokens: 49152, maxOutputTokens: 16384, toolCalling: true }],
+			});
 		});
 	});
 

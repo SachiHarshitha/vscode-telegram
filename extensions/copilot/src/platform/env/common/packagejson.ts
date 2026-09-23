@@ -14,6 +14,11 @@ export interface PackageJSONShape {
 	engines: {
 		vscode: string;
 	};
+	/** Set only by `scripts/package-local-copilot.ps1` for locally packaged builds. */
+	localByok?: {
+		enabled?: boolean;
+		allowedHosts?: string[];
+	};
 	contributes: {
 		configuration: {
 			title: string;

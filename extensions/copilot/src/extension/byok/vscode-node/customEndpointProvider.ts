@@ -14,7 +14,7 @@ import { IChatWebSocketManager } from '../../../platform/networking/node/chatWeb
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { ITokenizerProvider } from '../../../platform/tokenizer/node/tokenizer';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
-import { resolveModelInfo } from '../common/byokProvider';
+import { BYOKModelCapabilities, isUrlAllowedByLocalBYOKPolicy, localBYOKPolicy, resolveModelInfo } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
 import { byokKnownModelToAPIInfoWithEffort } from './byokModelInfo';
@@ -138,11 +138,19 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 
 	protected override async getAllModels(silent: boolean, apiKey: string | undefined, configuration: CustomEndpointModelProviderConfig | undefined): Promise<OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>[]> {
 		if (configuration?.url) {
+			if (!isUrlAllowedByLocalBYOKPolicy(configuration.url, localBYOKPolicy)) {
+				this._logService.warn(`BYOK: Custom Endpoint URL ${configuration.url} is not in the allowed hosts of this build.`);
+				return [];
+			}
 			return super.getAllModels(silent, apiKey, configuration);
 		}
 		const models: OpenAICompatibleLanguageModelChatInformation<CustomEndpointModelProviderConfig>[] = [];
 		if (Array.isArray(configuration?.models)) {
 			for (const modelConfig of configuration.models) {
+				if (!isUrlAllowedByLocalBYOKPolicy(modelConfig.url, localBYOKPolicy)) {
+					this._logService.warn(`BYOK: Custom Endpoint model ${modelConfig.id} targets ${modelConfig.url}, which is not in the allowed hosts of this build.`);
+					continue;
+				}
 				models.push({
 					...byokKnownModelToAPIInfoWithEffort(this._name, modelConfig.id, modelConfig),
 					url: modelConfig.url
@@ -156,6 +164,9 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 		const modelConfiguration = model.configuration?.models?.find(m => m.id === model.id);
 		const apiTypeOverride = modelConfiguration?.apiType ?? model.configuration?.apiType;
 		const url = resolveCustomEndpointUrl(model.id, model.url, apiTypeOverride);
+		if (!isUrlAllowedByLocalBYOKPolicy(url, localBYOKPolicy)) {
+			throw new Error(`Custom Endpoint URL ${url} is not in the allowed hosts of this build.`);
+		}
 		const apiType: CustomEndpointApiType = apiTypeOverride ?? inferApiTypeFromUrl(url);
 		const modelCapabilities = {
 			maxInputTokens: model.maxInputTokens,
@@ -187,6 +198,54 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 	protected getModelsBaseUrl(configuration: CustomEndpointModelProviderConfig | undefined): string | undefined {
 		return configuration?.url;
 	}
+
+	protected override getModelsDiscoveryUrl(modelsBaseUrl: string): string {
+		return resolveCustomEndpointModelsUrl(modelsBaseUrl);
+	}
+
+	protected override resolveModelCapabilities(modelData: unknown): BYOKModelCapabilities | undefined {
+		return resolveDiscoveredModelCapabilities(modelData);
+	}
+
+	protected override requiresApiKeyForModelDiscovery(): boolean {
+		return false;
+	}
+}
+
+/**
+ * Resolves the `/models` URL for a Custom Endpoint base URL, adding `/v1` like {@link resolveCustomEndpointUrl}.
+ */
+export function resolveCustomEndpointModelsUrl(url: string): string {
+	if (url.endsWith('/')) {
+		url = url.slice(0, -1);
+	}
+	return /\/v\d+$/.test(url) ? `${url}/models` : `${url}/v1/models`;
+}
+
+/**
+ * Derives capabilities for a model listed by an OpenAI-compatible `/models` endpoint. Only models
+ * that report their context length (vLLM's `max_model_len`, or `context_length`) are accepted,
+ * because a wrong context window breaks prompt budgeting. Tool calling is assumed, since agent
+ * mode requires it; the server must be started with tool calling enabled.
+ */
+export function resolveDiscoveredModelCapabilities(modelData: unknown): BYOKModelCapabilities | undefined {
+	if (!modelData || typeof modelData !== 'object') {
+		return undefined;
+	}
+	const { id, max_model_len, context_length } = modelData as { id?: unknown; max_model_len?: unknown; context_length?: unknown };
+	const contextWindow = typeof max_model_len === 'number' ? max_model_len : typeof context_length === 'number' ? context_length : undefined;
+	if (typeof id !== 'string' || !contextWindow || contextWindow <= 0) {
+		return undefined;
+	}
+	const maxOutputTokens = Math.min(16384, Math.floor(contextWindow / 4));
+	return {
+		name: id,
+		contextWindow,
+		maxInputTokens: contextWindow - maxOutputTokens,
+		maxOutputTokens,
+		toolCalling: true,
+		vision: false,
+	};
 }
 
 /**

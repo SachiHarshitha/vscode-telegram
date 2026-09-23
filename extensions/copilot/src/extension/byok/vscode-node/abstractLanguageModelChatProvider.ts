@@ -123,15 +123,17 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 	}
 
 	private async getModelsFromEndpoint(endpoint: string, silent: boolean, apiKey: string | undefined): Promise<BYOKKnownModels> {
-		if (!apiKey && silent) {
+		if (!apiKey && silent && this.requiresApiKeyForModelDiscovery()) {
 			return {};
 		}
 
 		try {
 			const headers: IStringDictionary<string> = {
 				'Content-Type': 'application/json',
-				'Authorization': `Bearer ${apiKey}`
 			};
+			if (apiKey) {
+				headers.Authorization = `Bearer ${apiKey}`;
+			}
 
 			const modelsEndpoint = this.getModelsDiscoveryUrl(endpoint);
 			const response = await this._fetcherService.fetch(modelsEndpoint, {
@@ -182,6 +184,14 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 
 	protected resolveModelCapabilities(modelData: unknown): BYOKModelCapabilities | undefined {
 		return undefined;
+	}
+
+	/**
+	 * Whether silent model discovery is skipped when no API key is configured.
+	 * Providers whose endpoints commonly run without authentication (e.g. self-hosted vLLM) return false.
+	 */
+	protected requiresApiKeyForModelDiscovery(): boolean {
+		return true;
 	}
 
 	protected abstract getModelsBaseUrl(configuration: T | undefined): string | undefined;

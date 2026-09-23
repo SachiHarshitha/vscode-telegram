@@ -9,7 +9,7 @@ import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { Disposable, DisposableStore } from '../../../util/vs/base/common/lifecycle';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
-import { BYOKKnownModels, isClientBYOKAllowed } from '../../byok/common/byokProvider';
+import { BYOKKnownModels, ClientBYOKAccess, getClientBYOKAccess, localBYOKPolicy } from '../../byok/common/byokProvider';
 import { IExtensionContribution } from '../../common/contributions';
 import { AbstractLanguageModelChatProvider } from './abstractLanguageModelChatProvider';
 import { AnthropicLMProvider } from './anthropicProvider';
@@ -28,7 +28,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 	private readonly _byokStorageService: IBYOKStorageService;
 	private readonly _providers: Map<string, LanguageModelChatProvider<LanguageModelChatInformation>> = new Map();
 	private readonly _providerRegistrations = this._register(new DisposableStore());
-	private _providersRegistered = false;
+	private _registeredAccess = ClientBYOKAccess.None;
 	private _knownModelsRefreshed = false;
 	private _knownModelsRefreshTargets: ReadonlyArray<readonly [string, AbstractLanguageModelChatProvider]> = [];
 
@@ -72,27 +72,36 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 	}
 
 	private _applyPolicy(): void {
-		const allowed = isClientBYOKAllowed(!!this._authService.anyGitHubSession, this._authService.copilotToken);
-		if (allowed && !this._providersRegistered) {
-			if (this._providers.size === 0) {
-				this._buildProviders();
-			}
-			for (const [providerId, provider] of this._providers) {
-				this._providerRegistrations.add(lm.registerLanguageModelChatProvider(providerId, provider));
-			}
-			this._providersRegistered = true;
-			this._logService.info(`BYOK: registered ${this._providers.size} provider(s): ${Array.from(this._providers.keys()).join(', ')}`);
-			if (!this._knownModelsRefreshed) {
-				this._knownModelsRefreshed = true;
-				void this._refreshKnownModels().catch(err => {
-					this._knownModelsRefreshed = false;
-					this._logService.warn(`BYOK: failed to refresh known models, will retry on next allowed transition: ${err instanceof Error ? err.message : String(err)}`);
-				});
-			}
-		} else if (!allowed && this._providersRegistered) {
-			this._providerRegistrations.clear();
-			this._providersRegistered = false;
+		const access = getClientBYOKAccess(!!this._authService.anyGitHubSession, this._authService.copilotToken, localBYOKPolicy);
+		if (access === this._registeredAccess) {
+			return;
+		}
+
+		this._providerRegistrations.clear();
+		this._registeredAccess = access;
+		if (access === ClientBYOKAccess.None) {
 			this._logService.info('BYOK: unregistered providers due to enterprise policy.');
+			return;
+		}
+
+		if (this._providers.size === 0) {
+			this._buildProviders();
+		}
+		const providerIds = access === ClientBYOKAccess.CustomEndpointOnly
+			? [CustomEndpointBYOKModelProvider.providerId]
+			: Array.from(this._providers.keys());
+		for (const providerId of providerIds) {
+			this._providerRegistrations.add(lm.registerLanguageModelChatProvider(providerId, this._providers.get(providerId)!));
+		}
+		this._logService.info(`BYOK: registered ${providerIds.length} provider(s) (${access}): ${providerIds.join(', ')}`);
+
+		// Known model lists only describe the hosted providers, which the local policy does not register.
+		if (access === ClientBYOKAccess.All && !this._knownModelsRefreshed) {
+			this._knownModelsRefreshed = true;
+			void this._refreshKnownModels().catch(err => {
+				this._knownModelsRefreshed = false;
+				this._logService.warn(`BYOK: failed to refresh known models, will retry on next allowed transition: ${err instanceof Error ? err.message : String(err)}`);
+			});
 		}
 	}
 

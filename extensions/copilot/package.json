@@ -1742,6 +1742,7 @@
       },
       {
         "vendor": "anthropic",
+        "when": "!github.copilot.byok.customEndpointOnly",
         "displayName": "Anthropic",
         "configuration": {
           "type": "object",
@@ -1760,6 +1761,7 @@
       },
       {
         "vendor": "xai",
+        "when": "!github.copilot.byok.customEndpointOnly",
         "displayName": "xAI",
         "configuration": {
           "type": "object",
@@ -1778,6 +1780,7 @@
       },
       {
         "vendor": "gemini",
+        "when": "!github.copilot.byok.customEndpointOnly",
         "displayName": "Google",
         "configuration": {
           "type": "object",
@@ -1796,6 +1799,7 @@
       },
       {
         "vendor": "openrouter",
+        "when": "!github.copilot.byok.customEndpointOnly",
         "displayName": "OpenRouter",
         "configuration": {
           "type": "object",
@@ -1814,6 +1818,7 @@
       },
       {
         "vendor": "openai",
+        "when": "!github.copilot.byok.customEndpointOnly",
         "displayName": "OpenAI",
         "configuration": {
           "type": "object",
@@ -1837,6 +1842,7 @@
       },
       {
         "vendor": "ollama",
+        "when": "!github.copilot.byok.customEndpointOnly",
         "displayName": "Ollama (Deprecated)",
         "deprecation": {
           "link": "vscode:extension/Ollama.ollama"
@@ -1858,7 +1864,7 @@
       },
       {
         "vendor": "customoai",
-        "when": "productQualityType != 'stable'",
+        "when": "productQualityType != 'stable' && !github.copilot.byok.customEndpointOnly",
         "displayName": "OpenAI Compatible (Deprecated)",
         "configuration": {
           "type": "object",
@@ -2035,6 +2041,11 @@
               "default": "chat-completions",
               "title": "API Type",
               "markdownDescription": "Default request/response format for models in this group. Individual models can override this with their own `apiType` property; when both are unset the type is inferred from the URL path."
+            },
+            "url": {
+              "type": "string",
+              "title": "Base URL",
+              "markdownDescription": "Base URL of an OpenAI-compatible server (e.g. `http://vllm-host:8000/v1`). When set, models are discovered from its `/models` endpoint instead of the `models` list. Only models that report their context length (such as vLLM's `max_model_len`) are listed, and they are assumed to support tool calling."
             },
             "models": {
               "type": "array",
@@ -2230,6 +2241,7 @@
       },
       {
         "vendor": "azure",
+        "when": "!github.copilot.byok.customEndpointOnly",
         "displayName": "Azure",
         "configuration": {
           "type": "object",

@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { CopilotToken } from '../../../../platform/authentication/common/copilotToken';
-import { byokKnownModelToAPIInfo, BYOKModelCapabilities, isClientBYOKAllowed, resolveModelInfo, resolveModelTokenLimits } from '../byokProvider';
+import { byokKnownModelToAPIInfo, BYOKModelCapabilities, ClientBYOKAccess, disabledLocalBYOKPolicy, getClientBYOKAccess, isClientBYOKAllowed, isUrlAllowedByLocalBYOKPolicy, readLocalBYOKPolicy, resolveModelInfo, resolveModelTokenLimits } from '../byokProvider';
 
 describe('byokKnownModelToAPIInfo', () => {
 	const baseCapabilities: BYOKModelCapabilities = {
@@ -202,5 +202,59 @@ describe('isClientBYOKAllowed', () => {
 
 	it('denies BYOK for signed-in managed users when no policy flag is set', () => {
 		expect(isClientBYOKAllowed(true, mockToken({}))).toBe(false);
+	});
+
+	describe('getClientBYOKAccess', () => {
+		const enabledPolicy = readLocalBYOKPolicy({ enabled: true });
+
+		it('resolves the access level for each seat type with and without the local policy', () => {
+			expect({
+				signedOut: getClientBYOKAccess(false, undefined, enabledPolicy),
+				individual: getClientBYOKAccess(true, mockToken({ isIndividual: true }), enabledPolicy),
+				managedWithoutPolicy: getClientBYOKAccess(true, mockToken({}), disabledLocalBYOKPolicy),
+				managedWithPolicy: getClientBYOKAccess(true, mockToken({}), enabledPolicy),
+				tokenUnavailableWithPolicy: getClientBYOKAccess(true, undefined, enabledPolicy),
+			}).toEqual({
+				signedOut: ClientBYOKAccess.All,
+				individual: ClientBYOKAccess.All,
+				managedWithoutPolicy: ClientBYOKAccess.None,
+				managedWithPolicy: ClientBYOKAccess.CustomEndpointOnly,
+				tokenUnavailableWithPolicy: ClientBYOKAccess.CustomEndpointOnly,
+			});
+		});
+	});
+});
+
+describe('local BYOK policy', () => {
+	it('normalizes the package.json field', () => {
+		expect({
+			missing: readLocalBYOKPolicy(undefined),
+			disabled: readLocalBYOKPolicy({ enabled: false, allowedHosts: ['a.example'] }),
+			noHosts: readLocalBYOKPolicy({ enabled: true }),
+			hosts: readLocalBYOKPolicy({ enabled: true, allowedHosts: [' VLLM.Corp.Internal ', '', '*.lab.internal'] }),
+		}).toEqual({
+			missing: { enabled: false, allowedHosts: [] },
+			disabled: { enabled: false, allowedHosts: [] },
+			noHosts: { enabled: true, allowedHosts: ['*'] },
+			hosts: { enabled: true, allowedHosts: ['vllm.corp.internal', '*.lab.internal'] },
+		});
+	});
+
+	it('matches URLs against the allowed hosts', () => {
+		const policy = readLocalBYOKPolicy({ enabled: true, allowedHosts: ['vllm.corp.internal', '*.lab.internal'] });
+		expect([
+			'http://vllm.corp.internal:8000/v1',
+			'https://gpu1.lab.internal/v1',
+			'https://api.openai.com/v1',
+			'https://evil.corp.internal.example.com/v1',
+			'not a url',
+		].map(url => isUrlAllowedByLocalBYOKPolicy(url, policy))).toEqual([true, true, false, false, false]);
+	});
+
+	it('allows every URL when the policy is disabled or uses the * wildcard', () => {
+		expect([
+			isUrlAllowedByLocalBYOKPolicy('https://api.openai.com/v1', disabledLocalBYOKPolicy),
+			isUrlAllowedByLocalBYOKPolicy('https://api.openai.com/v1', readLocalBYOKPolicy({ enabled: true, allowedHosts: ['*'] })),
+		]).toEqual([true, true]);
 	});
 });
